@@ -45,3 +45,6 @@ next-env.d.ts
 # Cloudflare local secrets
 .dev.vars
 .dev.vars.*
+
+# agent tooling (worktrees, preview launch config)
+/.claude/

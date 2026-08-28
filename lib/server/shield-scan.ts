@@ -35,14 +35,14 @@ export type ScanRecord = {
   createdAt: number;
 };
 
-async function collectSnapshot(workspaceId: string): Promise<ShieldSnapshot> {
+async function collectSnapshot(workspaceId: string, userId: string): Promise<ShieldSnapshot> {
   const workspace = await getWorkspace(workspaceId);
   const now = Date.now();
 
   const [secrets, tables, billableResources, users, unverified, sessions, expiredSessions, publicProjects] =
     await Promise.all([
       secretsForShield(workspaceId),
-      listTables(),
+      listTables({ workspaceId, userId }),
       countBillableResources(workspaceId),
       count('SELECT COUNT(*) AS total FROM "user"'),
       count('SELECT COUNT(*) AS total FROM "user" WHERE emailVerified = 0'),
@@ -159,9 +159,13 @@ async function reconcileFindings(
 
 export type ScanOutcome = ShieldReport & { scan: ScanRecord };
 
-export async function runScan(workspaceId: string, actor: string): Promise<ScanOutcome> {
+export async function runScan(
+  workspaceId: string,
+  userId: string,
+  actor: string,
+): Promise<ScanOutcome> {
   const startedAt = Date.now();
-  const snapshot = await collectSnapshot(workspaceId);
+  const snapshot = await collectSnapshot(workspaceId, userId);
   const report = runShieldRules(snapshot);
   const now = Date.now();
 

@@ -1,4 +1,5 @@
 import { writeLog } from '@/lib/server/logs';
+import { isInstanceOwner } from '@/lib/server/owner';
 import { requireApiSession } from '@/lib/server/session';
 import { runEditorQuery } from '@/lib/server/studio';
 
@@ -7,10 +8,34 @@ import { runEditorQuery } from '@/lib/server/studio';
  *
  * A blocked statement is answered with 422 and the reason the guard gave, so
  * the editor can explain the refusal instead of showing a generic failure.
+ *
+ * Unlike Database Studio, results here cannot be limited to one workspace: an
+ * arbitrary statement would have to be rewritten to carry a tenant predicate,
+ * which needs a real SQL planner. Every workspace shares one D1 database, so
+ * until that exists the editor stays closed to everyone but the instance
+ * owner.
  */
 export async function POST(request: Request): Promise<Response> {
   const auth = await requireApiSession(request);
   if (!auth.ok) return auth.response;
+
+  const { user, workspace } = auth.session;
+  if (!(await isInstanceOwner(user.id, user.email))) {
+    await writeLog({
+      workspaceId: workspace.id,
+      level: 'WARN',
+      source: 'database',
+      message: 'SQL Editor refused: not the instance owner',
+      actor: user.email,
+    });
+    return Response.json(
+      {
+        error:
+          'The SQL Editor is limited to the instance owner, because a raw statement cannot be scoped to one workspace. Use Database Studio, which shows your own rows.',
+      },
+      { status: 403 },
+    );
+  }
 
   let body: { sql?: unknown; allowWrite?: unknown; limit?: unknown };
   try {
@@ -35,21 +60,21 @@ export async function POST(request: Request): Promise<Response> {
 
     if (!result.analysis.allowed) {
       await writeLog({
-        workspaceId: auth.session.workspace.id,
+        workspaceId: workspace.id,
         level: 'WARN',
         source: 'database',
         message: `Statement blocked · ${result.analysis.reason}`,
-        actor: auth.session.user.email,
+        actor: user.email,
       });
       return Response.json(result, { status: 422 });
     }
 
     if (result.analysis.kind === 'write') {
       await writeLog({
-        workspaceId: auth.session.workspace.id,
+        workspaceId: workspace.id,
         source: 'database',
         message: `${result.analysis.verb} affected ${result.rowsWritten} row${result.rowsWritten === 1 ? '' : 's'}`,
-        actor: auth.session.user.email,
+        actor: user.email,
         resource: result.analysis.referencedTables.join(', ') || null,
       });
     }

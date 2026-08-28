@@ -4,6 +4,8 @@ YSD Zero Cloud is a zero-cost-first cloud operating system. Version `0.2.0` repl
 foundation with a real one: authentication, persistence, security scanning, and the cost guard all
 run against a live Cloudflare D1 database.
 
+**Live:** <https://ysd-zero-cloud.ysd-zero-cloud.workers.dev>
+
 This is a standalone project intended only for `OpenYsd/ysd-zero-cloud`. It has no dependency on,
 and makes no changes to, `OpenYsd/ysd-ai`.
 
@@ -19,7 +21,7 @@ Every figure on these surfaces is read from your own D1 database at request time
 | Deployments | Smart Deploy plans recorded in `deployment`, accepted and blocked alike |
 | Databases | Live schema introspection of the D1 database |
 | Database Studio | Real rows, paginated and filtered, with credential columns redacted |
-| SQL Editor | Real statements, classified by the SQL guard before they reach the driver |
+| SQL Editor | Real statements, classified by the SQL guard; limited to the instance owner |
 | Logs | The `log_event` audit trail every mutating action writes to |
 | Secrets | AES-GCM sealed values in `secret`, write-only by design |
 | Usage | Counts measured from D1 against the free-tier catalog |
@@ -42,6 +44,22 @@ are still recorded: a refusal is the more interesting half of an audit trail.
 
 The project has no billing relationship with any provider. `lib/zero-mode.ts` holds the catalog of
 resources the planner may reach for, and each entry states why it is free.
+
+## Tenancy
+
+One D1 database backs every workspace, so who can see which rows is a design decision rather than a
+side effect:
+
+- **Every API is workspace-scoped.** A route reads the caller's workspace id from their session and
+  filters on it; nothing accepts a workspace id from the client.
+- **Database Studio is row-scoped.** `lib/tenancy.ts` derives a predicate per table — `workspaceId`
+  for product tables, the caller's own id for `workspace` and `user`, `userId` for auth records. A
+  table nobody has classified returns a predicate that matches nothing, so adding a table without
+  thinking about tenancy makes it invisible rather than public.
+- **The SQL Editor is limited to the instance owner.** An arbitrary statement cannot be rewritten to
+  carry a tenant predicate without a real SQL planner, so rather than leak every workspace through
+  it, the editor answers 403 for everyone else and points them at Studio. The owner is
+  `YSD_OWNER_EMAIL`, or the first registered account when that is unset.
 
 ## Security
 
@@ -87,7 +105,8 @@ npm run build
 
 ## Deployment
 
-Everything below is on Cloudflare's free plan.
+Everything below is on Cloudflare's free plan. There is no billing relationship, no paid binding,
+and nothing that can be upgraded into one.
 
 ```bash
 wrangler d1 create ysd-zero-cloud
@@ -104,8 +123,11 @@ npm run db:migrate
 ```
 
 ```bash
-npm run build
+npm run predeploy && npm run deploy
 ```
+
+`predeploy` builds and then normalises the generated `dist/server/wrangler.json`: the Vite plugin
+emits it with the wrangler version it bundles, which still writes fields a newer CLI refuses.
 
 `BETTER_AUTH_SECRET` is required outside development. The app falls back to a published development
 constant locally and refuses to start on that constant anywhere else.
@@ -127,6 +149,20 @@ development; every other entry unlocks an optional integration and is reported a
 Without a `GITHUB_TOKEN`, Smart Deploy still inspects public repositories anonymously and marks the
 plan `inspected`; when it cannot read the repository it falls back to name-based inference and says
 so rather than presenting a guess as a fact.
+
+## Acceptance run
+
+`public-acceptance.py` drives the deployed URL the way a browser would — real sign-up, real session
+cookies, real D1 writes — and asserts on auth gating, workspace isolation, the SQL guard, Zero Mode
+enforcement, and every page.
+
+```bash
+python public-acceptance.py
+```
+
+Point it elsewhere with `YSD_ACCEPTANCE_BASE`. Set `YSD_ACCEPTANCE_OWNER_EMAIL` and
+`YSD_ACCEPTANCE_OWNER_PASSWORD` to also exercise the owner-only SQL Editor path; without them the
+run still asserts that a non-owner is refused, which is the half that matters for security.
 
 ## Database
 
@@ -156,6 +192,7 @@ lib/
   zero-mode.ts           Cost policy and the free-tier resource catalog
   free-tier.ts           Allowances and usage arithmetic
   sql-guard.ts           SQL Editor statement classification
+  tenancy.ts             Row-level scoping for the surfaces that read D1 directly
   shield.ts              Security rules and scoring, as pure functions
   crypto.ts              AES-GCM envelope encryption for secrets
   server/                D1 access, auth, and the per-surface data modules

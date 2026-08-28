@@ -53,10 +53,13 @@ export function DatabaseWorkspace({
   mode,
   tables,
   initialTable,
+  canUseSqlEditor,
 }: {
   mode: 'studio' | 'sql-editor';
   tables: TableSummary[];
   initialTable: string | null;
+  /** False for anyone but the instance owner; see the query route for why. */
+  canUseSqlEditor: boolean;
 }) {
   const [activeTable, setActiveTable] = useState(initialTable);
 
@@ -127,8 +130,29 @@ export function DatabaseWorkspace({
 
         {mode === 'studio' ? (
           <StudioGrid key={activeTable} table={activeTable} />
-        ) : (
+        ) : canUseSqlEditor ? (
           <SqlEditor />
+        ) : (
+          <div className="grid place-items-center p-10 text-center">
+            <div className="max-w-sm">
+              <span className="mx-auto grid size-10 place-items-center rounded-full border border-white/[0.08] bg-white/[0.025] text-white/35">
+                <ShieldCheck className="size-4" />
+              </span>
+              <p className="mt-4 text-xs font-semibold text-white/60">
+                The SQL Editor is limited to the instance owner
+              </p>
+              <p className="mt-2 text-[11px] leading-5 text-white/30">
+                Every workspace shares one database, and a raw statement cannot be scoped to yours.
+                Database Studio shows the same tables limited to your own rows.
+              </p>
+              <Link
+                href="/databases/studio"
+                className="mt-4 inline-block rounded-md bg-[#b7ff3c] px-3 py-1.5 text-[11px] font-semibold text-[#07100c]"
+              >
+                Open Database Studio
+              </Link>
+            </div>
+          </div>
         )}
       </div>
     </div>

@@ -37,7 +37,11 @@ function createAuth(): Auth {
     buildAuthOptions({
       database: getDatabase(),
       secret: authSecret(),
-      baseURL: env.BETTER_AUTH_URL?.trim() || undefined,
+      // Only honoured outside development: `wrangler.jsonc` carries the
+      // deployed origin, and the Vite plugin merges that file into the local
+      // dev config too, which would otherwise point a dev session at
+      // production for callbacks and redirects.
+      baseURL: isDevelopment() ? undefined : env.BETTER_AUTH_URL?.trim() || undefined,
       github,
     }),
   );

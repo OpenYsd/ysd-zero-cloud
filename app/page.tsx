@@ -7,12 +7,12 @@ import { readShieldState } from '@/lib/server/shield-scan';
 import { summarizeUsage } from '@/lib/server/usage';
 
 export default async function HomePage() {
-  const { workspace } = await requireSession();
+  const { user, workspace } = await requireSession();
 
   const [projects, deploymentCount, usage, shield, now] = await Promise.all([
     listProjects(workspace.id),
     countDeployments(workspace.id),
-    summarizeUsage(workspace.id),
+    summarizeUsage(workspace.id, user.id),
     readShieldState(workspace.id),
     requestTime(),
   ]);

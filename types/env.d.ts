@@ -17,6 +17,8 @@ declare namespace Cloudflare {
     BETTER_AUTH_URL?: string;
     /** Master key for secret envelope encryption. Falls back to BETTER_AUTH_SECRET. */
     YSD_SECRETS_KEY?: string;
+    /** Operator allowed to use the SQL Editor. Defaults to the first account. */
+    YSD_OWNER_EMAIL?: string;
 
     /** GitHub OAuth sign-in. Both must be set for the provider to appear. */
     GITHUB_CLIENT_ID?: string;

@@ -1,16 +1,18 @@
 import type { ColumnInfo, TablePage, TableSummary } from '@/lib/domain';
 import { analyzeStatement, withRowLimit, type SqlAnalysis } from '@/lib/sql-guard';
+import { scopeForTable, type TenantScope } from '@/lib/tenancy';
 import { d1DatabaseSize } from './cloudflare';
 import { AUTH_TABLES, db, query, WORKSPACE_TABLES } from './db';
 
 /**
  * Database Studio and the SQL Editor read the live D1 database.
  *
- * Two rules hold everywhere in this module: a table name is only ever
- * interpolated after being matched against the real schema, and columns that
- * hold credential material are replaced with a mask before a row leaves the
- * server. The mask is applied here rather than in the UI so an API client sees
- * the same redaction the browser does.
+ * Three rules hold everywhere in this module. A table name is only ever
+ * interpolated after being matched against the real schema. Columns that hold
+ * credential material are replaced with a mask before a row leaves the server,
+ * so an API client sees the same redaction the browser does. And every read is
+ * limited to the caller's own rows: one D1 database backs every workspace, so
+ * an unscoped read would return every tenant's data.
  */
 
 export const MAX_ROWS = 200;
@@ -68,14 +70,26 @@ async function columnsOf(table: string): Promise<ColumnInfo[]> {
   }));
 }
 
-async function rowCount(table: string): Promise<number> {
+async function rowCount(
+  table: string,
+  columns: ColumnInfo[],
+  scope: TenantScope,
+): Promise<number> {
+  const predicate = scopeForTable(table, columns.map((column) => column.name), scope);
   const rows = await query<{ total: number }>(
-    `SELECT COUNT(*) AS total FROM "${table.replace(/"/g, '""')}"`,
+    `SELECT COUNT(*) AS total FROM "${table.replace(/"/g, '""')}" WHERE ${predicate.sql}`,
+    ...predicate.params,
   );
   return rows[0]?.total ?? 0;
 }
 
-export async function listTables(): Promise<TableSummary[]> {
+/**
+ * Every table in the schema, with row counts limited to the caller.
+ *
+ * The counts are scoped too: a sidebar that showed a global total would leak
+ * how much data other tenants hold even though their rows stay hidden.
+ */
+export async function listTables(scope: TenantScope): Promise<TableSummary[]> {
   const names = await listTableNames();
   const summaries: TableSummary[] = [];
   for (const name of names) {
@@ -83,7 +97,7 @@ export async function listTables(): Promise<TableSummary[]> {
     summaries.push({
       name,
       kind: kindOf(name),
-      rows: await rowCount(name),
+      rows: await rowCount(name, columns, scope),
       columns: columns.length,
       hasPrimaryKey: columns.some((column) => column.primaryKey),
       masked: (MASKED_COLUMNS[name]?.length ?? 0) > 0,
@@ -114,6 +128,7 @@ export type ReadTableOptions = { limit?: number; offset?: number; filter?: strin
  */
 export async function readTable(
   table: string,
+  scope: TenantScope,
   options: ReadTableOptions = {},
 ): Promise<TablePage | null> {
   const names = await listTableNames();
@@ -124,18 +139,24 @@ export async function readTable(
   const limit = Math.min(MAX_ROWS, Math.max(1, options.limit ?? 50));
   const offset = Math.max(0, options.offset ?? 0);
 
+  // The tenant predicate is never optional and is ANDed ahead of the search
+  // box, so no filter string can widen what the caller can see.
+  const predicate = scopeForTable(table, columns.map((column) => column.name), scope);
+  const clauses = [predicate.sql];
+  const params: unknown[] = [...predicate.params];
+
   const filter = options.filter?.trim().toLowerCase();
-  let where = '';
-  const params: unknown[] = [];
   if (filter) {
     // Every column is compared as text so the filter behaves the same way the
     // Studio search box looks like it should.
-    const clauses = columns.map(
+    const search = columns.map(
       (column) => `LOWER(CAST(${quoteIdentifier(column.name)} AS TEXT)) LIKE ?`,
     );
-    where = `WHERE ${clauses.join(' OR ')}`;
+    clauses.push(`(${search.join(' OR ')})`);
     params.push(...columns.map(() => `%${filter}%`));
   }
+
+  const where = `WHERE ${clauses.join(' AND ')}`;
 
   const totalRows = await query<{ total: number }>(
     `SELECT COUNT(*) AS total FROM ${quoted} ${where}`,
@@ -168,6 +189,12 @@ function quoteIdentifier(name: string): string {
  * The guard decides what is allowed; this function only executes what the
  * guard approved, caps the result set, and redacts anything the statement
  * happened to select from a masked table.
+ *
+ * Note what this function does *not* do: it does not scope results to a
+ * workspace. An arbitrary statement cannot be rewritten to add a tenant
+ * predicate without a full SQL planner, so the route that calls this restricts
+ * the editor to the instance owner instead. Do not expose it more widely
+ * without solving that first.
  */
 export async function runEditorQuery(
   sql: string,

@@ -11,12 +11,17 @@ export async function GET(request: Request): Promise<Response> {
 
   const limit = Number(params.get('limit') ?? 50);
   const offset = Number(params.get('offset') ?? 0);
+  const { user, workspace } = auth.session;
 
-  const page = await readTable(table, {
-    limit: Number.isFinite(limit) ? limit : 50,
-    offset: Number.isFinite(offset) ? offset : 0,
-    filter: params.get('filter') ?? undefined,
-  });
+  const page = await readTable(
+    table,
+    { workspaceId: workspace.id, userId: user.id },
+    {
+      limit: Number.isFinite(limit) ? limit : 50,
+      offset: Number.isFinite(offset) ? offset : 0,
+      filter: params.get('filter') ?? undefined,
+    },
+  );
 
   if (!page) return Response.json({ error: `Unknown table: ${table}` }, { status: 404 });
   return Response.json(page);

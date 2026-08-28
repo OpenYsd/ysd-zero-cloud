@@ -81,7 +81,10 @@ async function SectionBody({
       );
 
     case 'databases': {
-      const [tables, bytes] = await Promise.all([listTables(), databaseBytes()]);
+      const [tables, bytes] = await Promise.all([
+        listTables({ workspaceId, userId: workspace.ownerUserId }),
+        databaseBytes(),
+      ]);
       const limit = FREE_TIER_LIMITS.find((entry) => entry.id === 'database-bytes')?.limit ?? 0;
       return <DatabasesOverview tables={tables} bytes={bytes} limitBytes={limit} />;
     }
@@ -93,7 +96,7 @@ async function SectionBody({
       return <SecretsView secrets={await listSecrets(workspaceId)} now={now} />;
 
     case 'usage': {
-      const usage = await summarizeUsage(workspaceId);
+      const usage = await summarizeUsage(workspaceId, workspace.ownerUserId);
       return (
         <UsageView
           readings={usage.readings}

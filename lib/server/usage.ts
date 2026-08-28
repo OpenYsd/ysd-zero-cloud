@@ -24,8 +24,11 @@ export type UsageSummary = {
   measuredAt: number;
 };
 
-export async function summarizeUsage(workspaceId: string): Promise<UsageSummary> {
-  const tables = await listTables();
+export async function summarizeUsage(
+  workspaceId: string,
+  userId: string,
+): Promise<UsageSummary> {
+  const tables = await listTables({ workspaceId, userId });
 
   const [projects, deployments, secrets, logEvents, bytes] = await Promise.all([
     countProjects(workspaceId),

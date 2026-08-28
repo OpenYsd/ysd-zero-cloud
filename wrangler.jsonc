@@ -22,12 +22,22 @@
   "observability": {
     "enabled": true
   },
+  "vars": {
+    // The deployed origin. Better Auth otherwise derives it from each request
+    // and warns that callbacks and redirects may be wrong. This is a public
+    // URL, not a credential. Local development ignores it — see
+    // `lib/server/auth.ts` — so the production origin cannot leak into a dev
+    // session through this file.
+    "BETTER_AUTH_URL": "https://ysd-zero-cloud.ysd-zero-cloud.workers.dev"
+  },
   "d1_databases": [
     {
       "binding": "DB",
       "database_name": "ysd-zero-cloud",
-      // Replace with the id from `wrangler d1 create ysd-zero-cloud`.
-      "database_id": "00000000-0000-4000-8000-000000000000",
+      // From `wrangler d1 create ysd-zero-cloud`. A D1 database id is an
+      // account-scoped identifier, not a credential: reaching it still
+      // requires Cloudflare account access.
+      "database_id": "4175f8f4-34ff-4234-bbf4-72cc2602c520",
       "migrations_dir": "db/migrations"
     }
   ]
