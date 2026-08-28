@@ -17,6 +17,21 @@ const PROTECTED: ShieldSnapshot['protections'] = {
   admins: 0,
   suspended: 0,
   unverifiedPrivileged: 0,
+  securityHeaders: {
+    present: [
+      'content-security-policy',
+      'strict-transport-security',
+      'x-content-type-options',
+      'x-frame-options',
+      'referrer-policy',
+    ],
+    missing: [],
+    observed: true,
+  },
+  orphanRoles: 0,
+  suspendedPrivileged: 0,
+  unscopedTables: [],
+  sqlEditorRestricted: true,
 };
 
 function snapshot(overrides: Partial<ShieldSnapshot> = {}): ShieldSnapshot {
@@ -281,4 +296,81 @@ void test('lockouts escalate when many networks are involved', () => {
 void test('a fully protected instance passes the hardening check', () => {
   const report = runShieldRules(snapshot());
   assert.equal(report.checks.find((c) => c.id === 'hardening')?.state, 'passed');
+});
+
+void test('missing security headers are reported, and CSP weighs heavier', () => {
+  const cspGone = runShieldRules(
+    snapshot({
+      protections: {
+        ...PROTECTED,
+        securityHeaders: { present: [], missing: ['content-security-policy'], observed: true },
+      },
+    }),
+  );
+  assert.equal(
+    cspGone.findings.find((f) => f.code === 'security-headers-missing')?.severity,
+    'medium',
+  );
+
+  const minorGone = runShieldRules(
+    snapshot({
+      protections: {
+        ...PROTECTED,
+        securityHeaders: { present: [], missing: ['referrer-policy'], observed: true },
+      },
+    }),
+  );
+  assert.equal(
+    minorGone.findings.find((f) => f.code === 'security-headers-missing')?.severity,
+    'low',
+  );
+});
+
+void test('an unrestricted SQL Editor is the most severe finding available', () => {
+  const report = runShieldRules(
+    snapshot({ protections: { ...PROTECTED, sqlEditorRestricted: false } }),
+  );
+  const finding = report.findings.find((f) => f.code === 'sql-editor-unrestricted');
+  assert.ok(finding);
+  assert.equal(finding.severity, 'critical');
+});
+
+void test('orphaned role rows and suspended privileged accounts are flagged', () => {
+  const report = runShieldRules(
+    snapshot({ protections: { ...PROTECTED, orphanRoles: 2, suspendedPrivileged: 1 } }),
+  );
+  const codes = report.findings.map((f) => f.code);
+  assert.ok(codes.includes('orphan-role-rows'));
+  assert.ok(codes.includes('suspended-privileged-accounts'));
+});
+
+void test('a table the scoping rules do not classify is reported', () => {
+  const report = runShieldRules(
+    snapshot({ protections: { ...PROTECTED, unscopedTables: ['audit_trail'] } }),
+  );
+  const finding = report.findings.find((f) => f.code === 'unscoped-tables');
+  assert.ok(finding);
+  assert.match(finding.detail, /audit_trail/);
+});
+
+void test('a fully hardened instance still scores 100', () => {
+  // The score must only reach 100 when every check genuinely passes, so this
+  // guards against a future check that can never be satisfied.
+  const report = runShieldRules(snapshot());
+  assert.equal(report.score, 100);
+  assert.deepEqual(report.findings, []);
+});
+
+void test('an unobservable header probe is not reported as a failure', () => {
+  // A Worker cannot reliably fetch its own origin, so "could not observe" must
+  // never be presented as "the headers are absent".
+  const report = runShieldRules(
+    snapshot({
+      protections: {
+        ...PROTECTED,
+        securityHeaders: { present: [], missing: [], observed: false },
+      },
+    }),
+  );
+  assert.ok(!report.findings.some((f) => f.code === 'security-headers-missing'));
 });

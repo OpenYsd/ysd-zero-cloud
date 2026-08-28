@@ -89,6 +89,22 @@ async function rowCount(
  * The counts are scoped too: a sidebar that showed a global total would leak
  * how much data other tenants hold even though their rows stay hidden.
  */
+/**
+ * Column names per table.
+ *
+ * Used by the security scan to check that every table holding tenant data is
+ * actually classified by the scoping rules, rather than silently falling
+ * through to the deny-all default.
+ */
+export async function listTableColumns(): Promise<Record<string, string[]>> {
+  const names = await listTableNames();
+  const out: Record<string, string[]> = {};
+  for (const name of names) {
+    out[name] = (await columnsOf(name)).map((column) => column.name);
+  }
+  return out;
+}
+
 export async function listTables(scope: TenantScope): Promise<TableSummary[]> {
   const names = await listTableNames();
   const summaries: TableSummary[] = [];

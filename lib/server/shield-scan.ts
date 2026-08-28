@@ -10,6 +10,10 @@ import { pruneRateLimits } from './rate-limit';
 import { countByRole, countOwners, countSuspended } from './roles';
 import { countFailingNetworks, countRecentBlocks, pruneAttempts } from './security';
 import { turnstileConfigured } from './turnstile';
+import { can } from '@/lib/roles';
+import { configuredSecurityHeaders } from '@/lib/security-headers';
+import { DENY_ALL, isSchemaOnlyTable, scopeForTable } from '@/lib/tenancy';
+import { listTableColumns } from './studio';
 import { writeLog } from './logs';
 import { secretsForShield } from './secrets';
 import { listTables } from './studio';
@@ -60,6 +64,9 @@ async function collectSnapshot(workspaceId: string, userId: string): Promise<Shi
     unverifiedPrivileged,
     recentBlocks,
     failingNetworks,
+    orphanRoles,
+    suspendedPrivileged,
+    columnsByTable,
   ] = await Promise.all([
       secretsForShield(workspaceId),
       listTables({ workspaceId, userId }),
@@ -82,6 +89,16 @@ async function collectSnapshot(workspaceId: string, userId: string): Promise<Shi
       ),
       countRecentBlocks(),
       countFailingNetworks(),
+      count(
+        `SELECT COUNT(*) AS total FROM user_role r
+         LEFT JOIN "user" u ON u.id = r.userId
+         WHERE u.id IS NULL`,
+      ),
+      count(
+        `SELECT COUNT(*) AS total FROM user_role
+         WHERE role IN ('owner','admin') AND suspendedAt IS NOT NULL`,
+      ),
+      listTableColumns(),
     ]);
 
   return {
@@ -99,6 +116,31 @@ async function collectSnapshot(workspaceId: string, userId: string): Promise<Shi
       admins,
       suspended,
       unverifiedPrivileged,
+      // Read from the module that produces the headers rather than from a
+      // request: a Worker fetching its own origin is not routed back through
+      // middleware and cannot observe them. Delivery is proven from outside by
+      // security-acceptance.py.
+      securityHeaders: { ...configuredSecurityHeaders(), observed: true },
+      orphanRoles,
+      suspendedPrivileged,
+      // Any table holding rows that the scoping rules do not classify would be
+      // hidden in Studio rather than scoped, which is worth surfacing.
+      unscopedTables: tables
+        .filter((table) => !isSchemaOnlyTable(table.name) && table.rows > 0)
+        .filter(
+          (table) =>
+            scopeForTable(table.name, columnsByTable[table.name] ?? [], {
+              workspaceId: 'probe',
+              userId: 'probe',
+            }).sql === DENY_ALL.sql,
+        )
+        .map((table) => table.name),
+      // A live assertion that an admin still cannot reach the SQL Editor, so
+      // removing that gate shows up here as a critical finding.
+      sqlEditorRestricted: !can(
+        { userId: 'probe', role: 'admin', suspended: false },
+        'sql-editor.run',
+      ),
     },
     billableResources,
     secrets,

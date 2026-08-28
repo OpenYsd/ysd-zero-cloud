@@ -143,6 +143,44 @@ export async function noteSignIn(input: {
   }
 }
 
+/**
+ * Records an auth-lifecycle event against the account's own workspace.
+ *
+ * Events are written where the operator will look for them — their own Logs
+ * surface — rather than into a global stream only an admin could read. When
+ * the address matches no account there is no workspace to write to, and
+ * nothing is recorded rather than leaking that the address is unknown.
+ */
+export async function auditAuthEvent(input: {
+  email: string;
+  ip: string;
+  message: string;
+  level?: 'INFO' | 'WARN';
+}): Promise<void> {
+  try {
+    const row = await query<{ id: string }>(
+      `SELECT w.id FROM workspace w
+       JOIN "user" u ON u.id = w.ownerUserId
+       WHERE LOWER(u.email) = ?
+       LIMIT 1`,
+      input.email.trim().toLowerCase(),
+    );
+    const workspaceId = row[0]?.id;
+    if (!workspaceId) return;
+
+    await writeLog({
+      workspaceId,
+      level: input.level ?? 'INFO',
+      source: 'auth',
+      message: input.message,
+      actor: input.email,
+      resource: input.ip || null,
+    });
+  } catch {
+    // Auditing must never fail the request it describes.
+  }
+}
+
 /** Counts recent lockouts, for the security scan. */
 export async function countRecentBlocks(windowMs = 24 * 60 * 60 * 1000): Promise<number> {
   try {

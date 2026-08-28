@@ -21,12 +21,13 @@ import {
   Rocket,
   Settings,
   ShieldCheck,
+  ShieldOff,
   TerminalSquare,
   UserCog,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Switch } from '@/components/ui/switch';
-import { signOut } from '@/lib/auth-client';
+import { authClient, signOut } from '@/lib/auth-client';
 import { isLiveSection, isSection } from '@/lib/domain';
 import type { Role } from '@/lib/roles';
 import { cn } from '@/lib/utils';
@@ -242,6 +243,20 @@ function UserMenu({ user }: { user: ShellUser }) {
     }
   }
 
+  /**
+   * Revokes every session this account holds, not just the one in this browser.
+   * The control an operator reaches for after losing a laptop.
+   */
+  async function handleSignOutEverywhere() {
+    setPending(true);
+    try {
+      await authClient.revokeSessions();
+      window.location.assign('/sign-in');
+    } finally {
+      setPending(false);
+    }
+  }
+
   return (
     <div className="flex items-center gap-2">
       <div className="flex items-center gap-2 rounded-lg border border-white/[0.07] bg-white/[0.025] px-2 py-1.5">
@@ -254,10 +269,21 @@ function UserMenu({ user }: { user: ShellUser }) {
         variant="ghost"
         size="icon"
         aria-label="Sign out"
+        title="Sign out of this browser"
         onClick={handleSignOut}
         disabled={pending}
       >
         {pending ? <Loader2 className="animate-spin" /> : <LogOut />}
+      </Button>
+      <Button
+        variant="ghost"
+        size="icon"
+        aria-label="Sign out everywhere"
+        title="Sign out of every device"
+        onClick={handleSignOutEverywhere}
+        disabled={pending}
+      >
+        <ShieldOff />
       </Button>
     </div>
   );

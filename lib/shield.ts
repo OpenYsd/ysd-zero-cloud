@@ -41,6 +41,22 @@ export type ProtectionSnapshot = {
   suspended: number;
   /** Accounts holding admin or owner without a verified address. */
   unverifiedPrivileged: number;
+  /**
+   * Security response headers.
+   *
+   * `observed` distinguishes "the origin answered and these were absent" from
+   * "the origin could not be reached", so an unreachable probe is reported as
+   * unverified rather than as a failure that is not real.
+   */
+  securityHeaders: { present: string[]; missing: string[]; observed: boolean };
+  /** Role rows whose account no longer exists. */
+  orphanRoles: number;
+  /** Owner or admin accounts that are currently suspended. */
+  suspendedPrivileged: number;
+  /** Tables holding tenant data that the scoping rules do not classify. */
+  unscopedTables: string[];
+  /** True while the SQL Editor is restricted to a single owner. */
+  sqlEditorRestricted: boolean;
 };
 
 export type ShieldSnapshot = {
@@ -316,6 +332,61 @@ function checkHardening(snapshot: ShieldSnapshot): { check: ShieldCheck; finding
       resource: 'identity',
       severity: p.failingNetworks >= 3 ? 'high' : 'low',
       remediation: 'Review the auth entries in Logs. The guard held, but repeated attempts are worth understanding.',
+    });
+  }
+
+  if (p.securityHeaders.observed && p.securityHeaders.missing.length > 0) {
+    findings.push({
+      code: 'security-headers-missing',
+      title: 'Security response headers are missing',
+      detail: `Not served: ${p.securityHeaders.missing.join(', ')}.`,
+      resource: 'edge',
+      severity: p.securityHeaders.missing.includes('content-security-policy') ? 'medium' : 'low',
+      remediation: 'Set them in middleware.ts so every response carries them.',
+    });
+  }
+
+  if (p.orphanRoles > 0) {
+    findings.push({
+      code: 'orphan-role-rows',
+      title: 'Role rows without an account',
+      detail: `${p.orphanRoles} role assignment${p.orphanRoles === 1 ? '' : 's'} point at an account that no longer exists.`,
+      resource: 'identity',
+      severity: 'medium',
+      remediation: 'Delete the orphaned rows; a recreated account could otherwise inherit a stale role.',
+    });
+  }
+
+  if (p.suspendedPrivileged > 0) {
+    findings.push({
+      code: 'suspended-privileged-accounts',
+      title: 'A privileged account is suspended',
+      detail: `${p.suspendedPrivileged} owner or admin account${p.suspendedPrivileged === 1 ? ' is' : 's are'} suspended and cannot act.`,
+      resource: 'identity',
+      severity: 'medium',
+      remediation: 'Restore the account, or move its role to someone who can use it.',
+    });
+  }
+
+  if (!p.sqlEditorRestricted) {
+    findings.push({
+      code: 'sql-editor-unrestricted',
+      title: 'The SQL Editor is not owner-restricted',
+      detail: 'A raw statement cannot be scoped to one workspace, so this would expose every tenant.',
+      resource: 'database',
+      severity: 'critical',
+      remediation: 'Restore the owner-only capability check on the query route.',
+    });
+  }
+
+  if (p.unscopedTables.length > 0) {
+    findings.push({
+      code: 'unscoped-tables',
+      title: 'Tables are not covered by the tenant scoping rules',
+      detail: `${p.unscopedTables.join(', ')} would be invisible in Studio because no scoping rule classifies them.`,
+      resource: 'database',
+      severity: 'low',
+      remediation: 'Add them to lib/tenancy.ts so their rows are scoped rather than hidden.',
     });
   }
 

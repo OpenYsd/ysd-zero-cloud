@@ -44,6 +44,19 @@ export function emailVerificationRequired(): boolean {
   return flag !== 'false' && flag !== '0';
 }
 
+/**
+ * Origins permitted to drive the auth endpoints.
+ *
+ * Better Auth refuses a cross-site request whose Origin is not on this list,
+ * which is what stops a hostile page from POSTing to sign-in with a victim's
+ * cookies. The deployed origin is the only entry outside development.
+ */
+export function trustedOrigins(): string[] {
+  const configured = runtimeEnv.BETTER_AUTH_URL?.trim();
+  if (configured) return [configured.replace(/\/+$/, '')];
+  return isDevelopment() ? ['http://localhost:3000'] : [];
+}
+
 function createAuth(): Auth {
   const github = hasGithubOAuth(runtimeEnv)
     ? { clientId: env.GITHUB_CLIENT_ID!, clientSecret: env.GITHUB_CLIENT_SECRET! }
@@ -62,6 +75,10 @@ function createAuth(): Auth {
       baseURL: isDevelopment() ? undefined : env.BETTER_AUTH_URL?.trim() || undefined,
       github,
       requireEmailVerification: emailVerificationRequired(),
+      // Local development runs over plain HTTP, where a Secure cookie is
+      // dropped by the browser and nobody could sign in.
+      secureCookies: !isDevelopment(),
+      trustedOrigins: trustedOrigins(),
       ...(mailConfigured
         ? {
             sendVerificationEmail: async ({ user, url }) => {

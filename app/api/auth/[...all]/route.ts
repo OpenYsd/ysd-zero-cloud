@@ -1,6 +1,6 @@
-import { getAuth } from '@/lib/server/auth';
+import { getAuth, trustedOrigins } from '@/lib/server/auth';
 import { clientAddress, enforceRateLimit } from '@/lib/server/rate-limit';
-import { checkLockout, noteSignIn } from '@/lib/server/security';
+import { auditAuthEvent, checkLockout, noteSignIn } from '@/lib/server/security';
 import { verifyTurnstile } from '@/lib/server/turnstile';
 import { ensureWorkspace } from '@/lib/server/workspace';
 import type { RateLimitName } from '@/lib/rate-limit';
@@ -26,6 +26,9 @@ const GUARDED: Record<string, { rule: RateLimitName; challenge: boolean; lockout
   'sign-up/email': { rule: 'auth:sign-up', challenge: true, lockout: false },
   'forget-password': { rule: 'auth:reset', challenge: true, lockout: false },
   'reset-password': { rule: 'auth:reset', challenge: false, lockout: false },
+  // Re-sending a verification link is a mail-spend and a user-enumeration
+  // probe, so it is budgeted like a reset rather than left open.
+  'send-verification-email': { rule: 'auth:verify', challenge: false, lockout: false },
 };
 
 function guardFor(pathname: string) {
@@ -50,6 +53,28 @@ async function readBody(request: Request): Promise<{ body: Record<string, unknow
   return { body, next: new Request(request.url, { method: request.method, headers: request.headers, body: raw }) };
 }
 
+/**
+ * Requires a state-changing request to carry an Origin this deployment trusts.
+ *
+ * @returns ok when the header is present and trusted, or when no trusted
+ * origin is configured at all (local development, where the deployed origin is
+ * unknown and enforcing would block every request).
+ */
+function verifyRequestOrigin(request: Request): { ok: boolean; message: string } {
+  const trusted = trustedOrigins();
+  if (trusted.length === 0) return { ok: true, message: '' };
+
+  const origin = request.headers.get('Origin');
+  if (!origin) {
+    return { ok: false, message: 'This request must be made from the application.' };
+  }
+  const normalized = origin.replace(/\/+$/, '');
+  if (!trusted.includes(normalized)) {
+    return { ok: false, message: 'This request came from an untrusted origin.' };
+  }
+  return { ok: true, message: '' };
+}
+
 /** Copies advisory headers onto a response without disturbing its own. */
 function mergeHeaders(base: Headers, extra: HeadersInit): Headers {
   const headers = new Headers(base);
@@ -63,6 +88,19 @@ async function handler(request: Request): Promise<Response> {
 
   if (request.method !== 'POST' || !guard) {
     return auth.handler(request);
+  }
+
+  // Cheapest check first, and free: a state-changing auth POST must declare an
+  // origin this deployment trusts. Better Auth rejects a *foreign* origin on
+  // its own, but once `trustedOrigins` is set it will process a request that
+  // omits the header entirely. A browser always sends Origin on a cross-site
+  // POST, so requiring it costs a real user nothing and removes the ambiguity.
+  const originVerdict = verifyRequestOrigin(request);
+  if (!originVerdict.ok) {
+    return Response.json(
+      { message: originVerdict.message, code: 'INVALID_ORIGIN' },
+      { status: 403 },
+    );
   }
 
   const ip = clientAddress(request);
@@ -88,6 +126,12 @@ async function handler(request: Request): Promise<Response> {
   if (guard.lockout && email) {
     const lockout = await checkLockout(email, ip);
     if (lockout.locked) {
+      await auditAuthEvent({
+        email,
+        ip,
+        level: 'WARN',
+        message: `Sign-in refused: account locked by the ${lockout.scope} rule after ${lockout.failures} failures`,
+      });
       const headers = new Headers(limited.headers);
       headers.set('Retry-After', String(lockout.retryAfterSeconds));
       return Response.json(
@@ -128,6 +172,30 @@ async function handler(request: Request): Promise<Response> {
       }
     }
     await noteSignIn({ email, ip, userAgent, success: response.ok, workspaceId });
+  }
+
+  if (path === 'forget-password' && email) {
+    // Recorded whatever the outcome: Better Auth answers the same way for a
+    // known and an unknown address so it cannot be used to enumerate accounts,
+    // and the audit line is the only place the attempt is visible.
+    await auditAuthEvent({
+      email,
+      ip,
+      level: 'WARN',
+      message: 'Password reset requested',
+    });
+  }
+
+  if (path === 'send-verification-email' && email) {
+    await auditAuthEvent({ email, ip, message: 'Verification email requested' });
+  }
+
+  if (path === 'verify-email' && response.ok) {
+    await auditAuthEvent({
+      email: new URL(request.url).searchParams.get('email') ?? 'unknown',
+      ip,
+      message: 'Email address verified',
+    });
   }
 
   return response;

@@ -13,6 +13,7 @@ import json
 import os
 import secrets
 import sys
+import time
 import urllib.error
 import urllib.request
 
@@ -48,26 +49,37 @@ class Client:
             NoRedirect(),
         )
 
-    def request(self, method: str, path: str, body=None):
+    def request(self, method: str, path: str, body=None, attempts: int = 3):
         data = json.dumps(body).encode() if body is not None else None
-        request = urllib.request.Request(
-            f"{BASE}{path}",
-            data=data,
-            method=method,
-            headers={
-                "Content-Type": "application/json",
-                "Origin": BASE,
-                "Referer": f"{BASE}/",
-                "User-Agent": "ysd-acceptance/1.0",
-            },
-        )
-        try:
-            with self.opener.open(request, timeout=90) as response:
-                raw = response.read()
-                status = response.status
-        except urllib.error.HTTPError as error:
-            raw = error.read()
-            status = error.code
+        last: Exception | None = None
+        # A read timeout against the edge is transient and would otherwise abort
+        # the whole run; an HTTP status is a real answer and is never retried.
+        for _ in range(attempts):
+            request = urllib.request.Request(
+                f"{BASE}{path}",
+                data=data,
+                method=method,
+                headers={
+                    "Content-Type": "application/json",
+                    "Origin": BASE,
+                    "Referer": f"{BASE}/",
+                    "User-Agent": "ysd-acceptance/1.0",
+                },
+            )
+            try:
+                with self.opener.open(request, timeout=60) as response:
+                    raw = response.read()
+                    status = response.status
+                break
+            except urllib.error.HTTPError as error:
+                raw = error.read()
+                status = error.code
+                break
+            except (TimeoutError, OSError) as error:
+                last = error
+                time.sleep(2)
+        else:
+            raise RuntimeError(f"{method} {path} failed after {attempts} attempts: {last}")
         try:
             return status, json.loads(raw) if raw else None
         except json.JSONDecodeError:

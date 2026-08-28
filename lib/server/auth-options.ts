@@ -32,6 +32,13 @@ export type AuthConfig = {
    * of their own instance. `lib/server/email.ts` decides.
    */
   requireEmailVerification?: boolean;
+  /**
+   * Origins allowed to drive the auth endpoints. Anything else is refused by
+   * the CSRF check, so this is the list that matters for cross-site requests.
+   */
+  trustedOrigins?: string[];
+  /** False only for local HTTP development, where a Secure cookie never returns. */
+  secureCookies?: boolean;
   /** Sends the verification mail. Absent when no provider is configured. */
   sendVerificationEmail?: (input: {
     user: { email: string; name: string };
@@ -97,7 +104,26 @@ export function buildAuthOptions(config: AuthConfig): BetterAuthOptions {
       max: 60,
     },
 
+    ...(config.trustedOrigins?.length ? { trustedOrigins: config.trustedOrigins } : {}),
+
     advanced: {
+      /**
+       * Session cookies.
+       *
+       * `httpOnly` keeps the token away from any script on the page, so an XSS
+       * bug cannot read a session out of `document.cookie`. `sameSite: lax`
+       * stops the cookie riding along on a cross-site POST, which is the CSRF
+       * case that matters here. `secure` is on everywhere except local HTTP,
+       * where the browser would simply drop the cookie and nobody could sign in.
+       */
+      useSecureCookies: config.secureCookies ?? true,
+      defaultCookieAttributes: {
+        httpOnly: true,
+        sameSite: 'lax',
+        secure: config.secureCookies ?? true,
+        path: '/',
+      },
+
       /**
        * Which header carries the caller's address.
        *

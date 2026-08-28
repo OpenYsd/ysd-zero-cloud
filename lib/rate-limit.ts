@@ -48,6 +48,8 @@ export const RATE_LIMIT_RULES = {
   'auth:sign-in': { limit: 10, windowMs: 10 * MINUTE },
   'auth:sign-up': { limit: 5, windowMs: 60 * MINUTE },
   'auth:reset': { limit: 5, windowMs: 60 * MINUTE },
+  /** Verification re-sends: each one costs a mail and probes for an account. */
+  'auth:verify': { limit: 5, windowMs: 60 * MINUTE },
   /** Everything else an anonymous caller can reach. */
   'api:anonymous': { limit: 60, windowMs: MINUTE },
   /** Authenticated writes, per user. */
