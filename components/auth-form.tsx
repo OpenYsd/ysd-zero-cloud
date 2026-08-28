@@ -1,7 +1,6 @@
 'use client';
 
-import Link from 'next/link';
-import { useRouter } from 'next/navigation';
+import { NavLink } from '@/components/nav-link';
 import { useState } from 'react';
 import { CloudCog, GitBranch, Loader2, LockKeyhole } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -20,7 +19,6 @@ import { signIn, signUp } from '@/lib/auth-client';
 const MIN_PASSWORD_LENGTH = 12;
 
 export function AuthForm({ mode, githubEnabled }: { mode: 'sign-in' | 'sign-up'; githubEnabled: boolean }) {
-  const router = useRouter();
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -49,8 +47,13 @@ export function AuthForm({ mode, githubEnabled }: { mode: 'sign-in' | 'sign-up';
         return;
       }
 
-      router.push('/');
-      router.refresh();
+      // A full document load, not `router.push`. Signing in changes what the
+      // root layout renders — the workspace shell replaces the bare auth
+      // frame — and vinext's client router leaves the cached layout in place
+      // on a soft navigation, landing the operator on the overview still
+      // wrapped in the signed-out shell. See `components/nav-link.tsx` for
+      // the underlying defect.
+      window.location.assign('/');
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'That did not work.');
     } finally {
@@ -153,9 +156,9 @@ export function AuthForm({ mode, githubEnabled }: { mode: 'sign-in' | 'sign-up';
 
       <p className="mt-5 text-center text-[11px] text-white/32">
         {isSignUp ? 'Already have a workspace? ' : 'Need a workspace? '}
-        <Link href={isSignUp ? '/sign-in' : '/sign-up'} className="text-[#c8ff69] hover:underline">
+        <NavLink href={isSignUp ? '/sign-in' : '/sign-up'} className="text-[#c8ff69] hover:underline">
           {isSignUp ? 'Sign in' : 'Create one'}
-        </Link>
+        </NavLink>
       </p>
     </div>
   );

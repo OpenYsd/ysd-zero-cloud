@@ -1,4 +1,4 @@
-import Link from 'next/link';
+import { NavLink } from '@/components/nav-link';
 import {
   ArrowUpRight,
   Bot,
@@ -146,7 +146,7 @@ export function DatabasesOverview({
       </article>
 
       <div className="grid gap-4 sm:grid-cols-2">
-        <Link href="/databases/studio" className="cloud-card group flex items-center gap-4 p-5">
+        <NavLink href="/databases/studio" className="cloud-card group flex items-center gap-4 p-5">
           <span className="icon-well icon-well-violet">
             <Table2 />
           </span>
@@ -155,8 +155,8 @@ export function DatabasesOverview({
             <span className="mt-1 block text-[11px] text-white/30">Browse live tables with credentials masked.</span>
           </span>
           <ArrowUpRight className="ml-auto size-4 text-white/18 group-hover:text-white/55" />
-        </Link>
-        <Link href="/databases/sql-editor" className="cloud-card group flex items-center gap-4 p-5">
+        </NavLink>
+        <NavLink href="/databases/sql-editor" className="cloud-card group flex items-center gap-4 p-5">
           <span className="icon-well icon-well-lime">
             <Code2 />
           </span>
@@ -165,7 +165,7 @@ export function DatabasesOverview({
             <span className="mt-1 block text-[11px] text-white/30">Run guarded statements against D1.</span>
           </span>
           <ArrowUpRight className="ml-auto size-4 text-white/18 group-hover:text-white/55" />
-        </Link>
+        </NavLink>
       </div>
 
       <section className="cloud-card overflow-hidden">

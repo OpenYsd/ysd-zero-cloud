@@ -1,4 +1,4 @@
-import Link from 'next/link';
+import { NavLink } from '@/components/nav-link';
 import {
   ArrowUpRight,
   Box,
@@ -70,14 +70,14 @@ export function HomeDashboard({ data }: { data: HomeData }) {
             nativeButton={false}
             variant="outline"
             className="h-9 border-white/[0.08] bg-white/[0.025] text-xs"
-            render={<Link href="/databases/studio" />}
+            render={<NavLink href="/databases/studio" />}
           >
             <Database /> Open Studio
           </Button>
           <Button
             nativeButton={false}
             className="h-9 bg-[#b7ff3c] px-3.5 text-xs font-semibold text-[#08110d] hover:bg-[#cbff72]"
-            render={<Link href="/deployments" />}
+            render={<NavLink href="/deployments" />}
           >
             <Sparkles /> Smart Deploy
           </Button>
@@ -111,7 +111,7 @@ export function HomeDashboard({ data }: { data: HomeData }) {
               <h2 className="text-sm font-semibold text-white">Projects</h2>
               <p className="mt-0.5 text-[11px] text-white/28">Recently active environments</p>
             </div>
-            <Button nativeButton={false} variant="ghost" size="sm" className="text-[11px] text-white/42" render={<Link href="/projects" />}>
+            <Button nativeButton={false} variant="ghost" size="sm" className="text-[11px] text-white/42" render={<NavLink href="/projects" />}>
               View all <ArrowUpRight />
             </Button>
           </div>
@@ -125,7 +125,7 @@ export function HomeDashboard({ data }: { data: HomeData }) {
               <Button
                 nativeButton={false}
                 className="mt-4 h-8 bg-[#b7ff3c] text-[11px] font-semibold text-[#07100c]"
-                render={<Link href="/deployments" />}
+                render={<NavLink href="/deployments" />}
               >
                 <Sparkles /> Analyze a repository
               </Button>
@@ -133,7 +133,7 @@ export function HomeDashboard({ data }: { data: HomeData }) {
           ) : (
             <div className="divide-y divide-white/[0.055]">
               {data.projects.slice(0, 5).map((project) => (
-                <Link
+                <NavLink
                   key={project.id}
                   href="/projects"
                   className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-4 px-5 py-4 transition-colors hover:bg-white/[0.025] sm:grid-cols-[minmax(0,1fr)_120px_110px_auto]"
@@ -156,7 +156,7 @@ export function HomeDashboard({ data }: { data: HomeData }) {
                   <span className="text-[10px] tabular-nums text-white/22">
                     {relativeTime(project.updatedAt, data.now)}
                   </span>
-                </Link>
+                </NavLink>
               ))}
             </div>
           )}
@@ -233,7 +233,7 @@ function QuickAction({
   accent: string;
 }) {
   return (
-    <Link href={href} className="cloud-card group flex items-start gap-4 p-4 transition-transform hover:-translate-y-0.5">
+    <NavLink href={href} className="cloud-card group flex items-start gap-4 p-4 transition-transform hover:-translate-y-0.5">
       <span className="grid size-9 shrink-0 place-items-center rounded-lg border border-white/[0.07] bg-white/[0.03]" style={{ color: accent }}>
         <Icon className="size-4" />
       </span>
@@ -243,6 +243,6 @@ function QuickAction({
         </span>
         <span className="mt-1.5 block text-[10px] leading-4 text-white/28">{copy}</span>
       </span>
-    </Link>
+    </NavLink>
   );
 }

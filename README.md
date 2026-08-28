@@ -73,6 +73,25 @@ side effect:
   before a row leaves the Worker, so an API client sees the same redaction the browser does.
 - **Every API route requires a session** and is scoped to the caller's workspace.
 
+## Known upstream issue: client navigation
+
+`next/link` is not used anywhere in this application, and that is deliberate.
+
+vinext's client Link runtime is broken in its production bundle. On click the handler calls
+`preventDefault()` and then reaches for `navigateClientSide`, which the chunk it is dynamically
+imported from never exports under that name — the bundler mangles the export list and the by-name
+destructure finds nothing. The call throws, the `window.location.assign` fallback sits in an
+unreachable `else`, and the browser's own navigation has already been cancelled. Every link in the
+application was inert. Reproduced on the deployed Worker in vinext `1.0.0-beta.5` and
+`1.0.0-beta.8`.
+
+`components/nav-link.tsx` renders a plain anchor instead. The same defect breaks `router.push`, so
+signing in and out use `window.location.assign` rather than a soft navigation — otherwise the root
+layout stays cached and the operator lands on the overview still wrapped in the signed-out shell.
+
+The cost is a full document load per navigation. When vinext ships a working Link, pointing
+`NavLink` at `next/link` reverts the whole change.
+
 ## Local development
 
 Requirements: Node.js 22.13 or newer and npm.
@@ -187,6 +206,7 @@ app/
   sign-in, sign-up/      Better Auth screens
   api/                   Session-scoped route handlers
 components/              Server views plus the interactive client surfaces
+  nav-link.tsx           Plain-anchor navigation; see the note above
 lib/
   domain.ts              Shapes that cross the server/client boundary
   zero-mode.ts           Cost policy and the free-tier resource catalog

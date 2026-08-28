@@ -1,7 +1,7 @@
 'use client';
 
-import Link from 'next/link';
-import { usePathname, useRouter } from 'next/navigation';
+import { NavLink } from '@/components/nav-link';
+import { usePathname } from 'next/navigation';
 import { useState } from 'react';
 import {
   Bot,
@@ -118,7 +118,7 @@ function CloudShellFrame({ children, user }: { children: React.ReactNode; user: 
               const active = item.href === '/' ? pathname === '/' : pathname.startsWith(item.href);
               const Icon = item.icon;
               return (
-                <Link
+                <NavLink
                   key={item.href}
                   href={item.href}
                   className={cn(
@@ -133,7 +133,7 @@ function CloudShellFrame({ children, user }: { children: React.ReactNode; user: 
                       Preview
                     </span>
                   )}
-                </Link>
+                </NavLink>
               );
             })}
           </div>
@@ -194,9 +194,9 @@ function CloudShellFrame({ children, user }: { children: React.ReactNode; user: 
             {navigation.map((item) => {
               const active = item.href === '/' ? pathname === '/' : pathname.startsWith(item.href);
               return (
-                <Link key={item.href} href={item.href} className={cn('shrink-0 rounded-md px-3 py-1.5 text-[11px] font-medium', active ? 'bg-[#b7ff3c]/10 text-[#c8ff69]' : 'text-white/40')}>
+                <NavLink key={item.href} href={item.href} className={cn('shrink-0 rounded-md px-3 py-1.5 text-[11px] font-medium', active ? 'bg-[#b7ff3c]/10 text-[#c8ff69]' : 'text-white/40')}>
                   {item.label}
-                </Link>
+                </NavLink>
               );
             })}
           </nav>
@@ -217,15 +217,15 @@ function initials(name: string, email: string): string {
 }
 
 function UserMenu({ user }: { user: ShellUser }) {
-  const router = useRouter();
   const [pending, setPending] = useState(false);
 
   async function handleSignOut() {
     setPending(true);
     try {
       await signOut();
-      router.push('/sign-in');
-      router.refresh();
+      // Full document load for the same reason the sign-in redirect uses one:
+      // the root layout must re-render without a session.
+      window.location.assign('/sign-in');
     } finally {
       setPending(false);
     }

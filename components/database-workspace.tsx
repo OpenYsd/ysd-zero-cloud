@@ -1,6 +1,6 @@
 'use client';
 
-import Link from 'next/link';
+import { NavLink } from '@/components/nav-link';
 import { useEffect, useState, useTransition } from 'react';
 import {
   AlertTriangle,
@@ -68,7 +68,7 @@ export function DatabaseWorkspace({
       <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-end">
         <div>
           <div className="mb-2 flex items-center gap-1.5 text-[10px] text-white/27">
-            <Link href="/databases" className="hover:text-white/60">Databases</Link>
+            <NavLink href="/databases" className="hover:text-white/60">Databases</NavLink>
             <ChevronRight className="size-3" /> ysd-zero-cloud · D1
           </div>
           <h1 className="text-2xl font-semibold tracking-[-0.035em] text-white">
@@ -81,18 +81,18 @@ export function DatabaseWorkspace({
           </p>
         </div>
         <div className="flex items-center rounded-lg border border-white/[0.07] bg-white/[0.025] p-0.5">
-          <Link
+          <NavLink
             href="/databases/studio"
             className={cn('rounded-md px-3 py-1.5 text-[11px] font-medium', mode === 'studio' ? 'bg-white/[0.08] text-white' : 'text-white/35')}
           >
             <Table2 className="mr-1.5 inline size-3" />Studio
-          </Link>
-          <Link
+          </NavLink>
+          <NavLink
             href="/databases/sql-editor"
             className={cn('rounded-md px-3 py-1.5 text-[11px] font-medium', mode === 'sql-editor' ? 'bg-white/[0.08] text-white' : 'text-white/35')}
           >
             <Braces className="mr-1.5 inline size-3" />SQL Editor
-          </Link>
+          </NavLink>
         </div>
       </div>
 
@@ -145,12 +145,12 @@ export function DatabaseWorkspace({
                 Every workspace shares one database, and a raw statement cannot be scoped to yours.
                 Database Studio shows the same tables limited to your own rows.
               </p>
-              <Link
+              <NavLink
                 href="/databases/studio"
                 className="mt-4 inline-block rounded-md bg-[#b7ff3c] px-3 py-1.5 text-[11px] font-semibold text-[#07100c]"
               >
                 Open Database Studio
-              </Link>
+              </NavLink>
             </div>
           </div>
         )}
