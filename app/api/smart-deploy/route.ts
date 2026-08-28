@@ -1,4 +1,5 @@
 import { planDeployment } from '@/lib/server/deployments';
+import { enforceRateLimit } from '@/lib/server/rate-limit';
 import { requireApiSession } from '@/lib/server/session';
 import type { DeployTarget } from '@/lib/smart-deploy';
 
@@ -18,6 +19,9 @@ function isTarget(value: unknown): value is DeployTarget {
 export async function POST(request: Request): Promise<Response> {
   const auth = await requireApiSession(request);
   if (!auth.ok) return auth.response;
+
+  const limited = await enforceRateLimit('api:write', auth.session.actor.userId);
+  if (limited.response) return limited.response;
   const { user, workspace } = auth.session;
 
   let body: { repository?: unknown; target?: unknown };

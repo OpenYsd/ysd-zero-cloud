@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import { Geist, Geist_Mono } from 'next/font/google';
 import { CloudShell } from '@/components/cloud-shell';
+import { can } from '@/lib/roles';
 import { readSession } from '@/lib/server/session';
 import './globals.css';
 
@@ -34,7 +35,16 @@ export default async function RootLayout({ children }: Readonly<{ children: Reac
     <html lang="en" className="dark">
       <body className={`${geistSans.variable} ${geistMono.variable} antialiased`}>
         <CloudShell
-          user={session ? { name: session.user.name, email: session.user.email } : null}
+          user={
+            session
+              ? {
+                  name: session.user.name,
+                  email: session.user.email,
+                  role: session.actor.role,
+                  canAdminister: can(session.actor, 'admin.users.read'),
+                }
+              : null
+          }
           zeroMode={session?.workspace.zeroMode ?? true}
         >
           {children}

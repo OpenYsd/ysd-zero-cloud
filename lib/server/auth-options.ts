@@ -24,6 +24,20 @@ export type AuthConfig = {
   secret: string;
   baseURL?: string;
   github?: { clientId: string; clientSecret: string };
+  /**
+   * Whether a verified address is required before signing in.
+   *
+   * Only ever true when a mail provider is configured — requiring
+   * verification with no way to deliver the mail would lock every operator out
+   * of their own instance. `lib/server/email.ts` decides.
+   */
+  requireEmailVerification?: boolean;
+  /** Sends the verification mail. Absent when no provider is configured. */
+  sendVerificationEmail?: (input: {
+    user: { email: string; name: string };
+    url: string;
+    token: string;
+  }) => Promise<void>;
 };
 
 export function buildAuthOptions(config: AuthConfig): BetterAuthOptions {
@@ -35,13 +49,21 @@ export function buildAuthOptions(config: AuthConfig): BetterAuthOptions {
 
     emailAndPassword: {
       enabled: true,
-      // No mail provider is configured, so requiring verification would lock
-      // every new operator out of their own workspace. YSD Shield reports the
-      // unverified accounts instead.
-      requireEmailVerification: false,
+      requireEmailVerification: config.requireEmailVerification ?? false,
       minPasswordLength: 12,
       maxPasswordLength: 256,
       autoSignIn: true,
+    },
+
+    emailVerification: {
+      // The link is what an operator clicks; Better Auth marks the address
+      // verified and we redirect them into the workspace.
+      sendOnSignUp: Boolean(config.sendVerificationEmail),
+      autoSignInAfterVerification: true,
+      expiresIn: 60 * 60 * 24,
+      ...(config.sendVerificationEmail
+        ? { sendVerificationEmail: config.sendVerificationEmail }
+        : {}),
     },
 
     ...(config.github
@@ -58,6 +80,36 @@ export function buildAuthOptions(config: AuthConfig): BetterAuthOptions {
     session: {
       expiresIn: 60 * 60 * 24 * 7,
       updateAge: 60 * 60 * 24,
+    },
+
+    /**
+     * Better Auth's own limiter, in front of every `/api/auth/*` route.
+     *
+     * Stored in the database rather than in memory: a Worker isolate is
+     * discarded between requests, so an in-memory counter would reset
+     * constantly and enforce nothing. This sits underneath the application
+     * limiter in `lib/rate-limit.ts`, which applies tighter per-endpoint rules.
+     */
+    rateLimit: {
+      enabled: true,
+      storage: 'database',
+      window: 60,
+      max: 60,
+    },
+
+    advanced: {
+      /**
+       * Which header carries the caller's address.
+       *
+       * Without this Better Auth cannot identify the client and drops every
+       * request into one shared rate-limit bucket — so a single attacker would
+       * consume the budget for every legitimate operator at once. On Cloudflare
+       * the edge sets `CF-Connecting-IP` and a client cannot forge it, which is
+       * why it is the only header trusted here.
+       */
+      ipAddress: {
+        ipAddressHeaders: ['cf-connecting-ip'],
+      },
     },
 
     // Nothing in this project may call out to a third party uninvited.

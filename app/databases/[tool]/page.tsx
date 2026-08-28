@@ -1,7 +1,7 @@
 import type { Metadata } from 'next';
 import { notFound } from 'next/navigation';
 import { DatabaseWorkspace } from '@/components/database-workspace';
-import { isInstanceOwner } from '@/lib/server/owner';
+import { can } from '@/lib/roles';
 import { requireSession } from '@/lib/server/session';
 import { listTables } from '@/lib/server/studio';
 
@@ -28,11 +28,9 @@ export default async function DatabaseToolPage({ params }: { params: Promise<{ t
   const { tool } = await params;
   if (!isTool(tool)) notFound();
 
-  const { user, workspace } = await requireSession();
-  const [tables, owner] = await Promise.all([
-    listTables({ workspaceId: workspace.id, userId: user.id }),
-    isInstanceOwner(user.id, user.email),
-  ]);
+  const { user, workspace, actor } = await requireSession();
+  const tables = await listTables({ workspaceId: workspace.id, userId: user.id });
+  const owner = can(actor, 'sql-editor.run');
 
   // Opening on a workspace table rather than an auth table keeps the first
   // screen useful and keeps redacted columns out of the default view.

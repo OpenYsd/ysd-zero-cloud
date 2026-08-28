@@ -22,15 +22,17 @@ import {
   Settings,
   ShieldCheck,
   TerminalSquare,
+  UserCog,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Switch } from '@/components/ui/switch';
 import { signOut } from '@/lib/auth-client';
 import { isLiveSection, isSection } from '@/lib/domain';
+import type { Role } from '@/lib/roles';
 import { cn } from '@/lib/utils';
 import { ZeroModeProvider, useZeroMode } from '@/components/zero-mode-provider';
 
-export type ShellUser = { name: string; email: string };
+export type ShellUser = { name: string; email: string; role: Role; canAdminister: boolean };
 
 /**
  * The sidebar. `live` is derived from the shared section catalog rather than
@@ -50,10 +52,15 @@ const navigation = [
   { label: 'Secrets', href: '/secrets', icon: KeyRound },
   { label: 'Usage', href: '/usage', icon: Gauge },
   { label: 'YSD Shield', href: '/shield', icon: ShieldCheck },
+  { label: 'Accounts', href: '/admin', icon: UserCog, adminOnly: true },
   { label: 'Settings', href: '/settings', icon: Settings },
 ].map((item) => {
   const slug = item.href.slice(1);
-  return { ...item, live: slug === '' || (isSection(slug) && isLiveSection(slug)) };
+  return {
+    ...item,
+    adminOnly: 'adminOnly' in item ? Boolean(item.adminOnly) : false,
+    live: slug === '' || (isSection(slug) && isLiveSection(slug)),
+  };
 });
 
 function BrandMark() {
@@ -114,7 +121,9 @@ function CloudShellFrame({ children, user }: { children: React.ReactNode; user: 
         <nav aria-label="Primary navigation" className="flex-1 overflow-y-auto p-3">
           <p className="px-2 pb-2 pt-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-white/25">Workspace</p>
           <div className="space-y-0.5">
-            {navigation.map((item) => {
+            {navigation
+              .filter((item) => !item.adminOnly || user.canAdminister)
+              .map((item) => {
               const active = item.href === '/' ? pathname === '/' : pathname.startsWith(item.href);
               const Icon = item.icon;
               return (
@@ -191,7 +200,9 @@ function CloudShellFrame({ children, user }: { children: React.ReactNode; user: 
 
         <div className="border-b border-white/[0.065] bg-[#0b100e] px-4 py-2 md:hidden">
           <nav className="flex gap-1 overflow-x-auto" aria-label="Mobile navigation">
-            {navigation.map((item) => {
+            {navigation
+              .filter((item) => !item.adminOnly || user.canAdminister)
+              .map((item) => {
               const active = item.href === '/' ? pathname === '/' : pathname.startsWith(item.href);
               return (
                 <NavLink key={item.href} href={item.href} className={cn('shrink-0 rounded-md px-3 py-1.5 text-[11px] font-medium', active ? 'bg-[#b7ff3c]/10 text-[#c8ff69]' : 'text-white/40')}>

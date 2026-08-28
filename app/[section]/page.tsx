@@ -1,5 +1,6 @@
 import type { Metadata } from 'next';
 import { notFound } from 'next/navigation';
+import { AdminView } from '@/components/admin-view';
 import { LogsView } from '@/components/logs-view';
 import { ProjectsView } from '@/components/projects-view';
 import {
@@ -17,9 +18,12 @@ import { ShieldView } from '@/components/shield-view';
 import { SmartDeployPanel } from '@/components/smart-deploy-panel';
 import { PageHeader } from '@/components/ui-bits';
 import type { Workspace } from '@/lib/domain';
+import type { Actor } from '@/lib/roles';
 import { FREE_TIER_LIMITS } from '@/lib/free-tier';
 import { getIntegrationCatalog } from '@/lib/integrations';
+import { can } from '@/lib/roles';
 import { requestTime } from '@/lib/server/clock';
+import { countOwners, listManagedUsers } from '@/lib/server/roles';
 import { listDeployments } from '@/lib/server/deployments';
 import { runtimeEnv } from '@/lib/server/env';
 import { listLogs } from '@/lib/server/logs';
@@ -45,14 +49,19 @@ export default async function SectionPage({ params }: { params: Promise<{ sectio
   const { section } = await params;
   if (!isSection(section)) notFound();
 
-  const { workspace } = await requireSession();
+  const { workspace, actor } = await requireSession();
+
+  // The admin surface is not merely hidden from the navigation: reaching it
+  // directly without the capability sends the visitor back to the overview.
+  if (section === 'admin' && !can(actor, 'admin.users.read')) notFound();
+
   const meta = SECTION_META[section];
   const now = await requestTime();
 
   return (
     <div className="mx-auto w-full max-w-[1440px] space-y-5">
       <PageHeader eyebrow={meta.eyebrow} title={meta.title} description={meta.description} />
-      <SectionBody section={section} workspace={workspace} now={now} />
+      <SectionBody section={section} workspace={workspace} actor={actor} now={now} />
     </div>
   );
 }
@@ -60,10 +69,12 @@ export default async function SectionPage({ params }: { params: Promise<{ sectio
 async function SectionBody({
   section,
   workspace,
+  actor,
   now,
 }: {
   section: Section;
   workspace: Workspace;
+  actor: Actor;
   now: number;
 }) {
   const workspaceId = workspace.id;
@@ -123,6 +134,11 @@ async function SectionBody({
           }}
         />
       );
+    }
+
+    case 'admin': {
+      const [users, ownerCount] = await Promise.all([listManagedUsers(), countOwners()]);
+      return <AdminView users={users} actor={actor} ownerCount={ownerCount} now={now} />;
     }
 
     case 'settings':

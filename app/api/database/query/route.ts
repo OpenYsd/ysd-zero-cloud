@@ -1,5 +1,6 @@
+import { can } from '@/lib/roles';
 import { writeLog } from '@/lib/server/logs';
-import { isInstanceOwner } from '@/lib/server/owner';
+import { enforceRateLimit } from '@/lib/server/rate-limit';
 import { requireApiSession } from '@/lib/server/session';
 import { runEditorQuery } from '@/lib/server/studio';
 
@@ -19,8 +20,12 @@ export async function POST(request: Request): Promise<Response> {
   const auth = await requireApiSession(request);
   if (!auth.ok) return auth.response;
 
-  const { user, workspace } = auth.session;
-  if (!(await isInstanceOwner(user.id, user.email))) {
+  const { user, workspace, actor } = auth.session;
+
+  const limited = await enforceRateLimit('sql:query', actor.userId);
+  if (limited.response) return limited.response;
+
+  if (!can(actor, 'sql-editor.run')) {
     await writeLog({
       workspaceId: workspace.id,
       level: 'WARN',

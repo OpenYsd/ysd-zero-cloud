@@ -4,6 +4,7 @@ import { env } from 'cloudflare:workers';
 import { hasGithubOAuth } from '@/lib/integrations';
 import { buildAuthOptions, resolveAuthSecret } from './auth-options';
 import { ensureSchema, getDatabase } from './db';
+import { isEmailConfigured, sendEmail, verificationMessage } from './email';
 import { runtimeEnv } from './env';
 
 /**
@@ -28,10 +29,27 @@ export function authSecret(): string {
   return resolveAuthSecret(env.BETTER_AUTH_SECRET, isDevelopment());
 }
 
+/**
+ * Whether a verified address is required to sign in.
+ *
+ * Tied to whether mail can actually be delivered.
+ * `YSD_REQUIRE_EMAIL_VERIFICATION` can turn the requirement off even with a
+ * provider configured, but it can never turn it on without one: requiring a
+ * verified address with no way to send the link locks every operator out of
+ * their own instance, which is worse than an unverified address.
+ */
+export function emailVerificationRequired(): boolean {
+  if (!isEmailConfigured()) return false;
+  const flag = runtimeEnv.YSD_REQUIRE_EMAIL_VERIFICATION?.trim().toLowerCase();
+  return flag !== 'false' && flag !== '0';
+}
+
 function createAuth(): Auth {
   const github = hasGithubOAuth(runtimeEnv)
     ? { clientId: env.GITHUB_CLIENT_ID!, clientSecret: env.GITHUB_CLIENT_SECRET! }
     : undefined;
+
+  const mailConfigured = isEmailConfigured();
 
   return betterAuth(
     buildAuthOptions({
@@ -43,6 +61,20 @@ function createAuth(): Auth {
       // production for callbacks and redirects.
       baseURL: isDevelopment() ? undefined : env.BETTER_AUTH_URL?.trim() || undefined,
       github,
+      requireEmailVerification: emailVerificationRequired(),
+      ...(mailConfigured
+        ? {
+            sendVerificationEmail: async ({ user, url }) => {
+              const message = verificationMessage(user.name, url);
+              const result = await sendEmail({ to: user.email, ...message });
+              if (!result.ok) {
+                // Logged rather than thrown: a delivery failure must not fail
+                // the sign-up that triggered it.
+                console.warn('[ysd] verification email failed:', result.error);
+              }
+            },
+          }
+        : {}),
     }),
   );
 }

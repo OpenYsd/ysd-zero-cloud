@@ -1,4 +1,5 @@
 import { createProject, listProjects } from '@/lib/server/projects';
+import { enforceRateLimit } from '@/lib/server/rate-limit';
 import { requireApiSession } from '@/lib/server/session';
 
 export async function GET(request: Request): Promise<Response> {
@@ -10,6 +11,9 @@ export async function GET(request: Request): Promise<Response> {
 export async function POST(request: Request): Promise<Response> {
   const auth = await requireApiSession(request);
   if (!auth.ok) return auth.response;
+
+  const limited = await enforceRateLimit('api:write', auth.session.actor.userId);
+  if (limited.response) return limited.response;
 
   let body: { name?: unknown; repository?: unknown; environment?: unknown; region?: unknown };
   try {

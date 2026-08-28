@@ -3,7 +3,13 @@ import { getIntegrationCatalog } from '@/lib/integrations';
 import { runtimeEnv } from './env';
 import { runShieldRules, type ShieldFinding, type ShieldReport, type ShieldSnapshot } from '@/lib/shield';
 import { count, execute, query, queryOne } from './db';
+import { emailVerificationRequired } from './auth';
 import { countBillableResources } from './deployments';
+import { isEmailConfigured } from './email';
+import { pruneRateLimits } from './rate-limit';
+import { countByRole, countOwners, countSuspended } from './roles';
+import { countFailingNetworks, countRecentBlocks, pruneAttempts } from './security';
+import { turnstileConfigured } from './turnstile';
 import { writeLog } from './logs';
 import { secretsForShield } from './secrets';
 import { listTables } from './studio';
@@ -39,8 +45,22 @@ async function collectSnapshot(workspaceId: string, userId: string): Promise<Shi
   const workspace = await getWorkspace(workspaceId);
   const now = Date.now();
 
-  const [secrets, tables, billableResources, users, unverified, sessions, expiredSessions, publicProjects] =
-    await Promise.all([
+  const [
+    secrets,
+    tables,
+    billableResources,
+    users,
+    unverified,
+    sessions,
+    expiredSessions,
+    publicProjects,
+    owners,
+    admins,
+    suspended,
+    unverifiedPrivileged,
+    recentBlocks,
+    failingNetworks,
+  ] = await Promise.all([
       secretsForShield(workspaceId),
       listTables({ workspaceId, userId }),
       countBillableResources(workspaceId),
@@ -52,10 +72,34 @@ async function collectSnapshot(workspaceId: string, userId: string): Promise<Shi
         "SELECT name FROM project WHERE workspaceId = ? AND visibility = 'public'",
         workspaceId,
       ),
+      countOwners(),
+      countByRole('admin'),
+      countSuspended(),
+      count(
+        `SELECT COUNT(*) AS total FROM user_role r
+         JOIN "user" u ON u.id = r.userId
+         WHERE r.role IN ('owner', 'admin') AND u.emailVerified = 0`,
+      ),
+      countRecentBlocks(),
+      countFailingNetworks(),
     ]);
 
   return {
     zeroModeEnabled: workspace?.zeroMode ?? true,
+    protections: {
+      turnstileConfigured: turnstileConfigured(),
+      emailProviderConfigured: isEmailConfigured(),
+      emailVerificationRequired: emailVerificationRequired(),
+      // Enabled unconditionally in `lib/server/auth-options.ts`; reported so a
+      // future change that switches it off cannot pass unnoticed.
+      rateLimitEnabled: true,
+      recentBlocks,
+      failingNetworks,
+      owners,
+      admins,
+      suspended,
+      unverifiedPrivileged,
+    },
     billableResources,
     secrets,
     users: { total: users, unverified },
@@ -167,6 +211,10 @@ export async function runScan(
   const startedAt = Date.now();
   const snapshot = await collectSnapshot(workspaceId, userId);
   const report = runShieldRules(snapshot);
+
+  // The scan is the one regular sweep this app has, so it doubles as the
+  // moment stale counters and expired attempt rows are cleared.
+  await Promise.all([pruneRateLimits(), pruneAttempts()]);
   const now = Date.now();
 
   await reconcileFindings(workspaceId, report.findings, now);

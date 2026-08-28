@@ -61,6 +61,50 @@ side effect:
   it, the editor answers 403 for everyone else and points them at Studio. The owner is
   `YSD_OWNER_EMAIL`, or the first registered account when that is unset.
 
+## Roles
+
+Three instance roles: `owner`, `admin`, `member`. They govern the *instance* —
+who may administer accounts, who may reach the raw SQL Editor — and never what
+anyone may see inside another workspace. Tenant isolation is enforced
+separately and is not widened by any role.
+
+- **owner** — everything, including the SQL Editor. Bootstrapped from
+  `YSD_OWNER_EMAIL`, or the earliest account when that is unset.
+- **admin** — account management: roles, suspension. Deliberately does *not*
+  inherit the SQL Editor, because a raw statement cannot be scoped to one
+  workspace.
+- **member** — their own workspace, nothing else. Every new sign-up is a member.
+
+The rules in `lib/roles.ts` stop self-promotion, acting on an equal or
+superior, granting ownership without being an owner, and demoting the last
+owner. Suspending an account drops its sessions immediately.
+
+## Abuse protection
+
+Public sign-up stays open, so the unauthenticated surface is layered:
+
+1. **Rate limiting** — fixed-window counters in D1, because a Worker isolate is
+   discarded between requests and an in-memory counter would enforce nothing.
+   Sign-in and sign-up have tighter budgets than ordinary API traffic, and
+   every guarded response advertises `RateLimit-*` headers.
+2. **Turnstile** — free on every Cloudflare plan. Configuration-gated: without
+   keys the widget cannot render, so requiring a token would lock everyone out.
+   Verification fails *closed* if Cloudflare cannot be reached.
+3. **Brute-force lockout** — separate from rate limiting, because a stuffing
+   run spread across many addresses stays under any per-IP limit while still
+   hammering one account. Failures are counted back to the last success, so a
+   mistyped password does not accumulate forever.
+4. **Suspicious-login auditing** — a successful sign-in from a new network or
+   device, after a run of failures, or against an account being probed from
+   several addresses, is recorded to the audit log. These are reported, not
+   blocked: people travel and buy laptops.
+
+Email verification is wired end to end but only *required* when a mail provider
+is configured, for the same reason Turnstile is gated.
+
+YSD Shield checks all of the above and reports anything unconfigured, so a
+missing protection is visible rather than assumed.
+
 ## Security
 
 - **Secrets are write-only.** Values are sealed with AES-GCM (HKDF-derived key) before they reach

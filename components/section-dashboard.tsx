@@ -46,6 +46,7 @@ export const SECTION_META: Record<Section, { title: string; eyebrow: string; des
   secrets: { title: 'Secrets', eyebrow: 'Security', description: 'Encrypted configuration shared safely with workloads.' },
   usage: { title: 'Usage', eyebrow: 'Limits', description: 'Measured free-tier consumption and projected cost.' },
   shield: { title: 'YSD Shield', eyebrow: 'Security Center', description: 'One security posture across identity, data, and cost.' },
+  admin: { title: 'Accounts', eyebrow: 'Administration', description: 'Roles, suspension, and sign-in state for every account on this instance.' },
   settings: { title: 'Settings', eyebrow: 'Workspace', description: 'Workspace defaults and integration configuration.' },
 };
 

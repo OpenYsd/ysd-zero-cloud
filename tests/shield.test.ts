@@ -5,9 +5,24 @@ import { runShieldRules, type ShieldSnapshot } from '../lib/shield.ts';
 const NOW = Date.UTC(2026, 7, 28, 12, 0, 0);
 const DAY = 24 * 60 * 60 * 1000;
 
+/** A fully-protected instance, so each test changes only what it is about. */
+const PROTECTED: ShieldSnapshot['protections'] = {
+  turnstileConfigured: true,
+  emailProviderConfigured: true,
+  emailVerificationRequired: true,
+  rateLimitEnabled: true,
+  recentBlocks: 0,
+  failingNetworks: 0,
+  owners: 1,
+  admins: 0,
+  suspended: 0,
+  unverifiedPrivileged: 0,
+};
+
 function snapshot(overrides: Partial<ShieldSnapshot> = {}): ShieldSnapshot {
   return {
     zeroModeEnabled: true,
+    protections: { ...PROTECTED, ...overrides.protections },
     billableResources: 0,
     secrets: [],
     users: { total: 1, unverified: 0 },
@@ -196,4 +211,74 @@ void test('every finding carries a remediation an operator can act on', () => {
     assert.ok(finding.remediation.length > 10, `missing remediation for ${finding.code}`);
     assert.ok(finding.code.length > 0);
   }
+});
+
+void test('a missing bot challenge is a high-severity finding', () => {
+  const report = runShieldRules(snapshot({ protections: { ...PROTECTED, turnstileConfigured: false } }));
+  const finding = report.findings.find((f) => f.code === 'turnstile-not-configured');
+  assert.ok(finding);
+  assert.equal(finding.severity, 'high');
+  assert.equal(report.checks.find((c) => c.id === 'hardening')?.state, 'failed');
+});
+
+void test('disabled rate limiting is critical', () => {
+  const report = runShieldRules(snapshot({ protections: { ...PROTECTED, rateLimitEnabled: false } }));
+  const finding = report.findings.find((f) => f.code === 'rate-limit-disabled');
+  assert.ok(finding);
+  assert.equal(finding.severity, 'critical');
+});
+
+void test('no mail provider is reported, and optional verification only when one exists', () => {
+  const noMail = runShieldRules(
+    snapshot({
+      protections: {
+        ...PROTECTED,
+        emailProviderConfigured: false,
+        emailVerificationRequired: false,
+      },
+    }),
+  );
+  const codes = noMail.findings.map((f) => f.code);
+  assert.ok(codes.includes('email-not-configured'));
+  // Without a provider, "verification is optional" is not a separate failing —
+  // it is the only possible state.
+  assert.ok(!codes.includes('email-verification-optional'));
+
+  const mailButOptional = runShieldRules(
+    snapshot({ protections: { ...PROTECTED, emailVerificationRequired: false } }),
+  );
+  assert.ok(mailButOptional.findings.some((f) => f.code === 'email-verification-optional'));
+});
+
+void test('an instance with no owner is flagged', () => {
+  const report = runShieldRules(snapshot({ protections: { ...PROTECTED, owners: 0 } }));
+  const finding = report.findings.find((f) => f.code === 'no-owner');
+  assert.ok(finding);
+  assert.equal(finding.severity, 'high');
+});
+
+void test('privileged accounts without a verified address are flagged', () => {
+  const report = runShieldRules(
+    snapshot({ protections: { ...PROTECTED, unverifiedPrivileged: 2 } }),
+  );
+  const finding = report.findings.find((f) => f.code === 'unverified-privileged-accounts');
+  assert.ok(finding);
+  assert.match(finding.detail, /2 owner or admin/);
+});
+
+void test('lockouts escalate when many networks are involved', () => {
+  const isolated = runShieldRules(
+    snapshot({ protections: { ...PROTECTED, recentBlocks: 2, failingNetworks: 1 } }),
+  );
+  assert.equal(isolated.findings.find((f) => f.code === 'brute-force-observed')?.severity, 'low');
+
+  const distributed = runShieldRules(
+    snapshot({ protections: { ...PROTECTED, recentBlocks: 9, failingNetworks: 5 } }),
+  );
+  assert.equal(distributed.findings.find((f) => f.code === 'brute-force-observed')?.severity, 'high');
+});
+
+void test('a fully protected instance passes the hardening check', () => {
+  const report = runShieldRules(snapshot());
+  assert.equal(report.checks.find((c) => c.id === 'hardening')?.state, 'passed');
 });

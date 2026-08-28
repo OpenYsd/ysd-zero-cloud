@@ -1,11 +1,12 @@
 'use client';
 
 import { NavLink } from '@/components/nav-link';
-import { useState } from 'react';
+import { useCallback, useState } from 'react';
 import { CloudCog, GitBranch, Loader2, LockKeyhole } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { TurnstileWidget } from '@/components/turnstile-widget';
 import { signIn, signUp } from '@/lib/auth-client';
 
 /**
@@ -18,14 +19,28 @@ import { signIn, signUp } from '@/lib/auth-client';
 
 const MIN_PASSWORD_LENGTH = 12;
 
-export function AuthForm({ mode, githubEnabled }: { mode: 'sign-in' | 'sign-up'; githubEnabled: boolean }) {
+export function AuthForm({
+  mode,
+  githubEnabled,
+  turnstileSiteKey,
+}: {
+  mode: 'sign-in' | 'sign-up';
+  githubEnabled: boolean;
+  /** Null when the instance has no Turnstile keys; the challenge is then skipped. */
+  turnstileSiteKey: string | null;
+}) {
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  const [challengeToken, setChallengeToken] = useState('');
 
   const isSignUp = mode === 'sign-up';
+  const challengeRequired = turnstileSiteKey !== null;
+
+  // Stable so the widget is not torn down and re-rendered on every keystroke.
+  const handleToken = useCallback((token: string) => setChallengeToken(token), []);
 
   async function handleSubmit(event: React.SubmitEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -36,11 +51,26 @@ export function AuthForm({ mode, githubEnabled }: { mode: 'sign-in' | 'sign-up';
       return;
     }
 
+    if (challengeRequired && !challengeToken) {
+      setError('Please complete the challenge before continuing.');
+      return;
+    }
+
     setPending(true);
     try {
+      // `fetchOptions.body` merges the challenge token into the request Better
+      // Auth sends, which the route handler reads before passing it on.
+      const extra = challengeRequired
+        ? { fetchOptions: { body: { turnstileToken: challengeToken } } }
+        : {};
       const result = isSignUp
-        ? await signUp.email({ name: name.trim() || email.split('@')[0]!, email, password })
-        : await signIn.email({ email, password });
+        ? await signUp.email({
+            name: name.trim() || email.split('@')[0]!,
+            email,
+            password,
+            ...extra,
+          })
+        : await signIn.email({ email, password, ...extra });
 
       if (result.error) {
         setError(result.error.message ?? 'That did not work. Check your details and try again.');
@@ -120,6 +150,8 @@ export function AuthForm({ mode, githubEnabled }: { mode: 'sign-in' | 'sign-up';
             className="h-9 border-white/[0.08] bg-black/15 text-xs"
           />
         </div>
+
+        <TurnstileWidget siteKey={turnstileSiteKey} onToken={handleToken} />
 
         {error && (
           <p role="alert" className="rounded-lg border border-red-400/20 bg-red-400/[0.06] px-3 py-2 text-[11px] text-red-300">

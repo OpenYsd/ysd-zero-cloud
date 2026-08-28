@@ -26,8 +26,26 @@ export type ShieldCheck = {
   state: 'passed' | 'review' | 'failed';
 };
 
+/** State of the abuse and identity protections, for the hardening checks. */
+export type ProtectionSnapshot = {
+  turnstileConfigured: boolean;
+  emailProviderConfigured: boolean;
+  emailVerificationRequired: boolean;
+  rateLimitEnabled: boolean;
+  /** Lockouts triggered in the last day. */
+  recentBlocks: number;
+  /** Distinct addresses that failed a sign-in in the last day. */
+  failingNetworks: number;
+  owners: number;
+  admins: number;
+  suspended: number;
+  /** Accounts holding admin or owner without a verified address. */
+  unverifiedPrivileged: number;
+};
+
 export type ShieldSnapshot = {
   zeroModeEnabled: boolean;
+  protections: ProtectionSnapshot;
   /** Planned resources recorded with a projected charge above zero. */
   billableResources: number;
   secrets: {
@@ -216,6 +234,110 @@ function checkDatabase(snapshot: ShieldSnapshot): { check: ShieldCheck; findings
   };
 }
 
+/**
+ * The abuse controls in front of the unauthenticated endpoints.
+ *
+ * A protection that is merely *available* is not a protection; these check
+ * that each one is actually configured and doing something.
+ */
+function checkHardening(snapshot: ShieldSnapshot): { check: ShieldCheck; findings: ShieldFinding[] } {
+  const findings: ShieldFinding[] = [];
+  const p = snapshot.protections;
+
+  if (!p.turnstileConfigured) {
+    findings.push({
+      code: 'turnstile-not-configured',
+      title: 'Sign-up and sign-in have no bot challenge',
+      detail: 'Turnstile keys are not set, so automated sign-up and credential stuffing are unimpeded.',
+      resource: 'identity',
+      severity: 'high',
+      remediation: 'Create a free Turnstile widget and set TURNSTILE_SITE_KEY and TURNSTILE_SECRET_KEY.',
+    });
+  }
+
+  if (!p.emailProviderConfigured) {
+    findings.push({
+      code: 'email-not-configured',
+      title: 'Addresses cannot be verified',
+      detail: 'No mail provider is configured, so verification links cannot be delivered and every account stays unverified.',
+      resource: 'identity',
+      severity: 'medium',
+      remediation: 'Set RESEND_API_KEY to enable verification, or accept unverified addresses deliberately.',
+    });
+  } else if (!p.emailVerificationRequired) {
+    findings.push({
+      code: 'email-verification-optional',
+      title: 'Email verification is not required',
+      detail: 'Mail is configured but sign-in does not require a verified address.',
+      resource: 'identity',
+      severity: 'low',
+      remediation: 'Remove YSD_REQUIRE_EMAIL_VERIFICATION=false to require verification.',
+    });
+  }
+
+  if (!p.rateLimitEnabled) {
+    findings.push({
+      code: 'rate-limit-disabled',
+      title: 'Authentication endpoints are not rate limited',
+      detail: 'Sign-in and sign-up accept unlimited attempts.',
+      resource: 'identity',
+      severity: 'critical',
+      remediation: 'Re-enable the rate limiter in lib/server/auth-options.ts.',
+    });
+  }
+
+  if (p.owners === 0) {
+    findings.push({
+      code: 'no-owner',
+      title: 'The instance has no owner',
+      detail: 'Nobody can administer accounts or reach the SQL Editor.',
+      resource: 'identity',
+      severity: 'high',
+      remediation: 'Set YSD_OWNER_EMAIL to an account that exists, then sign in with it.',
+    });
+  }
+
+  if (p.unverifiedPrivileged > 0) {
+    findings.push({
+      code: 'unverified-privileged-accounts',
+      title: 'Privileged accounts have unverified addresses',
+      detail: `${p.unverifiedPrivileged} owner or admin account${p.unverifiedPrivileged === 1 ? '' : 's'} cannot be reached at a confirmed address.`,
+      resource: 'identity',
+      severity: 'medium',
+      remediation: 'Verify the address, or move the privilege to an account you can prove you control.',
+    });
+  }
+
+  if (p.recentBlocks > 0) {
+    findings.push({
+      code: 'brute-force-observed',
+      title: 'Sign-in lockouts triggered recently',
+      detail: `${p.recentBlocks} attempt${p.recentBlocks === 1 ? ' was' : 's were'} refused by the brute-force guard in the last day.`,
+      resource: 'identity',
+      severity: p.failingNetworks >= 3 ? 'high' : 'low',
+      remediation: 'Review the auth entries in Logs. The guard held, but repeated attempts are worth understanding.',
+    });
+  }
+
+  const configured = [p.turnstileConfigured, p.emailProviderConfigured, p.rateLimitEnabled].filter(
+    Boolean,
+  ).length;
+
+  return {
+    check: {
+      id: 'hardening',
+      name: 'Abuse protections',
+      detail: `${configured} of 3 controls configured · ${p.owners} owner${p.owners === 1 ? '' : 's'}, ${p.admins} admin${p.admins === 1 ? '' : 's'}, ${p.suspended} suspended`,
+      state: findings.some((f) => f.severity === 'critical' || f.severity === 'high')
+        ? 'failed'
+        : findings.length > 0
+          ? 'review'
+          : 'passed',
+    },
+    findings,
+  };
+}
+
 function checkSurface(snapshot: ShieldSnapshot): { check: ShieldCheck; findings: ShieldFinding[] } {
   const findings: ShieldFinding[] = [];
 
@@ -251,6 +373,7 @@ export function runShieldRules(snapshot: ShieldSnapshot): ShieldReport {
     checkIdentity(snapshot),
     checkDatabase(snapshot),
     checkSurface(snapshot),
+    checkHardening(snapshot),
   ];
 
   const checks = results.map((result) => result.check);

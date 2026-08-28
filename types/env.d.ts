@@ -20,6 +20,16 @@ declare namespace Cloudflare {
     /** Operator allowed to use the SQL Editor. Defaults to the first account. */
     YSD_OWNER_EMAIL?: string;
 
+    /** Cloudflare Turnstile. Both are required for the challenge to be enforced. */
+    TURNSTILE_SITE_KEY?: string;
+    TURNSTILE_SECRET_KEY?: string;
+
+    /** Transactional email (Resend free tier). Enables email verification. */
+    RESEND_API_KEY?: string;
+    YSD_EMAIL_FROM?: string;
+    /** Set to "false" to keep verification optional even with mail configured. */
+    YSD_REQUIRE_EMAIL_VERIFICATION?: string;
+
     /** GitHub OAuth sign-in. Both must be set for the provider to appear. */
     GITHUB_CLIENT_ID?: string;
     GITHUB_CLIENT_SECRET?: string;

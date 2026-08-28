@@ -1,4 +1,5 @@
 import { writeLog } from '@/lib/server/logs';
+import { enforceRateLimit } from '@/lib/server/rate-limit';
 import { requireApiSession } from '@/lib/server/session';
 import { isWorkspaceSetting, updateWorkspaceSetting } from '@/lib/server/workspace';
 
@@ -17,6 +18,9 @@ export async function GET(request: Request): Promise<Response> {
 export async function PATCH(request: Request): Promise<Response> {
   const auth = await requireApiSession(request);
   if (!auth.ok) return auth.response;
+
+  const limited = await enforceRateLimit('api:write', auth.session.actor.userId);
+  if (limited.response) return limited.response;
 
   let body: { setting?: unknown; value?: unknown };
   try {

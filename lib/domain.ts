@@ -163,6 +163,7 @@ export const SECTIONS = [
   'secrets',
   'usage',
   'shield',
+  'admin',
   'settings',
 ] as const;
 
@@ -181,6 +182,7 @@ export const LIVE_SECTIONS: readonly Section[] = [
   'secrets',
   'usage',
   'shield',
+  'admin',
   'settings',
 ];
 
