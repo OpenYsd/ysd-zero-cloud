@@ -1,0 +1,34 @@
+{
+  // Deployment configuration for YSD Zero Cloud.
+  //
+  // Local development does NOT read this file: `vite.config.ts` passes an
+  // inline binding config to the Cloudflare plugin so a fresh checkout runs
+  // with no setup. This file is what `wrangler d1 migrations apply` and a
+  // manual `wrangler deploy` use.
+  //
+  // Before deploying:
+  //   1. wrangler d1 create ysd-zero-cloud
+  //   2. paste the returned database_id below
+  //   3. wrangler secret put BETTER_AUTH_SECRET
+  //   4. npm run db:migrate
+  //
+  // Everything referenced here is on a Cloudflare free plan. There is no
+  // paid binding, no Durable Object, and no scheduled worker.
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "ysd-zero-cloud",
+  "main": "dist/server/index.js",
+  "compatibility_date": "2026-05-15",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": {
+    "enabled": true
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "ysd-zero-cloud",
+      // Replace with the id from `wrangler d1 create ysd-zero-cloud`.
+      "database_id": "00000000-0000-4000-8000-000000000000",
+      "migrations_dir": "db/migrations"
+    }
+  ]
+}

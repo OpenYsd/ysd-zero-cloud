@@ -1,0 +1,40 @@
+import { listSecrets, putSecret } from '@/lib/server/secrets';
+import { requireApiSession } from '@/lib/server/session';
+
+export async function GET(request: Request): Promise<Response> {
+  const auth = await requireApiSession(request);
+  if (!auth.ok) return auth.response;
+  return Response.json({ secrets: await listSecrets(auth.session.workspace.id) });
+}
+
+/** Creates or rotates a secret. The value is sealed before it reaches D1. */
+export async function POST(request: Request): Promise<Response> {
+  const auth = await requireApiSession(request);
+  if (!auth.ok) return auth.response;
+
+  let body: {
+    name?: unknown;
+    value?: unknown;
+    scope?: unknown;
+    environment?: unknown;
+    rotationDays?: unknown;
+  };
+  try {
+    body = (await request.json()) as typeof body;
+  } catch {
+    return Response.json({ error: 'Expected a JSON body.' }, { status: 400 });
+  }
+
+  const result = await putSecret({
+    workspaceId: auth.session.workspace.id,
+    actor: auth.session.user.email,
+    name: typeof body.name === 'string' ? body.name : '',
+    value: typeof body.value === 'string' ? body.value : '',
+    scope: typeof body.scope === 'string' ? body.scope : undefined,
+    environment: typeof body.environment === 'string' ? body.environment : undefined,
+    rotationDays: typeof body.rotationDays === 'number' ? body.rotationDays : null,
+  });
+
+  if (!result.ok) return Response.json({ error: result.error }, { status: result.status });
+  return Response.json({ secret: result.secret }, { status: result.created ? 201 : 200 });
+}

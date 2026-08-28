@@ -1,45 +1,59 @@
 # YSD Zero Cloud
 
-YSD Zero Cloud is a zero-cost-first cloud operating system. Version `0.1.0` is a local, mock-backed product foundation for managing applications, data, AI, game infrastructure, connected nodes, and security from one workspace.
+YSD Zero Cloud is a zero-cost-first cloud operating system. Version `0.2.0` replaces the mock
+foundation with a real one: authentication, persistence, security scanning, and the cost guard all
+run against a live Cloudflare D1 database.
 
-This is a standalone project intended only for `OpenYsd/ysd-zero-cloud`. It has no dependency on, and makes no changes to, `OpenYsd/ysd-ai`.
+This is a standalone project intended only for `OpenYsd/ysd-zero-cloud`. It has no dependency on,
+and makes no changes to, `OpenYsd/ysd-ai`.
 
-## v0.1 surfaces
+## What is live
 
-- Home overview with resource health and free-tier usage
-- Projects and deployment history
-- Smart Deploy repository analysis and provider planning
-- Databases, Database Studio, and SQL Editor
-- Storage buckets and object usage
-- AI endpoints and mock inference playground
-- Game servers with idle sleep behavior
-- Bring-your-own nodes
-- Live-style logs and networking
-- Encrypted secret inventory
-- Usage and projected cost
-- Workspace settings and integration readiness
-- YSD Shield security center
+Every figure on these surfaces is read from your own D1 database at request time.
+
+| Surface | Backed by |
+| --- | --- |
+| Sign in / sign up | Better Auth on D1, email + password, optional GitHub OAuth |
+| Home | Live project, deployment, table, and usage counts |
+| Projects | `project` table, with create and delete |
+| Deployments | Smart Deploy plans recorded in `deployment`, accepted and blocked alike |
+| Databases | Live schema introspection of the D1 database |
+| Database Studio | Real rows, paginated and filtered, with credential columns redacted |
+| SQL Editor | Real statements, classified by the SQL guard before they reach the driver |
+| Logs | The `log_event` audit trail every mutating action writes to |
+| Secrets | AES-GCM sealed values in `secret`, write-only by design |
+| Usage | Counts measured from D1 against the free-tier catalog |
+| Zero Mode | A workspace setting the server enforces, not a client preference |
+| YSD Shield | Rules scored against a real snapshot of the workspace |
+
+Storage, AI, Game Servers, Nodes, and Networking are still design previews. They are labelled
+`Preview` in the navigation and carry a notice on the page explaining what is missing, because a
+convincing screen of invented numbers is worse than an honest empty one.
 
 ## Zero Mode
 
-Zero Mode is enabled by default. Before Smart Deploy can proceed, every planned resource is checked by `lib/zero-mode.ts`. A plan is blocked when a resource:
+Zero Mode is on by default and enforced on the server. `POST /api/smart-deploy` reads the flag from
+the workspace row and ignores any value in the request body, so a client cannot ask for the guard to
+be lifted — turning it off is a settings change, and settings changes are written to the audit log.
 
-- has a projected monthly cost above zero; or
-- is not explicitly eligible for a free tier.
+A plan is rejected unless **every** resource in it is both free-tier eligible and projected at
+exactly zero. There is no budget, no threshold, and no allowance for "just a little". Blocked plans
+are still recorded: a refusal is the more interesting half of an audit trail.
 
-The protection logic is isolated and covered by unit tests so real provider adapters can reuse the same policy later.
+The project has no billing relationship with any provider. `lib/zero-mode.ts` holds the catalog of
+resources the planner may reach for, and each entry states why it is free.
 
-## Mock-first integrations
+## Security
 
-The UI works without external credentials. `lib/integrations.ts` exposes a provider-neutral catalog for GitHub, Cloudflare, and Supabase, while `GET /api/integrations` reports which adapters are still in mock mode.
-
-Copy `.env.example` to `.env.local` when real credentials become available. Do not commit secrets.
-
-| Provider | Planned responsibility | Required configuration |
-| --- | --- | --- |
-| GitHub | Repository discovery and webhooks | `GITHUB_TOKEN` |
-| Cloudflare | Workers, DNS, and R2 | `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID` |
-| Supabase | PostgreSQL, Auth, and Storage | `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` |
+- **Secrets are write-only.** Values are sealed with AES-GCM (HKDF-derived key) before they reach
+  the database, and there is no endpoint that unseals them. Rotating means replacing.
+- **The SQL Editor cannot reach credentials.** `account`, `session`, and `verification` are
+  unreachable; `user` is read-only; writes need an explicit opt-in; structural statements, stacked
+  statements, and pragmas outside a short allow list are refused. See `lib/sql-guard.ts` and its
+  tests.
+- **Database Studio redacts on the server.** Password hashes, tokens, and ciphertext are masked
+  before a row leaves the Worker, so an API client sees the same redaction the browser does.
+- **Every API route requires a session** and is scoped to the caller's workspace.
 
 ## Local development
 
@@ -50,7 +64,17 @@ npm install
 npm run dev
 ```
 
-Open the local URL printed in the terminal. The development server chooses the next available port if `3000` is occupied.
+Open the printed URL and create a workspace. The schema is applied on the first request, so no
+database setup is needed — Miniflare provisions a local D1 database automatically.
+
+> **Windows note.** Miniflare stores the local database at
+> `<state>/v3/d1/miniflare-D1DatabaseObject/<database-id>.sqlite`. In a deeply nested checkout that
+> path can cross the 260-character limit, and SQLite reports the failure only as
+> `internal error; reference = …`. Set `YSD_LOCAL_STATE_PATH` to something short and restart:
+>
+> ```bash
+> YSD_LOCAL_STATE_PATH=C:/ysd-state npm run dev
+> ```
 
 ## Verification
 
@@ -61,31 +85,94 @@ npm run lint
 npm run build
 ```
 
+## Deployment
+
+Everything below is on Cloudflare's free plan.
+
+```bash
+wrangler d1 create ysd-zero-cloud
+```
+
+Paste the returned `database_id` into `wrangler.jsonc`, then:
+
+```bash
+wrangler secret put BETTER_AUTH_SECRET
+```
+
+```bash
+npm run db:migrate
+```
+
+```bash
+npm run build
+```
+
+`BETTER_AUTH_SECRET` is required outside development. The app falls back to a published development
+constant locally and refuses to start on that constant anywhere else.
+
+## Configuration
+
+Copy `.env.example` to `.env.local`. Only `BETTER_AUTH_SECRET` is required, and only outside
+development; every other entry unlocks an optional integration and is reported as
+`Not configured` in Settings until it is set.
+
+| Integration | Adds | Keys |
+| --- | --- | --- |
+| Cloudflare D1 | Workspace database and auth storage | `DB` binding |
+| GitHub sign-in | OAuth sign-in | `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` |
+| GitHub repositories | Real framework detection in Smart Deploy | `GITHUB_TOKEN` |
+| Cloudflare account | Reports D1 storage size | `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_D1_DATABASE_ID` |
+| Supabase | Optional PostgreSQL adapter | `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` |
+
+Without a `GITHUB_TOKEN`, Smart Deploy still inspects public repositories anonymously and marks the
+plan `inspected`; when it cannot read the repository it falls back to name-based inference and says
+so rather than presenting a guess as a fact.
+
+## Database
+
+Migrations live in `db/migrations` and run two ways: automatically on the first request of a Worker
+isolate (idempotent, so a cold start racing another converges), and through
+`wrangler d1 migrations apply` for a deliberate deploy.
+
+`db/migrations/0001_auth.sql` is generated from Better Auth itself rather than hand-written, so the
+schema cannot drift from the options the app boots with:
+
+```bash
+npm run auth:schema
+```
+
 ## Architecture
 
 ```text
 app/
-  [section]/             Cloud OS routes
+  page.tsx               Overview, loaded per request
+  [section]/             Workspace sections
   databases/[tool]/      Database Studio and SQL Editor
-  api/                   Integration and Smart Deploy boundaries
-components/
-  cloud-shell.tsx        Shared responsive operating surface
-  section-dashboard.tsx  Product-specific route views
-  smart-deploy-panel.tsx Interactive deployment planner
-  database-workspace.tsx Mock data and query workspace
+  sign-in, sign-up/      Better Auth screens
+  api/                   Session-scoped route handlers
+components/              Server views plus the interactive client surfaces
 lib/
-  integrations.ts        Provider-neutral adapter catalog
-  smart-deploy.ts        Extensible plan builder
-  zero-mode.ts           Cost protection policy
-tests/                   Node test runner coverage
+  domain.ts              Shapes that cross the server/client boundary
+  zero-mode.ts           Cost policy and the free-tier resource catalog
+  free-tier.ts           Allowances and usage arithmetic
+  sql-guard.ts           SQL Editor statement classification
+  shield.ts              Security rules and scoring, as pure functions
+  crypto.ts              AES-GCM envelope encryption for secrets
+  server/                D1 access, auth, and the per-surface data modules
+db/migrations/           SQL applied to D1
+tests/                   Node test runner coverage of every pure module
 ```
 
-The frontend is built with React 19, Vinext, Tailwind CSS, shadcn components, and Cloudflare-compatible ESM output.
+The server modules are the only place `cloudflare:workers` is imported. Client components read
+their types from `lib/domain.ts` so no Worker code can reach a browser bundle.
+
+The frontend is built with React 19, Vinext, Tailwind CSS, shadcn components, and Cloudflare
+Workers output.
 
 ## Roadmap
 
-1. Add OAuth-based GitHub repository discovery and signed webhooks.
-2. Implement Cloudflare and Supabase adapters behind the existing integration boundary.
-3. Persist projects and deployment state.
-4. Add authenticated organizations, roles, and audit trails.
-5. Execute Smart Deploy plans through durable background workflows.
+1. Execute accepted plans through a deploy pipeline rather than recording them.
+2. Back Storage with R2 and retire that preview.
+3. Add organizations, roles, and per-member audit scoping.
+4. Connected-node agent, which unlocks the Game Servers and Nodes surfaces.
+5. Read domains and routes from the Cloudflare API for Networking.

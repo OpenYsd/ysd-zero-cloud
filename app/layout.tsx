@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import { Geist, Geist_Mono } from 'next/font/google';
 import { CloudShell } from '@/components/cloud-shell';
+import { readSession } from '@/lib/server/session';
 import './globals.css';
 
 const geistSans = Geist({ variable: '--font-geist-sans', subsets: ['latin'] });
@@ -24,11 +25,20 @@ export const metadata: Metadata = {
   },
 };
 
-export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
+export default async function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
+  // Reading the session here makes every route dynamic, which is correct: no
+  // page in this app is the same for two different operators.
+  const session = await readSession();
+
   return (
     <html lang="en" className="dark">
       <body className={`${geistSans.variable} ${geistMono.variable} antialiased`}>
-        <CloudShell>{children}</CloudShell>
+        <CloudShell
+          user={session ? { name: session.user.name, email: session.user.email } : null}
+          zeroMode={session?.workspace.zeroMode ?? true}
+        >
+          {children}
+        </CloudShell>
       </body>
     </html>
   );

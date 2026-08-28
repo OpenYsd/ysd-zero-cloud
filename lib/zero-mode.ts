@@ -1,9 +1,23 @@
+/**
+ * Zero Mode: the cost guard every deployment plan passes through.
+ *
+ * The rule is deliberately blunt. A plan is only allowed when every resource
+ * in it is both free-tier eligible and projected at exactly zero. There is no
+ * budget, no threshold, and no override that lets a charge through: an
+ * operator who wants a paid resource has to turn the guard off first, and that
+ * decision is recorded rather than assumed.
+ */
+
+export type ResourceKind = 'compute' | 'database' | 'storage' | 'network' | 'ai';
+
 export type PlannedResource = {
   name: string;
   provider: string;
-  kind: 'compute' | 'database' | 'storage' | 'network' | 'ai';
+  kind: ResourceKind;
   estimatedMonthlyCost: number;
   freeTierEligible: boolean;
+  /** Why this resource stays inside a free allowance. */
+  note?: string;
 };
 
 export type ZeroModeDecision = {
@@ -42,3 +56,60 @@ export function enforceZeroMode(resources: PlannedResource[], enabled = true): Z
       : `Blocked ${blockedResources.length} billable resource${blockedResources.length === 1 ? '' : 's'}.`,
   };
 }
+
+/**
+ * The same guard applied to a single resource, for callers that build a plan
+ * incrementally and want to reject a bad addition at the point it is made.
+ */
+export function isZeroCost(resource: PlannedResource): boolean {
+  return resource.estimatedMonthlyCost === 0 && resource.freeTierEligible;
+}
+
+/**
+ * Free-tier resources the planner is allowed to reach for.
+ *
+ * Keeping the catalog here rather than inline in the planner means a resource
+ * cannot enter a plan without a reviewer seeing its cost claim.
+ */
+export const ZERO_COST_RESOURCES = {
+  cloudflareWorker: {
+    name: 'Cloudflare Worker',
+    provider: 'Cloudflare',
+    kind: 'compute',
+    estimatedMonthlyCost: 0,
+    freeTierEligible: true,
+    note: '100,000 requests per day on the free plan',
+  },
+  cloudflareD1: {
+    name: 'Cloudflare D1 database',
+    provider: 'Cloudflare',
+    kind: 'database',
+    estimatedMonthlyCost: 0,
+    freeTierEligible: true,
+    note: '5 GB storage and 5 million reads per day on the free plan',
+  },
+  cloudflareR2: {
+    name: 'Cloudflare R2 bucket',
+    provider: 'Cloudflare',
+    kind: 'storage',
+    estimatedMonthlyCost: 0,
+    freeTierEligible: true,
+    note: '10 GB storage with no egress fee',
+  },
+  cloudflarePages: {
+    name: 'Cloudflare static assets',
+    provider: 'Cloudflare',
+    kind: 'network',
+    estimatedMonthlyCost: 0,
+    freeTierEligible: true,
+    note: 'Unlimited static requests',
+  },
+  supabaseProject: {
+    name: 'Supabase project',
+    provider: 'Supabase',
+    kind: 'database',
+    estimatedMonthlyCost: 0,
+    freeTierEligible: true,
+    note: '500 MB database on the free plan',
+  },
+} as const satisfies Record<string, PlannedResource>;

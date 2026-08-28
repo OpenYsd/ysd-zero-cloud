@@ -38,3 +38,10 @@ next-env.d.ts
 /.wrangler/
 /outputs/
 /work/
+
+# local Miniflare state when YSD_LOCAL_STATE_PATH points inside the repo
+/ysd-state/
+
+# Cloudflare local secrets
+.dev.vars
+.dev.vars.*

@@ -1,13 +1,11 @@
 'use client';
 
 import Link from 'next/link';
-import { usePathname } from 'next/navigation';
+import { usePathname, useRouter } from 'next/navigation';
+import { useState } from 'react';
 import {
-  Activity,
-  Bell,
   Bot,
   Boxes,
-  ChevronDown,
   CloudCog,
   Database,
   Gamepad2,
@@ -16,21 +14,28 @@ import {
   Home,
   KeyRound,
   Layers3,
+  Loader2,
   LockKeyhole,
+  LogOut,
   Network,
   Rocket,
-  Search,
   Settings,
   ShieldCheck,
   TerminalSquare,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
 import { Switch } from '@/components/ui/switch';
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import { signOut } from '@/lib/auth-client';
+import { isLiveSection, isSection } from '@/lib/domain';
 import { cn } from '@/lib/utils';
 import { ZeroModeProvider, useZeroMode } from '@/components/zero-mode-provider';
 
+export type ShellUser = { name: string; email: string };
+
+/**
+ * The sidebar. `live` is derived from the shared section catalog rather than
+ * restated here, so the "Preview" badge always matches what the page renders.
+ */
 const navigation = [
   { label: 'Home', href: '/', icon: Home },
   { label: 'Projects', href: '/projects', icon: Layers3 },
@@ -46,7 +51,10 @@ const navigation = [
   { label: 'Usage', href: '/usage', icon: Gauge },
   { label: 'YSD Shield', href: '/shield', icon: ShieldCheck },
   { label: 'Settings', href: '/settings', icon: Settings },
-];
+].map((item) => {
+  const slug = item.href.slice(1);
+  return { ...item, live: slug === '' || (isSection(slug) && isLiveSection(slug)) };
+});
 
 function BrandMark() {
   return (
@@ -56,15 +64,39 @@ function BrandMark() {
   );
 }
 
-export function CloudShell({ children }: { children: React.ReactNode }) {
+/**
+ * The workspace frame.
+ *
+ * Anonymous visits render the bare centred layout the sign-in screens use, so
+ * the navigation never advertises surfaces the visitor cannot open.
+ */
+export function CloudShell({
+  children,
+  user,
+  zeroMode,
+}: {
+  children: React.ReactNode;
+  user: ShellUser | null;
+  zeroMode: boolean;
+}) {
+  if (!user) {
+    return (
+      <ZeroModeProvider initialEnabled={zeroMode} persist={false}>
+        <div className="grid min-h-screen place-items-center bg-background px-4 py-10 text-foreground">
+          {children}
+        </div>
+      </ZeroModeProvider>
+    );
+  }
+
   return (
-    <ZeroModeProvider>
-      <CloudShellFrame>{children}</CloudShellFrame>
+    <ZeroModeProvider initialEnabled={zeroMode}>
+      <CloudShellFrame user={user}>{children}</CloudShellFrame>
     </ZeroModeProvider>
   );
 }
 
-function CloudShellFrame({ children }: { children: React.ReactNode }) {
+function CloudShellFrame({ children, user }: { children: React.ReactNode; user: ShellUser }) {
   const pathname = usePathname();
   const zeroMode = useZeroMode();
 
@@ -75,7 +107,7 @@ function CloudShellFrame({ children }: { children: React.ReactNode }) {
           <BrandMark />
           <div>
             <p className="text-sm font-semibold leading-none tracking-tight text-white">YSD Zero Cloud</p>
-            <p className="mt-1 text-[10px] font-medium uppercase tracking-[0.16em] text-white/35">Cloud OS · v0.1</p>
+            <p className="mt-1 text-[10px] font-medium uppercase tracking-[0.16em] text-white/35">Cloud OS · v0.2</p>
           </div>
         </div>
 
@@ -96,8 +128,10 @@ function CloudShellFrame({ children }: { children: React.ReactNode }) {
                 >
                   <Icon className={cn('size-4', active ? 'text-[#b7ff3c]' : 'text-white/32 group-hover:text-white/65')} />
                   <span>{item.label}</span>
-                  {item.href === '/shield' && (
-                    <span className="ml-auto rounded-full bg-[#b7ff3c]/10 px-1.5 text-[9px] text-[#b7ff3c]">SAFE</span>
+                  {!item.live && (
+                    <span className="ml-auto rounded-full border border-white/[0.08] px-1.5 text-[9px] text-white/30">
+                      Preview
+                    </span>
                   )}
                 </Link>
               );
@@ -111,10 +145,19 @@ function CloudShellFrame({ children }: { children: React.ReactNode }) {
               <LockKeyhole className="size-3.5 text-[#b7ff3c]" />
               <span className="text-xs font-semibold text-white/85">Zero Mode</span>
             </div>
-            <Switch checked={zeroMode.enabled} onCheckedChange={zeroMode.setEnabled} aria-label="Toggle Zero Mode" className="data-checked:bg-[#b7ff3c]" />
+            <Switch
+              checked={zeroMode.enabled}
+              onCheckedChange={zeroMode.setEnabled}
+              disabled={zeroMode.pending}
+              aria-label="Toggle Zero Mode"
+              className="data-checked:bg-[#b7ff3c]"
+            />
           </div>
           <p className="mt-2 text-[10px] leading-4 text-white/34">
-            {zeroMode.enabled ? 'Paid services are blocked automatically.' : 'Cost guard is currently paused.'}
+            {zeroMode.error ??
+              (zeroMode.enabled
+                ? 'Paid resources are blocked before a plan runs.'
+                : 'Cost guard is paused. Plans with a charge will be accepted.')}
           </p>
         </div>
       </aside>
@@ -125,37 +168,30 @@ function CloudShellFrame({ children }: { children: React.ReactNode }) {
             <BrandMark />
             <span className="hidden text-sm font-semibold sm:block">YSD Zero</span>
           </div>
-          <div className="relative hidden w-full max-w-[380px] sm:block">
-            <Search className="pointer-events-none absolute left-3 top-1/2 size-3.5 -translate-y-1/2 text-white/28" />
-            <Input
-              aria-label="Search the cloud workspace"
-              placeholder="Search resources, projects, logs…"
-              className="h-8 border-white/[0.07] bg-white/[0.035] pl-9 text-xs placeholder:text-white/25 focus-visible:border-[#b7ff3c]/40 focus-visible:ring-[#b7ff3c]/10"
-            />
-          </div>
-          <div className="ml-auto flex items-center gap-1.5">
-            <div className="hidden items-center gap-2 rounded-full border border-[#b7ff3c]/15 bg-[#b7ff3c]/[0.045] px-2.5 py-1.5 text-[10px] font-semibold text-[#c8ff69] lg:flex">
-              <span className="size-1.5 rounded-full bg-[#b7ff3c] shadow-[0_0_8px_#b7ff3c]" /> All systems operational
+          <div className="ml-auto flex items-center gap-2">
+            <div
+              className={cn(
+                'hidden items-center gap-2 rounded-full border px-2.5 py-1.5 text-[10px] font-semibold lg:flex',
+                zeroMode.enabled
+                  ? 'border-[#b7ff3c]/15 bg-[#b7ff3c]/[0.045] text-[#c8ff69]'
+                  : 'border-amber-400/20 bg-amber-400/[0.05] text-amber-300',
+              )}
+            >
+              <span
+                className={cn(
+                  'size-1.5 rounded-full',
+                  zeroMode.enabled ? 'bg-[#b7ff3c] shadow-[0_0_8px_#b7ff3c]' : 'bg-amber-300',
+                )}
+              />
+              {zeroMode.enabled ? 'Zero Mode enforced' : 'Zero Mode paused'}
             </div>
-            <Tooltip>
-              <TooltipTrigger render={<Button variant="ghost" size="icon" aria-label="Open activity" />}><Activity /></TooltipTrigger>
-              <TooltipContent>Activity</TooltipContent>
-            </Tooltip>
-            <Tooltip>
-              <TooltipTrigger render={<Button variant="ghost" size="icon" aria-label="Open notifications" />}><Bell /></TooltipTrigger>
-              <TooltipContent>Notifications</TooltipContent>
-            </Tooltip>
-            <Button variant="ghost" className="gap-2 px-2 text-xs">
-              <span className="grid size-6 place-items-center rounded-md bg-[#7569ff] text-[10px] font-bold text-white">YS</span>
-              <span className="hidden sm:inline">OpenYsd</span>
-              <ChevronDown className="size-3 text-white/35" />
-            </Button>
+            <UserMenu user={user} />
           </div>
         </header>
 
         <div className="border-b border-white/[0.065] bg-[#0b100e] px-4 py-2 md:hidden">
           <nav className="flex gap-1 overflow-x-auto" aria-label="Mobile navigation">
-            {navigation.slice(0, 8).map((item) => {
+            {navigation.map((item) => {
               const active = item.href === '/' ? pathname === '/' : pathname.startsWith(item.href);
               return (
                 <Link key={item.href} href={item.href} className={cn('shrink-0 rounded-md px-3 py-1.5 text-[11px] font-medium', active ? 'bg-[#b7ff3c]/10 text-[#c8ff69]' : 'text-white/40')}>
@@ -170,6 +206,48 @@ function CloudShellFrame({ children }: { children: React.ReactNode }) {
           {children}
         </main>
       </div>
+    </div>
+  );
+}
+
+function initials(name: string, email: string): string {
+  const source = name.trim() || email;
+  const parts = source.split(/[\s@._-]+/).filter(Boolean);
+  return `${parts[0]?.[0] ?? 'Y'}${parts[1]?.[0] ?? ''}`.toUpperCase();
+}
+
+function UserMenu({ user }: { user: ShellUser }) {
+  const router = useRouter();
+  const [pending, setPending] = useState(false);
+
+  async function handleSignOut() {
+    setPending(true);
+    try {
+      await signOut();
+      router.push('/sign-in');
+      router.refresh();
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return (
+    <div className="flex items-center gap-2">
+      <div className="flex items-center gap-2 rounded-lg border border-white/[0.07] bg-white/[0.025] px-2 py-1.5">
+        <span className="grid size-6 place-items-center rounded-md bg-[#7569ff] text-[10px] font-bold text-white">
+          {initials(user.name, user.email)}
+        </span>
+        <span className="hidden max-w-[160px] truncate text-xs text-white/70 sm:inline">{user.email}</span>
+      </div>
+      <Button
+        variant="ghost"
+        size="icon"
+        aria-label="Sign out"
+        onClick={handleSignOut}
+        disabled={pending}
+      >
+        {pending ? <Loader2 className="animate-spin" /> : <LogOut />}
+      </Button>
     </div>
   );
 }
