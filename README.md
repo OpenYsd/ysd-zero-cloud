@@ -185,12 +185,30 @@ wrangler secret put BETTER_AUTH_SECRET
 npm run db:migrate
 ```
 
+Before every deployment, explicitly attest the free plan and expected D1 binding in the current
+shell. The deployment is blocked unless the confirmed monthly estimate is exactly zero:
+
 ```bash
-npm run predeploy && npm run deploy
+YSD_FREE_TIER_VERIFIED=true \
+YSD_ESTIMATED_MONTHLY_COST=0 \
+YSD_D1_DATABASE_ID=4175f8f4-34ff-4234-bbf4-72cc2602c520 \
+npm run deploy
 ```
 
-`predeploy` builds and then normalises the generated `dist/server/wrangler.json`: the Vite plugin
-emits it with the wrangler version it bundles, which still writes fields a newer CLI refuses.
+PowerShell:
+
+```powershell
+$env:YSD_FREE_TIER_VERIFIED = 'true'
+$env:YSD_ESTIMATED_MONTHLY_COST = '0'
+$env:YSD_D1_DATABASE_ID = '4175f8f4-34ff-4234-bbf4-72cc2602c520'
+npm run deploy
+```
+
+The `predeploy` lifecycle builds, normalises the generated `dist/server/wrangler.json`, and runs
+the Zero Mode deployment guard automatically. The guard refuses an unexpected D1 database, any
+paid-capable binding, or a cost value other than exactly zero. The Vite plugin emits the generated
+configuration with the Wrangler version it bundles, so normalisation also removes fields a newer
+CLI refuses.
 
 `BETTER_AUTH_SECRET` is required outside development. The app falls back to a published development
 constant locally and refuses to start on that constant anywhere else.
@@ -204,10 +222,12 @@ development; every other entry unlocks an optional integration and is reported a
 | Integration | Adds | Keys |
 | --- | --- | --- |
 | Cloudflare D1 | Workspace database and auth storage | `DB` binding |
+| Better Auth | D1-backed identities and sessions | `BETTER_AUTH_SECRET` |
+| Cloudflare Turnstile | Bot protection for sign-in and sign-up | `TURNSTILE_SITE_KEY`, `TURNSTILE_SECRET_KEY` |
+| Verification email | Verified-email links on Resend's free tier | `RESEND_API_KEY`, `YSD_EMAIL_FROM` |
 | GitHub sign-in | OAuth sign-in | `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` |
 | GitHub repositories | Real framework detection in Smart Deploy | `GITHUB_TOKEN` |
 | Cloudflare account | Reports D1 storage size | `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_D1_DATABASE_ID` |
-| Supabase | Optional PostgreSQL adapter | `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` |
 
 Without a `GITHUB_TOKEN`, Smart Deploy still inspects public repositories anonymously and marks the
 plan `inspected`; when it cannot read the repository it falls back to name-based inference and says

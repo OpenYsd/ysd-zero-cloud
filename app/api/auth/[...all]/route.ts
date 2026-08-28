@@ -1,6 +1,10 @@
 import { getAuth, trustedOrigins } from '@/lib/server/auth';
 import { clientAddress, enforceRateLimit } from '@/lib/server/rate-limit';
-import { auditAuthEvent, checkLockout, noteSignIn } from '@/lib/server/security';
+import {
+  auditAuthEvent,
+  checkLockout,
+  noteSignIn,
+} from '@/lib/server/security';
 import { verifyTurnstile } from '@/lib/server/turnstile';
 import { ensureWorkspace } from '@/lib/server/workspace';
 import type { RateLimitName } from '@/lib/rate-limit';
@@ -21,14 +25,29 @@ import type { RateLimitName } from '@/lib/rate-limit';
  */
 
 /** Which endpoints are worth protecting, and under which rule. */
-const GUARDED: Record<string, { rule: RateLimitName; challenge: boolean; lockout: boolean }> = {
-  'sign-in/email': { rule: 'auth:sign-in', challenge: true, lockout: true },
-  'sign-up/email': { rule: 'auth:sign-up', challenge: true, lockout: false },
-  'forget-password': { rule: 'auth:reset', challenge: true, lockout: false },
-  'reset-password': { rule: 'auth:reset', challenge: false, lockout: false },
+const GUARDED: Record<
+  string,
+  { rule: RateLimitName; challengeAction?: string; lockout: boolean }
+> = {
+  'sign-in/email': {
+    rule: 'auth:sign-in',
+    challengeAction: 'sign-in',
+    lockout: true,
+  },
+  'sign-up/email': {
+    rule: 'auth:sign-up',
+    challengeAction: 'sign-up',
+    lockout: false,
+  },
+  'forget-password': {
+    rule: 'auth:reset',
+    challengeAction: 'password-reset',
+    lockout: false,
+  },
+  'reset-password': { rule: 'auth:reset', lockout: false },
   // Re-sending a verification link is a mail-spend and a user-enumeration
   // probe, so it is budgeted like a reset rather than left open.
-  'send-verification-email': { rule: 'auth:verify', challenge: false, lockout: false },
+  'send-verification-email': { rule: 'auth:verify', lockout: false },
 };
 
 function guardFor(pathname: string) {
@@ -42,7 +61,9 @@ function guardFor(pathname: string) {
  * A Request body can only be consumed once, so the guards and Better Auth
  * cannot both read the original.
  */
-async function readBody(request: Request): Promise<{ body: Record<string, unknown>; next: Request }> {
+async function readBody(
+  request: Request,
+): Promise<{ body: Record<string, unknown>; next: Request }> {
   const raw = await request.text();
   let body: Record<string, unknown> = {};
   try {
@@ -50,7 +71,14 @@ async function readBody(request: Request): Promise<{ body: Record<string, unknow
   } catch {
     body = {};
   }
-  return { body, next: new Request(request.url, { method: request.method, headers: request.headers, body: raw }) };
+  return {
+    body,
+    next: new Request(request.url, {
+      method: request.method,
+      headers: request.headers,
+      body: raw,
+    }),
+  };
 }
 
 /**
@@ -60,17 +88,26 @@ async function readBody(request: Request): Promise<{ body: Record<string, unknow
  * origin is configured at all (local development, where the deployed origin is
  * unknown and enforcing would block every request).
  */
-function verifyRequestOrigin(request: Request): { ok: boolean; message: string } {
+function verifyRequestOrigin(request: Request): {
+  ok: boolean;
+  message: string;
+} {
   const trusted = trustedOrigins();
   if (trusted.length === 0) return { ok: true, message: '' };
 
   const origin = request.headers.get('Origin');
   if (!origin) {
-    return { ok: false, message: 'This request must be made from the application.' };
+    return {
+      ok: false,
+      message: 'This request must be made from the application.',
+    };
   }
   const normalized = origin.replace(/\/+$/, '');
   if (!trusted.includes(normalized)) {
-    return { ok: false, message: 'This request came from an untrusted origin.' };
+    return {
+      ok: false,
+      message: 'This request came from an untrusted origin.',
+    };
   }
   return { ok: true, message: '' };
 }
@@ -112,9 +149,10 @@ async function handler(request: Request): Promise<Response> {
   const { body, next } = await readBody(request);
   const email = typeof body.email === 'string' ? body.email : '';
 
-  if (guard.challenge) {
-    const token = typeof body.turnstileToken === 'string' ? body.turnstileToken : '';
-    const verdict = await verifyTurnstile(token, ip);
+  if (guard.challengeAction) {
+    const token =
+      typeof body.turnstileToken === 'string' ? body.turnstileToken : '';
+    const verdict = await verifyTurnstile(token, ip, guard.challengeAction);
     if (!verdict.ok) {
       return Response.json(
         { message: verdict.message, code: 'CHALLENGE_FAILED' },
@@ -158,7 +196,9 @@ async function handler(request: Request): Promise<Response> {
     let workspaceId: string | undefined;
     if (response.ok) {
       try {
-        const session = await auth.api.getSession({ headers: response.headers });
+        const session = await auth.api.getSession({
+          headers: response.headers,
+        });
         if (session?.user) {
           const workspace = await ensureWorkspace(
             session.user.id,
@@ -171,7 +211,13 @@ async function handler(request: Request): Promise<Response> {
         // Auditing must not break the sign-in it is describing.
       }
     }
-    await noteSignIn({ email, ip, userAgent, success: response.ok, workspaceId });
+    await noteSignIn({
+      email,
+      ip,
+      userAgent,
+      success: response.ok,
+      workspaceId,
+    });
   }
 
   if (path === 'forget-password' && email) {
@@ -187,7 +233,11 @@ async function handler(request: Request): Promise<Response> {
   }
 
   if (path === 'send-verification-email' && email) {
-    await auditAuthEvent({ email, ip, message: 'Verification email requested' });
+    await auditAuthEvent({
+      email,
+      ip,
+      message: 'Verification email requested',
+    });
   }
 
   if (path === 'verify-email' && response.ok) {

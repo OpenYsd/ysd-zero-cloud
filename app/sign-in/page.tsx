@@ -10,9 +10,12 @@ export const metadata: Metadata = { title: 'Sign in' };
 
 export default async function SignInPage() {
   if (await readSession()) redirect('/');
-  return <AuthForm
+  return (
+    <AuthForm
       mode="sign-in"
       githubEnabled={hasGithubOAuth(runtimeEnv)}
       turnstileSiteKey={turnstileSiteKey()}
-    />;
+      emailVerificationRequired={false}
+    />
+  );
 }

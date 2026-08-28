@@ -3,6 +3,8 @@ import { env } from 'cloudflare:workers';
 import { splitStatements, stripSqlComments } from '@/lib/sql-guard';
 import authSchema from '../../db/migrations/0001_auth.sql?raw';
 import workspaceSchema from '../../db/migrations/0002_workspace.sql?raw';
+import authRateLimitSchema from '../../db/migrations/0003_auth_rate_limit.sql?raw';
+import securitySchema from '../../db/migrations/0004_security.sql?raw';
 
 /**
  * D1 access and schema management.
@@ -16,6 +18,8 @@ import workspaceSchema from '../../db/migrations/0002_workspace.sql?raw';
 const MIGRATIONS: { name: string; sql: string }[] = [
   { name: '0001_auth', sql: authSchema },
   { name: '0002_workspace', sql: workspaceSchema },
+  { name: '0003_auth_rate_limit', sql: authRateLimitSchema },
+  { name: '0004_security', sql: securitySchema },
 ];
 
 const LEDGER = `CREATE TABLE IF NOT EXISTS ysd_migration (
@@ -24,7 +28,16 @@ const LEDGER = `CREATE TABLE IF NOT EXISTS ysd_migration (
 )`;
 
 /** Tables the app owns. Studio and Shield use this to separate them from D1 internals. */
-export const AUTH_TABLES = ['user', 'session', 'account', 'verification'] as const;
+export const AUTH_TABLES = [
+  'user',
+  'session',
+  'account',
+  'verification',
+  'rateLimit',
+  'user_role',
+  'auth_attempt',
+  'rate_limit',
+] as const;
 export const WORKSPACE_TABLES = [
   'workspace',
   'project',
@@ -55,7 +68,11 @@ function isAlreadyExists(error: unknown): boolean {
   return /already exists/i.test(message);
 }
 
-async function applyMigration(database: D1Database, name: string, sql: string): Promise<boolean> {
+async function applyMigration(
+  database: D1Database,
+  name: string,
+  sql: string,
+): Promise<boolean> {
   const applied = await database
     .prepare('SELECT 1 AS ok FROM ysd_migration WHERE name = ?')
     .bind(name)
@@ -67,13 +84,18 @@ async function applyMigration(database: D1Database, name: string, sql: string): 
       await database.prepare(statement).run();
     } catch (error) {
       if (!isAlreadyExists(error)) {
-        throw new Error(`Migration ${name} failed on: ${statement.slice(0, 120)}`, { cause: error });
+        throw new Error(
+          `Migration ${name} failed on: ${statement.slice(0, 120)}`,
+          { cause: error },
+        );
       }
     }
   }
 
   await database
-    .prepare('INSERT OR IGNORE INTO ysd_migration (name, appliedAt) VALUES (?, ?)')
+    .prepare(
+      'INSERT OR IGNORE INTO ysd_migration (name, appliedAt) VALUES (?, ?)',
+    )
     .bind(name, Date.now())
     .run();
   return true;
@@ -104,7 +126,10 @@ export async function db(): Promise<D1Database> {
   return getDatabase();
 }
 
-export async function query<T>(sql: string, ...params: unknown[]): Promise<T[]> {
+export async function query<T>(
+  sql: string,
+  ...params: unknown[]
+): Promise<T[]> {
   const database = await db();
   const result = await database
     .prepare(sql)
@@ -113,7 +138,10 @@ export async function query<T>(sql: string, ...params: unknown[]): Promise<T[]> 
   return result.results ?? [];
 }
 
-export async function queryOne<T>(sql: string, ...params: unknown[]): Promise<T | null> {
+export async function queryOne<T>(
+  sql: string,
+  ...params: unknown[]
+): Promise<T | null> {
   const database = await db();
   return (
     (await database
@@ -123,7 +151,10 @@ export async function queryOne<T>(sql: string, ...params: unknown[]): Promise<T 
   );
 }
 
-export async function execute(sql: string, ...params: unknown[]): Promise<D1Result> {
+export async function execute(
+  sql: string,
+  ...params: unknown[]
+): Promise<D1Result> {
   const database = await db();
   return database
     .prepare(sql)
@@ -132,7 +163,10 @@ export async function execute(sql: string, ...params: unknown[]): Promise<D1Resu
 }
 
 /** `COUNT(*)` for a statement that already filters to one workspace. */
-export async function count(sql: string, ...params: unknown[]): Promise<number> {
+export async function count(
+  sql: string,
+  ...params: unknown[]
+): Promise<number> {
   const row = await queryOne<{ total: number }>(sql, ...params);
   return row?.total ?? 0;
 }

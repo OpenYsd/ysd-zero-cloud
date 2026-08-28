@@ -5,7 +5,7 @@ import {
   type ZeroModeDecision,
 } from './zero-mode.ts';
 
-export type DeployTarget = 'auto' | 'cloudflare' | 'supabase' | 'gpu';
+export type DeployTarget = 'auto' | 'cloudflare' | 'd1' | 'gpu';
 
 export type Framework = 'Next.js' | 'Vite' | 'Node.js' | 'Static';
 
@@ -39,16 +39,27 @@ export type SmartDeployPlan = {
  * repository name when they do not. Name matching is a guess, so the plan
  * reports it as `inferred` rather than presenting it as fact.
  */
-export function detectFramework(repository: string, signals?: RepositorySignals): Framework {
+export function detectFramework(
+  repository: string,
+  signals?: RepositorySignals,
+): Framework {
   const dependencies = new Set(signals?.dependencies ?? []);
   const files = new Set(signals?.files ?? []);
 
   if (dependencies.has('next') || dependencies.has('vinext')) return 'Next.js';
-  if (dependencies.has('vite') || files.has('vite.config.ts') || files.has('vite.config.js')) {
+  if (
+    dependencies.has('vite') ||
+    files.has('vite.config.ts') ||
+    files.has('vite.config.js')
+  ) {
     return 'Vite';
   }
   if (files.has('index.html') && dependencies.size === 0) return 'Static';
-  if (dependencies.has('express') || dependencies.has('hono') || dependencies.has('fastify')) {
+  if (
+    dependencies.has('express') ||
+    dependencies.has('hono') ||
+    dependencies.has('fastify')
+  ) {
     return 'Node.js';
   }
 
@@ -59,7 +70,10 @@ export function detectFramework(repository: string, signals?: RepositorySignals)
   return 'Next.js';
 }
 
-function resourcesFor(target: Exclude<DeployTarget, 'auto'>, framework: Framework): PlannedResource[] {
+function resourcesFor(
+  target: Exclude<DeployTarget, 'auto'>,
+  framework: Framework,
+): PlannedResource[] {
   if (target === 'gpu') {
     // Kept in the catalog on purpose: the planner must be able to describe a
     // paid option so Zero Mode has something real to reject.
@@ -74,11 +88,16 @@ function resourcesFor(target: Exclude<DeployTarget, 'auto'>, framework: Framewor
     ];
   }
 
-  if (target === 'supabase') {
-    return [{ ...ZERO_COST_RESOURCES.supabaseProject }];
+  if (target === 'd1') {
+    return [
+      { ...ZERO_COST_RESOURCES.cloudflareWorker },
+      { ...ZERO_COST_RESOURCES.cloudflareD1 },
+    ];
   }
 
-  const resources: PlannedResource[] = [{ ...ZERO_COST_RESOURCES.cloudflareWorker }];
+  const resources: PlannedResource[] = [
+    { ...ZERO_COST_RESOURCES.cloudflareWorker },
+  ];
   if (framework === 'Next.js' || framework === 'Node.js') {
     resources.push({ ...ZERO_COST_RESOURCES.cloudflareD1 });
   }
@@ -88,13 +107,19 @@ function resourcesFor(target: Exclude<DeployTarget, 'auto'>, framework: Framewor
   return resources;
 }
 
-function stepsFor(framework: Framework, target: Exclude<DeployTarget, 'auto'>): string[] {
-  const build = framework === 'Static' ? 'Collect static assets' : 'Build artifact';
+function stepsFor(
+  framework: Framework,
+  target: Exclude<DeployTarget, 'auto'>,
+): string[] {
+  const build =
+    framework === 'Static' ? 'Collect static assets' : 'Build artifact';
   return [
     'Inspect repository',
     'Resolve zero-cost resources',
     build,
-    target === 'cloudflare' ? 'Upload to Cloudflare' : `Provision on ${target}`,
+    target === 'cloudflare' || target === 'd1'
+      ? 'Upload to Cloudflare'
+      : `Provision on ${target}`,
     'Run health checks',
   ];
 }
@@ -113,7 +138,8 @@ export function createSmartDeployPlan(
     id: `plan_${repository.replace(/[^a-z0-9]/gi, '_').toLowerCase()}`,
     repository,
     framework,
-    confidence: signals?.dependencies || signals?.files ? 'inspected' : 'inferred',
+    confidence:
+      signals?.dependencies || signals?.files ? 'inspected' : 'inferred',
     target,
     steps: stepsFor(framework, normalizedTarget),
     resources,

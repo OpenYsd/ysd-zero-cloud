@@ -17,7 +17,7 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "ysd-zero-cloud",
   "main": "dist/server/index.js",
-  "compatibility_date": "2026-05-15",
+  "compatibility_date": "2026-08-28",
   "compatibility_flags": ["nodejs_compat"],
   "observability": {
     "enabled": true
@@ -29,6 +29,9 @@
     // `lib/server/auth.ts` — so the production origin cannot leak into a dev
     // session through this file.
     "BETTER_AUTH_URL": "https://ysd-zero-cloud.ysd-zero-cloud.workers.dev"
+  },
+  "secrets": {
+    "required": ["BETTER_AUTH_SECRET"]
   },
   "d1_databases": [
     {

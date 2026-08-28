@@ -1,11 +1,23 @@
 'use client';
 
 import { useState } from 'react';
-import { Cloud, Database, GitBranch, KeyRound, Loader2 } from 'lucide-react';
+import {
+  Cloud,
+  Database,
+  GitBranch,
+  KeyRound,
+  Loader2,
+  MailCheck,
+  ShieldCheck,
+  UserRoundCheck,
+} from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Switch } from '@/components/ui/switch';
 import { useZeroMode } from '@/components/zero-mode-provider';
-import type { IntegrationDescriptor, IntegrationProvider } from '@/lib/integrations';
+import type {
+  IntegrationDescriptor,
+  IntegrationProvider,
+} from '@/lib/integrations';
 import type { Workspace, WorkspaceSetting } from '@/lib/domain';
 
 const ICONS: Record<IntegrationProvider, typeof Cloud> = {
@@ -13,7 +25,9 @@ const ICONS: Record<IntegrationProvider, typeof Cloud> = {
   'github-oauth': GitBranch,
   cloudflare: Cloud,
   'cloudflare-d1': Database,
-  supabase: Database,
+  'better-auth': UserRoundCheck,
+  turnstile: ShieldCheck,
+  email: MailCheck,
 };
 
 const STATUS_LABEL = {
@@ -61,13 +75,19 @@ export function SettingsView({
   return (
     <div className="grid gap-4 xl:grid-cols-[1fr_1.2fr]">
       <article className="cloud-card p-5">
-        <h2 className="text-sm font-semibold text-white/80">Workspace defaults</h2>
+        <h2 className="text-sm font-semibold text-white/80">
+          Workspace defaults
+        </h2>
         <p className="mt-1 text-[10px] text-white/27">
           Stored on the workspace row and applied on the server.
         </p>
         <div className="mt-6 space-y-5">
           {TOGGLES.map((toggle) => (
-            <SettingToggle key={toggle.setting} toggle={toggle} initial={workspace[toggle.setting]} />
+            <SettingToggle
+              key={toggle.setting}
+              toggle={toggle}
+              initial={workspace[toggle.setting]}
+            />
           ))}
         </div>
       </article>
@@ -76,20 +96,28 @@ export function SettingsView({
         <div className="border-b border-white/[0.065] px-5 py-4">
           <h2 className="text-sm font-semibold text-white/80">Integrations</h2>
           <p className="mt-1 text-[10px] text-white/27">
-            Configure these as Worker secrets. Only the key names are ever shown here.
+            Configure these as Worker secrets. Only the key names are ever shown
+            here.
           </p>
         </div>
         <div className="divide-y divide-white/[0.055]">
           {integrations.map((integration) => {
             const Icon = ICONS[integration.id];
             return (
-              <div key={integration.id} className="flex items-center gap-4 px-5 py-4">
+              <div
+                key={integration.id}
+                className="flex items-center gap-4 px-5 py-4"
+              >
                 <span className="grid size-9 shrink-0 place-items-center rounded-lg border border-white/[0.07] bg-white/[0.03] text-white/48">
                   <Icon className="size-4" />
                 </span>
                 <div className="min-w-0">
-                  <p className="text-xs font-semibold text-white/70">{integration.name}</p>
-                  <p className="mt-1 text-[10px] text-white/27">{integration.purpose}</p>
+                  <p className="text-xs font-semibold text-white/70">
+                    {integration.name}
+                  </p>
+                  <p className="mt-1 text-[10px] text-white/27">
+                    {integration.purpose}
+                  </p>
                   {integration.envKeys.length > 0 && (
                     <p className="mt-1 flex flex-wrap items-center gap-1 font-mono text-[9px] text-white/22">
                       <KeyRound className="size-2.5" />
@@ -97,7 +125,9 @@ export function SettingsView({
                     </p>
                   )}
                   {integration.binding && (
-                    <p className="mt-1 font-mono text-[9px] text-white/22">binding: {integration.binding}</p>
+                    <p className="mt-1 font-mono text-[9px] text-white/22">
+                      binding: {integration.binding}
+                    </p>
                   )}
                 </div>
                 <Badge
@@ -119,7 +149,13 @@ export function SettingsView({
   );
 }
 
-function SettingToggle({ toggle, initial }: { toggle: Toggle; initial: boolean }) {
+function SettingToggle({
+  toggle,
+  initial,
+}: {
+  toggle: Toggle;
+  initial: boolean;
+}) {
   const zeroMode = useZeroMode();
   const [checked, setChecked] = useState(initial);
   const [pending, setPending] = useState(false);
@@ -149,12 +185,18 @@ function SettingToggle({ toggle, initial }: { toggle: Toggle; initial: boolean }
         body: JSON.stringify({ setting: toggle.setting, value: next }),
       });
       if (!response.ok) {
-        const body = (await response.json().catch(() => ({}))) as { error?: string };
+        const body = (await response.json().catch(() => ({}))) as {
+          error?: string;
+        };
         throw new Error(body.error ?? 'The setting could not be saved.');
       }
     } catch (cause) {
       setChecked(previous);
-      setError(cause instanceof Error ? cause.message : 'The setting could not be saved.');
+      setError(
+        cause instanceof Error
+          ? cause.message
+          : 'The setting could not be saved.',
+      );
     } finally {
       setPending(false);
     }
@@ -167,7 +209,9 @@ function SettingToggle({ toggle, initial }: { toggle: Toggle; initial: boolean }
           {toggle.title}
           {busy && <Loader2 className="size-3 animate-spin text-white/30" />}
         </p>
-        <p className="mt-1 max-w-sm text-[10px] leading-4 text-white/27">{message ?? toggle.copy}</p>
+        <p className="mt-1 max-w-sm text-[10px] leading-4 text-white/27">
+          {message ?? toggle.copy}
+        </p>
       </div>
       <Switch
         checked={value}

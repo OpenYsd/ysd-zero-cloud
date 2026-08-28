@@ -1,4 +1,10 @@
-import { isTurnstileConfigured, readTurnstileConfig, TURNSTILE_OK, verifyTurnstileToken, type TurnstileVerdict } from '@/lib/turnstile';
+import {
+  isTurnstileConfigured,
+  readTurnstileConfig,
+  TURNSTILE_OK,
+  verifyTurnstileToken,
+  type TurnstileVerdict,
+} from '@/lib/turnstile';
 import { runtimeEnv } from './env';
 
 /**
@@ -19,8 +25,23 @@ export function turnstileSiteKey(): string | null {
   return readTurnstileConfig(runtimeEnv)?.siteKey ?? null;
 }
 
-export async function verifyTurnstile(token: string, remoteIp: string): Promise<TurnstileVerdict> {
+export async function verifyTurnstile(
+  token: string,
+  remoteIp: string,
+  expectedAction: string,
+): Promise<TurnstileVerdict> {
   const config = readTurnstileConfig(runtimeEnv);
   if (!config) return TURNSTILE_OK;
-  return verifyTurnstileToken(token, config.secretKey, remoteIp || undefined);
+  const origin = runtimeEnv.BETTER_AUTH_URL?.trim();
+  let expectedHostname: string | undefined;
+  try {
+    expectedHostname = origin ? new URL(origin).hostname : undefined;
+  } catch {
+    expectedHostname = undefined;
+  }
+  return verifyTurnstileToken(token, config.secretKey, {
+    remoteIp: remoteIp || undefined,
+    expectedAction,
+    expectedHostname,
+  });
 }

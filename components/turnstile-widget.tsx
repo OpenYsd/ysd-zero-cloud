@@ -24,6 +24,7 @@ declare global {
           callback: (token: string) => void;
           'error-callback'?: () => void;
           'expired-callback'?: () => void;
+          action?: string;
           theme?: 'auto' | 'light' | 'dark';
         },
       ) => string;
@@ -33,16 +34,21 @@ declare global {
   }
 }
 
-const SCRIPT_SRC = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
+const SCRIPT_SRC =
+  'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
 const SCRIPT_ID = 'cf-turnstile-script';
 
 function loadScript(): Promise<void> {
   if (typeof window === 'undefined') return Promise.resolve();
   if (window.turnstile) return Promise.resolve();
 
-  const existing = document.getElementById(SCRIPT_ID) as HTMLScriptElement | null;
+  const existing = document.getElementById(
+    SCRIPT_ID,
+  ) as HTMLScriptElement | null;
   if (existing) {
-    return new Promise((resolve) => existing.addEventListener('load', () => resolve(), { once: true }));
+    return new Promise((resolve) =>
+      existing.addEventListener('load', () => resolve(), { once: true }),
+    );
   }
 
   return new Promise((resolve, reject) => {
@@ -52,16 +58,22 @@ function loadScript(): Promise<void> {
     script.async = true;
     script.defer = true;
     script.addEventListener('load', () => resolve(), { once: true });
-    script.addEventListener('error', () => reject(new Error('Turnstile failed to load')), { once: true });
+    script.addEventListener(
+      'error',
+      () => reject(new Error('Turnstile failed to load')),
+      { once: true },
+    );
     document.head.appendChild(script);
   });
 }
 
 export function TurnstileWidget({
   siteKey,
+  action,
   onToken,
 }: {
   siteKey: string | null;
+  action: 'sign-in' | 'sign-up';
   onToken: (token: string) => void;
 }) {
   const container = useRef<HTMLDivElement | null>(null);
@@ -77,6 +89,7 @@ export function TurnstileWidget({
         if (cancelled || !container.current || !window.turnstile) return;
         widgetId.current = window.turnstile.render(container.current, {
           sitekey: siteKey,
+          action,
           theme: 'dark',
           callback: (token) => onToken(token),
           // An expired or failed challenge clears the token, so the form
@@ -102,7 +115,7 @@ export function TurnstileWidget({
         }
       }
     };
-  }, [siteKey, onToken]);
+  }, [siteKey, action, onToken]);
 
   if (!siteKey) return null;
 

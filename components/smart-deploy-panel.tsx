@@ -2,7 +2,15 @@
 
 import { useRouter } from 'next/navigation';
 import { useState } from 'react';
-import { AlertTriangle, CheckCircle2, GitBranch, Loader2, LockKeyhole, ScanSearch, Sparkles } from 'lucide-react';
+import {
+  AlertTriangle,
+  CheckCircle2,
+  GitBranch,
+  Loader2,
+  LockKeyhole,
+  ScanSearch,
+  Sparkles,
+} from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -19,10 +27,16 @@ import type { DeployTarget, SmartDeployPlan } from '@/lib/smart-deploy';
  * a browser. This panel sends the repository and target, then renders whatever
  * decision came back — including a refusal.
  */
-export function SmartDeployPanel({ repositoryHint }: { repositoryHint?: string }) {
+export function SmartDeployPanel({
+  repositoryHint,
+}: {
+  repositoryHint?: string;
+}) {
   const router = useRouter();
   const zeroMode = useZeroMode();
-  const [repository, setRepository] = useState(repositoryHint ?? 'OpenYsd/ysd-zero-cloud');
+  const [repository, setRepository] = useState(
+    repositoryHint ?? 'OpenYsd/ysd-zero-cloud',
+  );
   const [target, setTarget] = useState<DeployTarget>('auto');
   const [plan, setPlan] = useState<SmartDeployPlan | null>(null);
   const [deployment, setDeployment] = useState<Deployment | null>(null);
@@ -46,7 +60,8 @@ export function SmartDeployPanel({ repositoryHint }: { repositoryHint?: string }
 
       // 403 is the guard doing its job, not a failure: the body still carries
       // the plan that explains what was rejected and why.
-      if (!body.plan) throw new Error(body.error ?? 'The repository could not be analysed.');
+      if (!body.plan)
+        throw new Error(body.error ?? 'The repository could not be analysed.');
 
       setPlan(body.plan);
       setDeployment(body.deployment ?? null);
@@ -54,7 +69,11 @@ export function SmartDeployPanel({ repositoryHint }: { repositoryHint?: string }
     } catch (cause) {
       setPlan(null);
       setDeployment(null);
-      setError(cause instanceof Error ? cause.message : 'The repository could not be analysed.');
+      setError(
+        cause instanceof Error
+          ? cause.message
+          : 'The repository could not be analysed.',
+      );
     } finally {
       setPending(false);
     }
@@ -69,7 +88,8 @@ export function SmartDeployPanel({ repositoryHint }: { repositoryHint?: string }
             <h2 className="text-sm font-semibold text-white">Smart Deploy</h2>
           </div>
           <p className="mt-1 text-[11px] text-white/30">
-            Repository analysis and provider planning, with the cost guard enforced server-side.
+            Repository analysis and provider planning, with the cost guard
+            enforced server-side.
           </p>
         </div>
         <div
@@ -79,13 +99,17 @@ export function SmartDeployPanel({ repositoryHint }: { repositoryHint?: string }
               : 'flex items-center gap-2 rounded-full border border-amber-400/20 bg-amber-400/5 px-2.5 py-1.5 text-[10px] font-semibold text-amber-300'
           }
         >
-          <LockKeyhole className="size-3" /> Zero Mode {zeroMode.enabled ? 'enforced' : 'paused'}
+          <LockKeyhole className="size-3" /> Zero Mode{' '}
+          {zeroMode.enabled ? 'enforced' : 'paused'}
         </div>
       </div>
 
       <div className="grid gap-4 p-5 lg:grid-cols-[minmax(0,1fr)_210px_auto] lg:items-end">
         <div className="space-y-1.5">
-          <label htmlFor="smart-deploy-repository" className="text-[11px] font-medium text-white/45">
+          <label
+            htmlFor="smart-deploy-repository"
+            className="text-[11px] font-medium text-white/45"
+          >
             Repository
           </label>
           <div className="relative">
@@ -101,7 +125,10 @@ export function SmartDeployPanel({ repositoryHint }: { repositoryHint?: string }
         </div>
 
         <div className="space-y-1.5">
-          <label htmlFor="smart-deploy-target" className="text-[11px] font-medium text-white/45">
+          <label
+            htmlFor="smart-deploy-target"
+            className="text-[11px] font-medium text-white/45"
+          >
             Target
           </label>
           <NativeSelect
@@ -112,7 +139,7 @@ export function SmartDeployPanel({ repositoryHint }: { repositoryHint?: string }
           >
             <option value="auto">Auto · best free tier</option>
             <option value="cloudflare">Cloudflare Workers</option>
-            <option value="supabase">Supabase</option>
+            <option value="d1">Cloudflare Worker + D1</option>
             <option value="gpu">GPU compute · paid</option>
           </NativeSelect>
         </div>
@@ -122,12 +149,16 @@ export function SmartDeployPanel({ repositoryHint }: { repositoryHint?: string }
           className="h-9 bg-[#b7ff3c] text-xs font-semibold text-[#07100c] hover:bg-[#cbff72]"
           disabled={!repository.trim() || pending}
         >
-          {pending ? <Loader2 className="animate-spin" /> : <ScanSearch />} Analyze
+          {pending ? <Loader2 className="animate-spin" /> : <ScanSearch />}{' '}
+          Analyze
         </Button>
       </div>
 
       {error && (
-        <p role="alert" className="border-t border-white/[0.065] bg-black/10 px-5 py-3 text-[11px] text-red-300">
+        <p
+          role="alert"
+          className="border-t border-white/[0.065] bg-black/10 px-5 py-3 text-[11px] text-red-300"
+        >
           {error}
         </p>
       )}
@@ -136,7 +167,9 @@ export function SmartDeployPanel({ repositoryHint }: { repositoryHint?: string }
         <div className="border-t border-white/[0.065] bg-black/10 p-5">
           <div className="grid gap-4 lg:grid-cols-[1fr_1fr_auto] lg:items-start">
             <div>
-              <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-white/25">Detected</p>
+              <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-white/25">
+                Detected
+              </p>
               <p className="mt-2 text-sm font-semibold text-white/78">
                 {plan.framework} · {plan.resources[0]?.provider}
               </p>
@@ -148,7 +181,9 @@ export function SmartDeployPanel({ repositoryHint }: { repositoryHint?: string }
                     : 'mt-2 border-white/[0.09] text-white/40'
                 }
               >
-                {plan.confidence === 'inspected' ? 'Read from the repository' : 'Inferred from the name'}
+                {plan.confidence === 'inspected'
+                  ? 'Read from the repository'
+                  : 'Inferred from the name'}
               </Badge>
               {deployment && (
                 <p className="mt-2 font-mono text-[10px] text-white/28">
@@ -171,17 +206,23 @@ export function SmartDeployPanel({ repositoryHint }: { repositoryHint?: string }
                     : 'flex items-center gap-2 text-xs font-semibold text-amber-300'
                 }
               >
-                {plan.protection.allowed ? <CheckCircle2 className="size-3.5" /> : <AlertTriangle className="size-3.5" />}
+                {plan.protection.allowed ? (
+                  <CheckCircle2 className="size-3.5" />
+                ) : (
+                  <AlertTriangle className="size-3.5" />
+                )}
                 {plan.protection.allowed ? 'Plan recorded' : 'Plan blocked'}
               </div>
               <p className="mt-1 text-[10px] leading-4 text-white/35">
-                {plan.protection.reason} Estimate: {money(plan.protection.estimatedMonthlyCost)}/mo.
+                {plan.protection.reason} Estimate:{' '}
+                {money(plan.protection.estimatedMonthlyCost)}/mo.
               </p>
               {plan.protection.blockedResources.length > 0 && (
                 <ul className="mt-2 space-y-1 text-[10px] text-amber-200/70">
                   {plan.protection.blockedResources.map((resource) => (
                     <li key={resource.name}>
-                      {resource.name} · {money(resource.estimatedMonthlyCost)}/mo
+                      {resource.name} · {money(resource.estimatedMonthlyCost)}
+                      /mo
                     </li>
                   ))}
                 </ul>
@@ -189,7 +230,9 @@ export function SmartDeployPanel({ repositoryHint }: { repositoryHint?: string }
             </div>
 
             <div className="text-[10px] leading-5 text-white/32">
-              <p className="mb-1 font-semibold uppercase tracking-[0.14em] text-white/25">Steps</p>
+              <p className="mb-1 font-semibold uppercase tracking-[0.14em] text-white/25">
+                Steps
+              </p>
               <ol className="list-inside list-decimal space-y-0.5">
                 {plan.steps.map((step) => (
                   <li key={step}>{step}</li>
@@ -200,12 +243,22 @@ export function SmartDeployPanel({ repositoryHint }: { repositoryHint?: string }
 
           <div className="mt-4 grid gap-2 border-t border-white/[0.06] pt-4 sm:grid-cols-2 lg:grid-cols-3">
             {plan.resources.map((resource) => (
-              <div key={resource.name} className="rounded-lg border border-white/[0.06] bg-white/[0.015] p-3">
-                <p className="text-[11px] font-medium text-white/65">{resource.name}</p>
-                <p className="mt-1 text-[10px] text-white/28">
-                  {resource.provider} · {money(resource.estimatedMonthlyCost)}/mo
+              <div
+                key={resource.name}
+                className="rounded-lg border border-white/[0.06] bg-white/[0.015] p-3"
+              >
+                <p className="text-[11px] font-medium text-white/65">
+                  {resource.name}
                 </p>
-                {resource.note && <p className="mt-1 text-[10px] text-white/22">{resource.note}</p>}
+                <p className="mt-1 text-[10px] text-white/28">
+                  {resource.provider} · {money(resource.estimatedMonthlyCost)}
+                  /mo
+                </p>
+                {resource.note && (
+                  <p className="mt-1 text-[10px] text-white/22">
+                    {resource.note}
+                  </p>
+                )}
               </div>
             ))}
           </div>

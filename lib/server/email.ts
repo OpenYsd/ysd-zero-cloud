@@ -1,4 +1,10 @@
 import { runtimeEnv } from './env';
+import {
+  readEmailProvider as readProviderFrom,
+  type EmailProvider,
+} from '@/lib/email';
+
+export { verificationMessage } from '@/lib/email';
 
 /**
  * Transactional email.
@@ -14,18 +20,8 @@ import { runtimeEnv } from './env';
  * of their own instance, which is a worse outcome than an unverified address.
  */
 
-export type EmailProvider = {
-  id: 'resend';
-  from: string;
-};
-
 export function readEmailProvider(): EmailProvider | null {
-  const apiKey = runtimeEnv.RESEND_API_KEY?.trim();
-  if (!apiKey) return null;
-  return {
-    id: 'resend',
-    from: runtimeEnv.YSD_EMAIL_FROM?.trim() || 'YSD Zero Cloud <onboarding@resend.dev>',
-  };
+  return readProviderFrom(runtimeEnv);
 }
 
 export function isEmailConfigured(): boolean {
@@ -37,8 +33,8 @@ export type SendResult = { ok: true } | { ok: false; error: string };
 /**
  * Sends one message.
  *
- * @returns A result rather than throwing, so a delivery failure surfaces as an
- * audit line instead of a 500 on the sign-up the operator was completing.
+ * @returns A result rather than throwing, so a delivery failure surfaces as a
+ * diagnostic line instead of a 500 on the sign-up the operator was completing.
  */
 export async function sendEmail(input: {
   to: string;
@@ -46,14 +42,16 @@ export async function sendEmail(input: {
   text: string;
 }): Promise<SendResult> {
   const provider = readEmailProvider();
-  if (!provider) return { ok: false, error: 'No email provider is configured.' };
+  if (!provider)
+    return { ok: false, error: 'No email provider is configured.' };
 
   try {
     const response = await fetch('https://api.resend.com/emails', {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${runtimeEnv.RESEND_API_KEY!.trim()}`,
+        Authorization: `Bearer ${provider.apiKey}`,
         'Content-Type': 'application/json',
+        'Idempotency-Key': crypto.randomUUID(),
       },
       body: JSON.stringify({
         from: provider.from,
@@ -65,26 +63,16 @@ export async function sendEmail(input: {
     });
 
     if (!response.ok) {
-      const detail = await response.text().catch(() => '');
-      return { ok: false, error: `Resend responded ${response.status}: ${detail.slice(0, 200)}` };
+      return {
+        ok: false,
+        error: `Resend rejected the message with status ${response.status}.`,
+      };
     }
     return { ok: true };
   } catch (cause) {
-    return { ok: false, error: cause instanceof Error ? cause.message : 'Delivery failed.' };
+    return {
+      ok: false,
+      error: cause instanceof Error ? cause.message : 'Delivery failed.',
+    };
   }
-}
-
-export function verificationMessage(name: string, url: string): { subject: string; text: string } {
-  return {
-    subject: 'Confirm your YSD Zero Cloud address',
-    text: [
-      `Hello ${name || 'there'},`,
-      '',
-      'Confirm this address to finish setting up your YSD Zero Cloud workspace:',
-      '',
-      url,
-      '',
-      'The link is valid for 24 hours. If you did not create this account, ignore this message.',
-    ].join('\n'),
-  };
 }

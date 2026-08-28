@@ -8,7 +8,12 @@
  * decision is recorded rather than assumed.
  */
 
-export type ResourceKind = 'compute' | 'database' | 'storage' | 'network' | 'ai';
+export type ResourceKind =
+  | 'compute'
+  | 'database'
+  | 'storage'
+  | 'network'
+  | 'ai';
 
 export type PlannedResource = {
   name: string;
@@ -27,7 +32,10 @@ export type ZeroModeDecision = {
   reason: string;
 };
 
-export function enforceZeroMode(resources: PlannedResource[], enabled = true): ZeroModeDecision {
+export function enforceZeroMode(
+  resources: PlannedResource[],
+  enabled = true,
+): ZeroModeDecision {
   const estimatedMonthlyCost = resources.reduce(
     (total, resource) => total + resource.estimatedMonthlyCost,
     0,
@@ -43,7 +51,8 @@ export function enforceZeroMode(resources: PlannedResource[], enabled = true): Z
   }
 
   const blockedResources = resources.filter(
-    (resource) => resource.estimatedMonthlyCost > 0 || !resource.freeTierEligible,
+    (resource) =>
+      resource.estimatedMonthlyCost > 0 || !resource.freeTierEligible,
   );
   const allowed = blockedResources.length === 0 && estimatedMonthlyCost === 0;
 
@@ -103,13 +112,5 @@ export const ZERO_COST_RESOURCES = {
     estimatedMonthlyCost: 0,
     freeTierEligible: true,
     note: 'Unlimited static requests',
-  },
-  supabaseProject: {
-    name: 'Supabase project',
-    provider: 'Supabase',
-    kind: 'database',
-    estimatedMonthlyCost: 0,
-    freeTierEligible: true,
-    note: '500 MB database on the free plan',
   },
 } as const satisfies Record<string, PlannedResource>;

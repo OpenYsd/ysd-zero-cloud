@@ -1,5 +1,5 @@
 import { betterAuth } from 'better-auth';
-import { env } from 'cloudflare:workers';
+import { env, waitUntil } from 'cloudflare:workers';
 
 import { hasGithubOAuth } from '@/lib/integrations';
 import { buildAuthOptions, resolveAuthSecret } from './auth-options';
@@ -59,7 +59,10 @@ export function trustedOrigins(): string[] {
 
 function createAuth(): Auth {
   const github = hasGithubOAuth(runtimeEnv)
-    ? { clientId: env.GITHUB_CLIENT_ID!, clientSecret: env.GITHUB_CLIENT_SECRET! }
+    ? {
+        clientId: env.GITHUB_CLIENT_ID!,
+        clientSecret: env.GITHUB_CLIENT_SECRET!,
+      }
     : undefined;
 
   const mailConfigured = isEmailConfigured();
@@ -72,7 +75,9 @@ function createAuth(): Auth {
       // deployed origin, and the Vite plugin merges that file into the local
       // dev config too, which would otherwise point a dev session at
       // production for callbacks and redirects.
-      baseURL: isDevelopment() ? undefined : env.BETTER_AUTH_URL?.trim() || undefined,
+      baseURL: isDevelopment()
+        ? undefined
+        : env.BETTER_AUTH_URL?.trim() || undefined,
       github,
       requireEmailVerification: emailVerificationRequired(),
       // Local development runs over plain HTTP, where a Secure cookie is
@@ -83,12 +88,18 @@ function createAuth(): Auth {
         ? {
             sendVerificationEmail: async ({ user, url }) => {
               const message = verificationMessage(user.name, url);
-              const result = await sendEmail({ to: user.email, ...message });
-              if (!result.ok) {
-                // Logged rather than thrown: a delivery failure must not fail
-                // the sign-up that triggered it.
-                console.warn('[ysd] verification email failed:', result.error);
-              }
+              waitUntil(
+                sendEmail({ to: user.email, ...message }).then((result) => {
+                  if (!result.ok) {
+                    // Provider details are deliberately generic and contain no
+                    // recipient address or verification link.
+                    console.warn(
+                      '[ysd] verification email failed:',
+                      result.error,
+                    );
+                  }
+                }),
+              );
             },
           }
         : {}),
@@ -117,7 +128,9 @@ export type SessionUser = {
 };
 
 /** The signed-in user, or null. Never throws on an anonymous request. */
-export async function getSessionUser(headers: Headers): Promise<SessionUser | null> {
+export async function getSessionUser(
+  headers: Headers,
+): Promise<SessionUser | null> {
   const auth = await getAuth();
   const session = await auth.api.getSession({ headers });
   if (!session?.user) return null;

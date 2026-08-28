@@ -24,7 +24,7 @@ declare namespace Cloudflare {
     TURNSTILE_SITE_KEY?: string;
     TURNSTILE_SECRET_KEY?: string;
 
-    /** Transactional email (Resend free tier). Enables email verification. */
+    /** Transactional email (Resend free tier). Both values enable verification. */
     RESEND_API_KEY?: string;
     YSD_EMAIL_FROM?: string;
     /** Set to "false" to keep verification optional even with mail configured. */
@@ -41,10 +41,6 @@ declare namespace Cloudflare {
     CLOUDFLARE_ACCOUNT_ID?: string;
     /** Set on deployed environments so the D1 metadata endpoint can be read. */
     CLOUDFLARE_D1_DATABASE_ID?: string;
-
-    /** Optional Supabase adapter. */
-    SUPABASE_URL?: string;
-    SUPABASE_SERVICE_ROLE_KEY?: string;
 
     /** Public site origin used for metadata. */
     NEXT_PUBLIC_SITE_URL?: string;

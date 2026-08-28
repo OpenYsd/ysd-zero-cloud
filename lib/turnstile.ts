@@ -22,9 +22,14 @@ export type TurnstileConfig = {
 export function readTurnstileConfig(
   env: Record<string, unknown>,
 ): TurnstileConfig | null {
-  const siteKey = typeof env.TURNSTILE_SITE_KEY === 'string' ? env.TURNSTILE_SITE_KEY.trim() : '';
+  const siteKey =
+    typeof env.TURNSTILE_SITE_KEY === 'string'
+      ? env.TURNSTILE_SITE_KEY.trim()
+      : '';
   const secretKey =
-    typeof env.TURNSTILE_SECRET_KEY === 'string' ? env.TURNSTILE_SECRET_KEY.trim() : '';
+    typeof env.TURNSTILE_SECRET_KEY === 'string'
+      ? env.TURNSTILE_SECRET_KEY.trim()
+      : '';
   if (!siteKey || !secretKey) return null;
   return { siteKey, secretKey };
 }
@@ -39,6 +44,12 @@ export type SiteVerifyResponse = {
   'error-codes'?: string[];
   challenge_ts?: string;
   hostname?: string;
+  action?: string;
+};
+
+export type TurnstileExpectations = {
+  expectedAction?: string;
+  expectedHostname?: string;
 };
 
 export type TurnstileVerdict = {
@@ -49,7 +60,11 @@ export type TurnstileVerdict = {
   message: string;
 };
 
-export const TURNSTILE_OK: TurnstileVerdict = { ok: true, reason: '', message: '' };
+export const TURNSTILE_OK: TurnstileVerdict = {
+  ok: true,
+  reason: '',
+  message: '',
+};
 
 /**
  * Interprets a siteverify response.
@@ -60,6 +75,7 @@ export const TURNSTILE_OK: TurnstileVerdict = { ok: true, reason: '', message: '
 export function interpretSiteVerify(
   body: SiteVerifyResponse | null,
   status: number,
+  expectations: TurnstileExpectations = {},
 ): TurnstileVerdict {
   if (body === null) {
     // A verification service that cannot be reached must fail closed. Treating
@@ -77,7 +93,29 @@ export function interpretSiteVerify(
       message: 'The challenge could not be verified. Try again in a moment.',
     };
   }
-  if (body.success === true) return TURNSTILE_OK;
+  if (body.success === true) {
+    if (
+      expectations.expectedAction &&
+      body.action !== expectations.expectedAction
+    ) {
+      return {
+        ok: false,
+        reason: 'action-mismatch',
+        message: 'The challenge did not match this action. Please try again.',
+      };
+    }
+    if (
+      expectations.expectedHostname &&
+      body.hostname !== expectations.expectedHostname
+    ) {
+      return {
+        ok: false,
+        reason: 'hostname-mismatch',
+        message: 'The challenge did not match this site. Please try again.',
+      };
+    }
+    return TURNSTILE_OK;
+  }
 
   const codes = body['error-codes'] ?? [];
   if (codes.includes('timeout-or-duplicate')) {
@@ -109,7 +147,7 @@ export function interpretSiteVerify(
 export async function verifyTurnstileToken(
   token: string,
   secretKey: string,
-  remoteIp?: string,
+  options: TurnstileExpectations & { remoteIp?: string } = {},
 ): Promise<TurnstileVerdict> {
   if (!token.trim()) {
     return {
@@ -118,11 +156,19 @@ export async function verifyTurnstileToken(
       message: 'Please complete the challenge before continuing.',
     };
   }
+  if (token.length > 2048) {
+    return {
+      ok: false,
+      reason: 'invalid-token',
+      message: 'The challenge response was invalid. Please try again.',
+    };
+  }
 
   const form = new FormData();
   form.set('secret', secretKey);
   form.set('response', token);
-  if (remoteIp) form.set('remoteip', remoteIp);
+  form.set('idempotency_key', crypto.randomUUID());
+  if (options.remoteIp) form.set('remoteip', options.remoteIp);
 
   try {
     const response = await fetch(VERIFY_URL, {
@@ -131,7 +177,7 @@ export async function verifyTurnstileToken(
       signal: AbortSignal.timeout(5000),
     });
     const body = (await response.json()) as SiteVerifyResponse;
-    return interpretSiteVerify(body, response.status);
+    return interpretSiteVerify(body, response.status, options);
   } catch {
     return interpretSiteVerify(null, 0);
   }

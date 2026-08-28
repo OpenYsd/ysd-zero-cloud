@@ -9,16 +9,25 @@ import {
 void test('both keys are required before the challenge counts as configured', () => {
   assert.equal(isTurnstileConfigured({}), false);
   assert.equal(isTurnstileConfigured({ TURNSTILE_SITE_KEY: 'site' }), false);
-  assert.equal(isTurnstileConfigured({ TURNSTILE_SECRET_KEY: 'secret' }), false);
   assert.equal(
-    isTurnstileConfigured({ TURNSTILE_SITE_KEY: 'site', TURNSTILE_SECRET_KEY: 'secret' }),
+    isTurnstileConfigured({ TURNSTILE_SECRET_KEY: 'secret' }),
+    false,
+  );
+  assert.equal(
+    isTurnstileConfigured({
+      TURNSTILE_SITE_KEY: 'site',
+      TURNSTILE_SECRET_KEY: 'secret',
+    }),
     true,
   );
 });
 
 void test('blank keys do not count as configuration', () => {
   assert.equal(
-    isTurnstileConfigured({ TURNSTILE_SITE_KEY: '   ', TURNSTILE_SECRET_KEY: 'secret' }),
+    isTurnstileConfigured({
+      TURNSTILE_SITE_KEY: '   ',
+      TURNSTILE_SECRET_KEY: 'secret',
+    }),
     false,
   );
 });
@@ -33,6 +42,26 @@ void test('the config is returned trimmed', () => {
 
 void test('a successful verification passes', () => {
   assert.equal(interpretSiteVerify({ success: true }, 200).ok, true);
+});
+
+void test('a successful token is still rejected for the wrong action', () => {
+  const verdict = interpretSiteVerify(
+    { success: true, action: 'sign-up', hostname: 'cloud.example' },
+    200,
+    { expectedAction: 'sign-in', expectedHostname: 'cloud.example' },
+  );
+  assert.equal(verdict.ok, false);
+  assert.equal(verdict.reason, 'action-mismatch');
+});
+
+void test('a successful token is still rejected for the wrong hostname', () => {
+  const verdict = interpretSiteVerify(
+    { success: true, action: 'sign-in', hostname: 'evil.example' },
+    200,
+    { expectedAction: 'sign-in', expectedHostname: 'cloud.example' },
+  );
+  assert.equal(verdict.ok, false);
+  assert.equal(verdict.reason, 'hostname-mismatch');
 });
 
 void test('an unreachable verifier fails closed', () => {
@@ -86,7 +115,10 @@ void test('a rejection with no codes still fails', () => {
 void test('every failure carries a message safe to show a person', () => {
   const verdicts = [
     interpretSiteVerify(null, 0),
-    interpretSiteVerify({ success: false, 'error-codes': ['invalid-input-secret'] }, 200),
+    interpretSiteVerify(
+      { success: false, 'error-codes': ['invalid-input-secret'] },
+      200,
+    ),
     interpretSiteVerify({ success: false }, 200),
   ];
   for (const verdict of verdicts) {

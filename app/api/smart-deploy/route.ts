@@ -3,7 +3,7 @@ import { enforceRateLimit } from '@/lib/server/rate-limit';
 import { requireApiSession } from '@/lib/server/session';
 import type { DeployTarget } from '@/lib/smart-deploy';
 
-const TARGETS: DeployTarget[] = ['auto', 'cloudflare', 'supabase', 'gpu'];
+const TARGETS: DeployTarget[] = ['auto', 'cloudflare', 'd1', 'gpu'];
 
 function isTarget(value: unknown): value is DeployTarget {
   return typeof value === 'string' && (TARGETS as string[]).includes(value);
@@ -20,7 +20,10 @@ export async function POST(request: Request): Promise<Response> {
   const auth = await requireApiSession(request);
   if (!auth.ok) return auth.response;
 
-  const limited = await enforceRateLimit('api:write', auth.session.actor.userId);
+  const limited = await enforceRateLimit(
+    'api:write',
+    auth.session.actor.userId,
+  );
   if (limited.response) return limited.response;
   const { user, workspace } = auth.session;
 
@@ -31,7 +34,8 @@ export async function POST(request: Request): Promise<Response> {
     return Response.json({ error: 'Expected a JSON body.' }, { status: 400 });
   }
 
-  const repository = typeof body.repository === 'string' ? body.repository.trim() : '';
+  const repository =
+    typeof body.repository === 'string' ? body.repository.trim() : '';
   if (!repository) {
     return Response.json({ error: 'repository is required' }, { status: 400 });
   }

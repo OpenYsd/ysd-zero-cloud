@@ -2,12 +2,19 @@
 
 import { NavLink } from '@/components/nav-link';
 import { useCallback, useState } from 'react';
-import { CloudCog, GitBranch, Loader2, LockKeyhole } from 'lucide-react';
+import {
+  CheckCircle2,
+  CloudCog,
+  GitBranch,
+  Loader2,
+  LockKeyhole,
+  Mail,
+} from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { TurnstileWidget } from '@/components/turnstile-widget';
-import { signIn, signUp } from '@/lib/auth-client';
+import { sendVerificationEmail, signIn, signUp } from '@/lib/auth-client';
 
 /**
  * Sign-in and sign-up.
@@ -23,11 +30,13 @@ export function AuthForm({
   mode,
   githubEnabled,
   turnstileSiteKey,
+  emailVerificationRequired,
 }: {
   mode: 'sign-in' | 'sign-up';
   githubEnabled: boolean;
   /** Null when the instance has no Turnstile keys; the challenge is then skipped. */
   turnstileSiteKey: string | null;
+  emailVerificationRequired: boolean;
 }) {
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
@@ -35,12 +44,19 @@ export function AuthForm({
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const [challengeToken, setChallengeToken] = useState('');
+  const [verificationPending, setVerificationPending] = useState(false);
+  const [verificationSentTo, setVerificationSentTo] = useState<string | null>(
+    null,
+  );
 
   const isSignUp = mode === 'sign-up';
   const challengeRequired = turnstileSiteKey !== null;
 
   // Stable so the widget is not torn down and re-rendered on every keystroke.
-  const handleToken = useCallback((token: string) => setChallengeToken(token), []);
+  const handleToken = useCallback(
+    (token: string) => setChallengeToken(token),
+    [],
+  );
 
   async function handleSubmit(event: React.SubmitEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -73,7 +89,15 @@ export function AuthForm({
         : await signIn.email({ email, password, ...extra });
 
       if (result.error) {
-        setError(result.error.message ?? 'That did not work. Check your details and try again.');
+        setError(
+          result.error.message ??
+            'That did not work. Check your details and try again.',
+        );
+        return;
+      }
+
+      if (isSignUp && emailVerificationRequired) {
+        setVerificationSentTo(email);
         return;
       }
 
@@ -89,6 +113,80 @@ export function AuthForm({
     } finally {
       setPending(false);
     }
+  }
+
+  async function resendVerification() {
+    if (!verificationSentTo) return;
+    setVerificationPending(true);
+    setError(null);
+    try {
+      const result = await sendVerificationEmail({
+        email: verificationSentTo,
+        callbackURL: '/',
+      });
+      if (result.error) {
+        setError(
+          result.error.message ?? 'The verification email could not be sent.',
+        );
+      }
+    } catch (cause) {
+      setError(
+        cause instanceof Error
+          ? cause.message
+          : 'The verification email could not be sent.',
+      );
+    } finally {
+      setVerificationPending(false);
+    }
+  }
+
+  if (verificationSentTo) {
+    return (
+      <div className="w-full max-w-[400px]">
+        <div className="cloud-card p-6 text-center">
+          <span className="mx-auto grid size-11 place-items-center rounded-[13px] bg-[#b7ff3c]/10 text-[#b7ff3c]">
+            <Mail className="size-5" />
+          </span>
+          <h1 className="mt-4 text-lg font-semibold text-white">
+            Check your inbox
+          </h1>
+          <p className="mt-2 text-[11px] leading-5 text-white/38">
+            We sent a 24-hour verification link to{' '}
+            <span className="text-white/65">{verificationSentTo}</span>. Confirm
+            it before signing in.
+          </p>
+          <p className="mt-3 flex items-center justify-center gap-1.5 text-[10px] text-[#c8ff69]">
+            <CheckCircle2 className="size-3" /> Your workspace remains protected
+            until verification.
+          </p>
+          {error && (
+            <p role="alert" className="mt-4 text-[11px] text-red-300">
+              {error}
+            </p>
+          )}
+          <Button
+            type="button"
+            variant="outline"
+            disabled={verificationPending}
+            onClick={() => void resendVerification()}
+            className="mt-5 h-9 w-full border-white/[0.08] text-xs"
+          >
+            {verificationPending ? (
+              <Loader2 className="animate-spin" />
+            ) : (
+              <Mail />
+            )}
+            Resend verification email
+          </Button>
+          <NavLink
+            href="/sign-in"
+            className="mt-4 inline-block text-[11px] text-[#c8ff69] hover:underline"
+          >
+            Return to sign in
+          </NavLink>
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -110,7 +208,9 @@ export function AuthForm({
       <form onSubmit={handleSubmit} className="cloud-card space-y-4 p-6">
         {isSignUp && (
           <div className="space-y-1.5">
-            <Label htmlFor="name" className="text-[11px] text-white/45">Name</Label>
+            <Label htmlFor="name" className="text-[11px] text-white/45">
+              Name
+            </Label>
             <Input
               id="name"
               value={name}
@@ -123,7 +223,9 @@ export function AuthForm({
         )}
 
         <div className="space-y-1.5">
-          <Label htmlFor="email" className="text-[11px] text-white/45">Email</Label>
+          <Label htmlFor="email" className="text-[11px] text-white/45">
+            Email
+          </Label>
           <Input
             id="email"
             type="email"
@@ -137,7 +239,9 @@ export function AuthForm({
         </div>
 
         <div className="space-y-1.5">
-          <Label htmlFor="password" className="text-[11px] text-white/45">Password</Label>
+          <Label htmlFor="password" className="text-[11px] text-white/45">
+            Password
+          </Label>
           <Input
             id="password"
             type="password"
@@ -146,15 +250,26 @@ export function AuthForm({
             onChange={(event) => setPassword(event.target.value)}
             autoComplete={isSignUp ? 'new-password' : 'current-password'}
             minLength={isSignUp ? MIN_PASSWORD_LENGTH : undefined}
-            placeholder={isSignUp ? `At least ${MIN_PASSWORD_LENGTH} characters` : '••••••••••••'}
+            placeholder={
+              isSignUp
+                ? `At least ${MIN_PASSWORD_LENGTH} characters`
+                : '••••••••••••'
+            }
             className="h-9 border-white/[0.08] bg-black/15 text-xs"
           />
         </div>
 
-        <TurnstileWidget siteKey={turnstileSiteKey} onToken={handleToken} />
+        <TurnstileWidget
+          siteKey={turnstileSiteKey}
+          action={isSignUp ? 'sign-up' : 'sign-in'}
+          onToken={handleToken}
+        />
 
         {error && (
-          <p role="alert" className="rounded-lg border border-red-400/20 bg-red-400/[0.06] px-3 py-2 text-[11px] text-red-300">
+          <p
+            role="alert"
+            className="rounded-lg border border-red-400/20 bg-red-400/[0.06] px-3 py-2 text-[11px] text-red-300"
+          >
             {error}
           </p>
         )}
@@ -171,13 +286,16 @@ export function AuthForm({
         {githubEnabled && (
           <>
             <div className="flex items-center gap-3 text-[10px] uppercase tracking-[0.14em] text-white/20">
-              <span className="h-px flex-1 bg-white/[0.07]" /> or <span className="h-px flex-1 bg-white/[0.07]" />
+              <span className="h-px flex-1 bg-white/[0.07]" /> or{' '}
+              <span className="h-px flex-1 bg-white/[0.07]" />
             </div>
             <Button
               type="button"
               variant="outline"
               disabled={pending}
-              onClick={() => signIn.social({ provider: 'github', callbackURL: '/' })}
+              onClick={() =>
+                signIn.social({ provider: 'github', callbackURL: '/' })
+              }
               className="h-9 w-full border-white/[0.08] bg-white/[0.025] text-xs"
             >
               <GitBranch /> Continue with GitHub
@@ -188,7 +306,10 @@ export function AuthForm({
 
       <p className="mt-5 text-center text-[11px] text-white/32">
         {isSignUp ? 'Already have a workspace? ' : 'Need a workspace? '}
-        <NavLink href={isSignUp ? '/sign-in' : '/sign-up'} className="text-[#c8ff69] hover:underline">
+        <NavLink
+          href={isSignUp ? '/sign-in' : '/sign-up'}
+          className="text-[#c8ff69] hover:underline"
+        >
           {isSignUp ? 'Sign in' : 'Create one'}
         </NavLink>
       </p>

@@ -228,7 +228,10 @@ status, _ = one.request("GET", "/api/database/rows?table=not_a_table")
 check("unknown table refused", status == 404, f"got {status}")
 
 section("SQL editor is closed to non-owners")
-status, body = one.request("POST", "/api/database/query", {"sql": "SELECT 1 AS n"})
+# The first account owns a brand-new local instance when YSD_OWNER_EMAIL is
+# unset. Operator 2 is always a member, so it is the stable denial subject on
+# both a fresh local D1 database and the long-lived deployed database.
+status, body = two.request("POST", "/api/database/query", {"sql": "SELECT 1 AS n"})
 check("non-owner refused the SQL Editor", status == 403,
       (body or {}).get("error", "")[:60] if isinstance(body, dict) else f"got {status}")
 
@@ -241,10 +244,17 @@ for table, expected in own_row_only.items():
     total = body.get("total") if isinstance(body, dict) else None
     check(f"studio {table} scoped to caller", total == expected, f"saw {total}, expected {expected}")
 
-for table in ("project", "deployment", "secret", "log_event"):
+for table in ("project", "deployment", "secret"):
     status, body = two.request("GET", f"/api/database/rows?table={table}")
     total = body.get("total") if isinstance(body, dict) else None
     check(f"studio {table} hides other tenants", total == 0, f"saw {total}")
+
+# The member's refused SQL Editor attempt above writes one audit event into
+# their own workspace. Seeing exactly that row proves Studio is scoped without
+# pretending the caller's legitimate activity should be invisible.
+status, body = two.request("GET", "/api/database/rows?table=log_event")
+total = body.get("total") if isinstance(body, dict) else None
+check("studio log_event hides other tenants", total == 1, f"saw {total}, expected 1 own event")
 
 section("SQL editor guard (instance owner)")
 if not (OWNER_EMAIL and OWNER_PASSWORD):
@@ -292,7 +302,10 @@ events = body.get("events", []) if status == 200 else []
 sources = {e["source"] for e in events}
 check("audit trail written", status == 200 and len(events) > 10, f"{len(events)} events")
 check("deployment refusals logged", any("blocked" in e["message"].lower() for e in events))
-check("multiple sources represented", {"deployment", "database", "secret", "project"} <= sources, str(sorted(sources)))
+expected_sources = {"deployment", "secret", "project"}
+if OWNER_EMAIL and OWNER_PASSWORD:
+    expected_sources.add("database")
+check("multiple sources represented", expected_sources <= sources, str(sorted(sources)))
 
 status, body = one.request("GET", "/api/logs?source=database")
 check("source filter works", status == 200 and all(e["source"] == "database" for e in body["events"]))

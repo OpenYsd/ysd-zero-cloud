@@ -32,12 +32,20 @@ void test('a paid plan is still described when Zero Mode is paused', () => {
 });
 
 void test('every resource in an allowed plan is free-tier eligible and free', () => {
-  for (const target of ['auto', 'cloudflare', 'supabase'] as const) {
+  for (const target of ['auto', 'cloudflare', 'd1'] as const) {
     const plan = createSmartDeployPlan('OpenYsd/ysd-zero-cloud', target, true);
     assert.equal(plan.protection.allowed, true, `${target} should be allowed`);
     for (const resource of plan.resources) {
-      assert.equal(resource.estimatedMonthlyCost, 0, `${resource.name} must be free`);
-      assert.equal(resource.freeTierEligible, true, `${resource.name} must be free-tier eligible`);
+      assert.equal(
+        resource.estimatedMonthlyCost,
+        0,
+        `${resource.name} must be free`,
+      );
+      assert.equal(
+        resource.freeTierEligible,
+        true,
+        `${resource.name} must be free-tier eligible`,
+      );
     }
   }
 });
@@ -52,16 +60,36 @@ void test('repository signals beat the name-based guess', () => {
 });
 
 void test('framework detection reads real manifests', () => {
-  assert.equal(detectFramework('anything', { dependencies: ['next'] }), 'Next.js');
-  assert.equal(detectFramework('anything', { dependencies: ['vinext'] }), 'Next.js');
-  assert.equal(detectFramework('anything', { dependencies: ['hono'] }), 'Node.js');
-  assert.equal(detectFramework('anything', { dependencies: ['express'] }), 'Node.js');
-  assert.equal(detectFramework('anything', { files: ['vite.config.js'] }), 'Vite');
-  assert.equal(detectFramework('anything', { files: ['index.html'], dependencies: [] }), 'Static');
+  assert.equal(
+    detectFramework('anything', { dependencies: ['next'] }),
+    'Next.js',
+  );
+  assert.equal(
+    detectFramework('anything', { dependencies: ['vinext'] }),
+    'Next.js',
+  );
+  assert.equal(
+    detectFramework('anything', { dependencies: ['hono'] }),
+    'Node.js',
+  );
+  assert.equal(
+    detectFramework('anything', { dependencies: ['express'] }),
+    'Node.js',
+  );
+  assert.equal(
+    detectFramework('anything', { files: ['vite.config.js'] }),
+    'Vite',
+  );
+  assert.equal(
+    detectFramework('anything', { files: ['index.html'], dependencies: [] }),
+    'Static',
+  );
 });
 
 void test('a Next.js plan provisions a database alongside the worker', () => {
-  const plan = createSmartDeployPlan('OpenYsd/app', 'cloudflare', true, { dependencies: ['next'] });
+  const plan = createSmartDeployPlan('OpenYsd/app', 'cloudflare', true, {
+    dependencies: ['next'],
+  });
   const kinds = plan.resources.map((resource) => resource.kind);
   assert.ok(kinds.includes('compute'));
   assert.ok(kinds.includes('database'));
@@ -70,5 +98,8 @@ void test('a Next.js plan provisions a database alongside the worker', () => {
 void test('plan ids are stable and safe to use as identifiers', () => {
   const plan = createSmartDeployPlan('OpenYsd/ysd-zero-cloud', 'auto', true);
   assert.equal(plan.id, 'plan_openysd_ysd_zero_cloud');
-  assert.equal(plan.id, createSmartDeployPlan('OpenYsd/ysd-zero-cloud', 'auto', true).id);
+  assert.equal(
+    plan.id,
+    createSmartDeployPlan('OpenYsd/ysd-zero-cloud', 'auto', true).id,
+  );
 });

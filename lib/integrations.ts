@@ -7,7 +7,14 @@
  * without an adapter having to be written first.
  */
 
-export type IntegrationProvider = 'github' | 'github-oauth' | 'cloudflare' | 'cloudflare-d1' | 'supabase';
+export type IntegrationProvider =
+  | 'github'
+  | 'github-oauth'
+  | 'cloudflare'
+  | 'cloudflare-d1'
+  | 'better-auth'
+  | 'turnstile'
+  | 'email';
 
 export type IntegrationStatus = 'mock' | 'configured' | 'bound';
 
@@ -52,10 +59,22 @@ const definitions: Definition[] = [
     envKeys: ['CLOUDFLARE_API_TOKEN', 'CLOUDFLARE_ACCOUNT_ID'],
   },
   {
-    id: 'supabase',
-    name: 'Supabase',
-    purpose: 'Optional PostgreSQL, auth, and storage',
-    envKeys: ['SUPABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY'],
+    id: 'better-auth',
+    name: 'Better Auth',
+    purpose: 'D1-backed identities, sessions, and verified email state',
+    envKeys: ['BETTER_AUTH_SECRET'],
+  },
+  {
+    id: 'turnstile',
+    name: 'Cloudflare Turnstile',
+    purpose: 'Bot protection for sign-in and sign-up',
+    envKeys: ['TURNSTILE_SITE_KEY', 'TURNSTILE_SECRET_KEY'],
+  },
+  {
+    id: 'email',
+    name: 'Verification email',
+    purpose: 'Transactional verification links through the Resend free tier',
+    envKeys: ['RESEND_API_KEY', 'YSD_EMAIL_FROM'],
   },
 ];
 
@@ -70,12 +89,17 @@ function hasValue(env: IntegrationEnv, key: string): boolean {
  * @param env Runtime environment. In workerd this is the Cloudflare `env`
  * object, so bindings and vars are both visible on it.
  */
-export function getIntegrationCatalog(env: IntegrationEnv = {}): IntegrationDescriptor[] {
+export function getIntegrationCatalog(
+  env: IntegrationEnv = {},
+): IntegrationDescriptor[] {
   return definitions.map((definition) => {
     let status: IntegrationStatus = 'mock';
     if (definition.binding) {
       status = env[definition.binding] ? 'bound' : 'mock';
-    } else if (definition.envKeys.length > 0 && definition.envKeys.every((key) => hasValue(env, key))) {
+    } else if (
+      definition.envKeys.length > 0 &&
+      definition.envKeys.every((key) => hasValue(env, key))
+    ) {
       status = 'configured';
     }
     return { ...definition, status, freeTierOnly: true };
@@ -84,7 +108,9 @@ export function getIntegrationCatalog(env: IntegrationEnv = {}): IntegrationDesc
 
 /** Whether GitHub OAuth sign-in can be offered on the sign-in page. */
 export function hasGithubOAuth(env: IntegrationEnv): boolean {
-  return hasValue(env, 'GITHUB_CLIENT_ID') && hasValue(env, 'GITHUB_CLIENT_SECRET');
+  return (
+    hasValue(env, 'GITHUB_CLIENT_ID') && hasValue(env, 'GITHUB_CLIENT_SECRET')
+  );
 }
 
 /** Whether Smart Deploy may inspect a repository over the GitHub API. */
@@ -94,5 +120,8 @@ export function hasGithubToken(env: IntegrationEnv): boolean {
 
 /** Whether the Cloudflare read-only inventory calls can be made. */
 export function hasCloudflareApi(env: IntegrationEnv): boolean {
-  return hasValue(env, 'CLOUDFLARE_API_TOKEN') && hasValue(env, 'CLOUDFLARE_ACCOUNT_ID');
+  return (
+    hasValue(env, 'CLOUDFLARE_API_TOKEN') &&
+    hasValue(env, 'CLOUDFLARE_ACCOUNT_ID')
+  );
 }
