@@ -1,5 +1,9 @@
 import type { ColumnInfo, TablePage, TableSummary } from '@/lib/domain';
-import { analyzeStatement, withRowLimit, type SqlAnalysis } from '@/lib/sql-guard';
+import {
+  analyzeStatement,
+  withRowLimit,
+  type SqlAnalysis,
+} from '@/lib/sql-guard';
 import { scopeForTable, type TenantScope } from '@/lib/tenancy';
 import { d1DatabaseSize } from './cloudflare';
 import { AUTH_TABLES, db, query, WORKSPACE_TABLES } from './db';
@@ -23,6 +27,11 @@ const MASKED_COLUMNS: Record<string, string[]> = {
   session: ['token'],
   verification: ['value'],
   secret: ['ciphertext', 'fingerprint'],
+  node_pairing: ['codeHash'],
+  compute_node: ['tokenCiphertext', 'tokenHash'],
+  node_request_nonce: ['nonce'],
+  node_job: ['payloadHash', 'claimSignature'],
+  node_security_event: ['networkFingerprint'],
 };
 
 const MASK = '••••••••';
@@ -42,7 +51,8 @@ export type QueryResult = {
 
 function kindOf(name: string): TableKind {
   if ((AUTH_TABLES as readonly string[]).includes(name)) return 'auth';
-  if ((WORKSPACE_TABLES as readonly string[]).includes(name)) return 'workspace';
+  if ((WORKSPACE_TABLES as readonly string[]).includes(name))
+    return 'workspace';
   return 'system';
 }
 
@@ -59,9 +69,12 @@ export async function listTableNames(): Promise<string[]> {
 async function columnsOf(table: string): Promise<ColumnInfo[]> {
   // `table` is always a name that came back from sqlite_master, so the only
   // quoting concern is an embedded quote character.
-  const rows = await query<{ name: string; type: string; notnull: number; pk: number }>(
-    `PRAGMA table_info("${table.replace(/"/g, '""')}")`,
-  );
+  const rows = await query<{
+    name: string;
+    type: string;
+    notnull: number;
+    pk: number;
+  }>(`PRAGMA table_info("${table.replace(/"/g, '""')}")`);
   return rows.map((row) => ({
     name: row.name,
     type: row.type || 'ANY',
@@ -75,7 +88,11 @@ async function rowCount(
   columns: ColumnInfo[],
   scope: TenantScope,
 ): Promise<number> {
-  const predicate = scopeForTable(table, columns.map((column) => column.name), scope);
+  const predicate = scopeForTable(
+    table,
+    columns.map((column) => column.name),
+    scope,
+  );
   const rows = await query<{ total: number }>(
     `SELECT COUNT(*) AS total FROM "${table.replace(/"/g, '""')}" WHERE ${predicate.sql}`,
     ...predicate.params,
@@ -122,7 +139,10 @@ export async function listTables(scope: TenantScope): Promise<TableSummary[]> {
   return summaries;
 }
 
-function maskRow(table: string, row: Record<string, unknown>): Record<string, unknown> {
+function maskRow(
+  table: string,
+  row: Record<string, unknown>,
+): Record<string, unknown> {
   const masked = MASKED_COLUMNS[table];
   if (!masked?.length) return row;
   const copy: Record<string, unknown> = { ...row };
@@ -134,7 +154,11 @@ function maskRow(table: string, row: Record<string, unknown>): Record<string, un
   return copy;
 }
 
-export type ReadTableOptions = { limit?: number; offset?: number; filter?: string };
+export type ReadTableOptions = {
+  limit?: number;
+  offset?: number;
+  filter?: string;
+};
 
 /**
  * Reads one page of a table.
@@ -157,7 +181,11 @@ export async function readTable(
 
   // The tenant predicate is never optional and is ANDed ahead of the search
   // box, so no filter string can widen what the caller can see.
-  const predicate = scopeForTable(table, columns.map((column) => column.name), scope);
+  const predicate = scopeForTable(
+    table,
+    columns.map((column) => column.name),
+    scope,
+  );
   const clauses = [predicate.sql];
   const params: unknown[] = [...predicate.params];
 
@@ -233,8 +261,13 @@ export async function runEditorQuery(
 
   const database = await db();
   const startedAt = Date.now();
-  const statement = analysis.kind === 'read' ? withRowLimit(analysis.statement, limit) : analysis.statement;
-  const result = await database.prepare(statement).all<Record<string, unknown>>();
+  const statement =
+    analysis.kind === 'read'
+      ? withRowLimit(analysis.statement, limit)
+      : analysis.statement;
+  const result = await database
+    .prepare(statement)
+    .all<Record<string, unknown>>();
   const durationMs = Date.now() - startedAt;
 
   const rawRows = result.results ?? [];

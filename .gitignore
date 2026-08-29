@@ -48,3 +48,7 @@ next-env.d.ts
 
 # agent tooling (worktrees, preview launch config)
 /.claude/
+
+# Compute Node credentials are encrypted, but still must never be committed.
+.ysd-node-agent.credentials
+.ysd-node-agent.credentials.*

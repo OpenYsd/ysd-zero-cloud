@@ -1,4 +1,11 @@
 import type { DeployTarget, Framework } from './smart-deploy.ts';
+import type {
+  NodeCapabilities,
+  NodeJobState,
+  NodeJobType,
+  NodeMetrics,
+  NodeStatus,
+} from './nodes.ts';
 
 /**
  * The shapes that cross the server/client boundary.
@@ -56,7 +63,8 @@ export type LogSource =
   | 'shield'
   | 'auth'
   | 'storage'
-  | 'networking';
+  | 'networking'
+  | 'node';
 
 export const LOG_LEVELS = ['INFO', 'WARN', 'ERROR'] as const;
 
@@ -70,6 +78,7 @@ export const LOG_SOURCES = [
   'auth',
   'storage',
   'networking',
+  'node',
 ] as const;
 
 export type StorageObject = {
@@ -127,6 +136,66 @@ export type LogEvent = {
   actor: string | null;
   resource: string | null;
   createdAt: number;
+};
+
+export type ComputeNode = {
+  id: string;
+  name: string;
+  status: NodeStatus;
+  agentVersion: string;
+  protocolVersion: number;
+  platform: string;
+  architecture: string;
+  capabilities: NodeCapabilities;
+  pairedAt: number;
+  lastHeartbeatAt: number | null;
+  revokedAt: number | null;
+  metrics: NodeMetrics | null;
+};
+
+export type NodeJob = {
+  id: string;
+  type: NodeJobType;
+  state: NodeJobState;
+  targetNodeId: string | null;
+  assignedNodeId: string | null;
+  attempts: number;
+  maxAttempts: number;
+  leaseExpiresAt: number | null;
+  result: Record<string, unknown> | null;
+  lastError: string | null;
+  createdAt: number;
+  updatedAt: number;
+  completedAt: number | null;
+};
+
+export type NodeSecurityEvent = {
+  id: string;
+  nodeId: string | null;
+  type: string;
+  severity: 'low' | 'medium' | 'high' | 'critical';
+  detail: string;
+  createdAt: number;
+};
+
+export type NodesState = {
+  nodes: ComputeNode[];
+  jobs: NodeJob[];
+  securityEvents: NodeSecurityEvent[];
+  summary: {
+    total: number;
+    online: number;
+    stale: number;
+    offline: number;
+    revoked: number;
+    queuedJobs: number;
+    activeLeases: number;
+  };
+  protocolVersion: number;
+  currentAgentVersion: string;
+  minimumAgentVersion: string;
+  outboundOnly: true;
+  projectedMonthlyCost: 0;
 };
 
 export type DeploymentState = 'planned' | 'blocked';
@@ -239,6 +308,7 @@ export const LIVE_SECTIONS: readonly Section[] = [
   'settings',
   'storage',
   'networking',
+  'nodes',
 ];
 
 export function isLiveSection(section: Section): boolean {

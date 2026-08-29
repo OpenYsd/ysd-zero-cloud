@@ -54,6 +54,10 @@ export const RATE_LIMIT_RULES = {
   'api:anonymous': { limit: 60, windowMs: MINUTE },
   /** Authenticated writes, per user. */
   'api:write': { limit: 120, windowMs: MINUTE },
+  /** One-time node pairing is public but backed by a high-entropy code. */
+  'node:pair': { limit: 10, windowMs: 60 * MINUTE },
+  /** Signed heartbeats and polls from one authenticated node. */
+  'node:agent': { limit: 180, windowMs: MINUTE },
   /** The SQL Editor, which is expensive and owner-only. */
   'sql:query': { limit: 30, windowMs: MINUTE },
 } as const satisfies Record<string, RateLimitRule>;
@@ -113,12 +117,18 @@ export function rateLimitKey(name: RateLimitName, identifier: string): string {
 }
 
 /** Standard headers so a client can back off intelligently. */
-export function rateLimitHeaders(rule: RateLimitRule, decision: RateLimitDecision): HeadersInit {
+export function rateLimitHeaders(
+  rule: RateLimitRule,
+  decision: RateLimitDecision,
+): HeadersInit {
   const headers: Record<string, string> = {
     'RateLimit-Limit': String(rule.limit),
     'RateLimit-Remaining': String(decision.remaining),
-    'RateLimit-Reset': String(Math.max(0, Math.ceil((decision.resetAt - Date.now()) / 1000))),
+    'RateLimit-Reset': String(
+      Math.max(0, Math.ceil((decision.resetAt - Date.now()) / 1000)),
+    ),
   };
-  if (!decision.allowed) headers['Retry-After'] = String(decision.retryAfterSeconds);
+  if (!decision.allowed)
+    headers['Retry-After'] = String(decision.retryAfterSeconds);
   return headers;
 }

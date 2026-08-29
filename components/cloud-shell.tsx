@@ -129,7 +129,7 @@ function CloudShellFrame({
               YSD Zero Cloud
             </p>
             <p className="mt-1 text-[10px] font-medium uppercase tracking-[0.16em] text-white/35">
-              Cloud OS · v0.3
+              Cloud OS · v0.4
             </p>
           </div>
         </div>

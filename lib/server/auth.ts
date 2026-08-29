@@ -57,9 +57,15 @@ export function emailVerificationRequired(): boolean {
  * cookies. The deployed origin is the only entry outside development.
  */
 export function trustedOrigins(): string[] {
+  // The Vite Cloudflare plugin merges production Wrangler vars into the local
+  // runtime. Do not let that public URL replace the actual local browser
+  // origin, or every development sign-in and acceptance run is rejected.
+  if (isDevelopment()) {
+    return ['http://localhost:3000', 'http://127.0.0.1:3000'];
+  }
   const configured = runtimeEnv.BETTER_AUTH_URL?.trim();
   if (configured) return [configured.replace(/\/+$/, '')];
-  return isDevelopment() ? ['http://localhost:3000'] : [];
+  return [];
 }
 
 function createAuth(): Auth {

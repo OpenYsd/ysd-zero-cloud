@@ -3,6 +3,7 @@ import { notFound } from 'next/navigation';
 import { AdminView } from '@/components/admin-view';
 import { LogsView } from '@/components/logs-view';
 import { NetworkingView } from '@/components/networking-view';
+import { NodesView } from '@/components/nodes-view';
 import { ProjectsView } from '@/components/projects-view';
 import { StorageView } from '@/components/storage-view';
 import {
@@ -30,6 +31,7 @@ import { listDeployments } from '@/lib/server/deployments';
 import { runtimeEnv } from '@/lib/server/env';
 import { listLogs } from '@/lib/server/logs';
 import { readNetworkState } from '@/lib/server/networking';
+import { readNodesState } from '@/lib/server/nodes';
 import { listProjects } from '@/lib/server/projects';
 import { listSecrets } from '@/lib/server/secrets';
 import { requireSession } from '@/lib/server/session';
@@ -138,6 +140,11 @@ async function SectionBody({
 
     case 'networking':
       return <NetworkingView state={readNetworkState()} />;
+
+    case 'nodes':
+      return (
+        <NodesView state={await readNodesState(workspaceId, now)} now={now} />
+      );
 
     case 'secrets':
       return <SecretsView secrets={await listSecrets(workspaceId)} now={now} />;

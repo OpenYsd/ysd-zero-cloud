@@ -109,7 +109,7 @@ two = Client("operator-2")
 
 section("anonymous access is closed")
 for path in ("/api/projects", "/api/secrets", "/api/usage", "/api/logs", "/api/shield",
-             "/api/settings", "/api/deployments", "/api/database/tables"):
+             "/api/settings", "/api/deployments", "/api/database/tables", "/api/nodes"):
     status, _ = anon.request("GET", path)
     check(f"401 on {path}", status == 401, f"got {status}")
 

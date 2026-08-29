@@ -1,8 +1,8 @@
 # YSD Zero Cloud
 
-YSD Zero Cloud is a zero-cost-first cloud operating system. Version `0.3.0` runs authentication,
-persistence, security scanning, the cost guard, private-object storage policy, and network inventory
-against Cloudflare Workers and D1.
+YSD Zero Cloud is a zero-cost-first cloud operating system. Version `0.4.0` runs authentication,
+persistence, security scanning, the cost guard, private-object storage policy, network inventory,
+and an outbound-only user-owned compute control plane against Cloudflare Workers and D1.
 
 **Live:** <https://ysd-zero-cloud.ysd-zero-cloud.workers.dev>
 
@@ -30,8 +30,10 @@ deployed Worker's explicit zero-cost configuration.
 | YSD Shield        | Rules scored against a real snapshot of the workspace                         |
 | Storage           | Private R2 adapter, D1 authorization index, and hard account/workspace quotas |
 | Networking        | Deployed workers.dev origin, TLS, route exposure, and binding inventory       |
+| Nodes             | Paired user-owned agents, signed job leases, heartbeats, metrics, and audit   |
 
-AI, Game Servers, and Nodes are still design previews. Storage and Networking are live surfaces.
+AI and Game Servers are still design previews with capability contracts only. Storage, Networking,
+and Nodes are live surfaces.
 The current Cloudflare account returns `10042: Please enable R2`, so Storage honestly renders the
 implemented adapter as unavailable and refuses uploads; no bucket, public endpoint, or billable
 resource is created while that account-level gate remains.
@@ -135,6 +137,34 @@ origin and shows which routes are public, session-scoped, or internal bindings. 
 is `workers-dev-only`: zero custom domains, zero tunnels, zero public R2 endpoints, and no Argo,
 Spectrum, load balancer, or paid route.
 
+## Compute Nodes
+
+Compute Nodes make the Worker a control plane for machines the operator already owns. The agent
+opens no listener and exposes no local port: it sends outbound HTTPS heartbeats, polls D1-backed
+work, verifies the Worker's signed lease claim, runs one allowlisted handler, and posts a signed
+completion. Cloudflare never performs the workload compute.
+
+- Pairing tickets carry 192 bits of entropy, expire after ten minutes, and are consumed once. D1
+  stores only their SHA-256 digest.
+- Each node receives a separate bearer credential. D1 stores it inside the same AES-GCM envelope
+  used for workspace secrets and also keeps a one-way digest for verification. Revocation erases the
+  ciphertext; the retained digest can identify and block use of the exact revoked token without
+  preserving anything that can authenticate.
+- Every agent request signs the method, path, timestamp, random nonce, and exact body with HMAC.
+  Nonces are unique per node in D1 and timestamps have a one-minute window, so captured requests
+  cannot be replayed.
+- Claims bind the workspace, node, job type, payload digest, lease id, expiry, and attempt. Expired
+  leases return to the queue up to three attempts, then become timed out. An idempotency key stops a
+  browser retry from creating a duplicate job.
+- The agent has no `child_process` dependency, `eval`, generic script, or shell handler. Phase 3 can
+  run only `diagnostic.ping` and `diagnostic.snapshot`. `ai.inference` and
+  `game-server.lifecycle` are explicit API contracts that answer 409 until a later phase.
+- The local credential file is AES-256-GCM encrypted with a passphrase that never leaves the node.
+  See `agent/README.md` for pairing and service-run instructions.
+
+YSD Shield inspects stale and offline nodes, minimum agent version, revoked-node activity, unsigned
+jobs, stale leases, and high-severity authentication anomalies.
+
 ## Security
 
 - **Secrets are write-only.** Values are sealed with AES-GCM (HKDF-derived key) before they reach
@@ -146,6 +176,8 @@ Spectrum, load balancer, or paid route.
 - **Database Studio redacts on the server.** Password hashes, tokens, and ciphertext are masked
   before a row leaves the Worker, so an API client sees the same redaction the browser does.
 - **Every API route requires a session** and is scoped to the caller's workspace.
+- **Agent routes require signed requests.** A bearer token alone is insufficient: timestamp, nonce,
+  path, method, and body must all match the HMAC, and every nonce is accepted once.
 
 ## Known upstream issue: client navigation
 
@@ -194,6 +226,13 @@ npm test
 npm run typecheck
 npm run lint
 npm run build
+```
+
+With the local server running on port 3000 and interactive Turnstile keys omitted, the real
+Worker+D1 node protocol can be exercised end to end:
+
+```bash
+python node-acceptance.py
 ```
 
 ## Deployment
@@ -311,6 +350,7 @@ lib/
   shield.ts              Security rules and scoring, as pure functions
   crypto.ts              AES-GCM envelope encryption for secrets
   server/                D1 access, auth, and the per-surface data modules
+agent/                    Outbound-only Node Agent and encrypted local credential store
 db/migrations/           SQL applied to D1
 tests/                   Node test runner coverage of every pure module
 ```
@@ -326,5 +366,6 @@ Workers output.
 1. Execute accepted plans through a deploy pipeline rather than recording them.
 2. Enable the already-implemented private R2 binding only if Cloudflare confirms `$0` account activation.
 3. Add organizations, roles, and per-member audit scoping.
-4. Connected-node agent, which unlocks the Game Servers and Nodes surfaces.
+4. Add reviewed AI and Game Server handlers on top of the existing node contracts without adding a
+   generic shell surface.
 5. Add owned-domain inventory only after a domain exists; keep workers.dev as the zero-cost default.

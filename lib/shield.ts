@@ -95,6 +95,17 @@ export type ShieldSnapshot = {
     tunnels: number;
     publicStorageEndpoints: number;
   };
+  nodes?: {
+    total: number;
+    stale: number;
+    offline: number;
+    revoked: number;
+    outdated: number;
+    unsignedJobs: number;
+    staleLeases: number;
+    anomalousEvents: number;
+    revokedActivity: number;
+  };
   now: number;
 };
 
@@ -634,6 +645,131 @@ function checkSurface(snapshot: ShieldSnapshot): {
   };
 }
 
+function checkNodes(snapshot: ShieldSnapshot): {
+  check: ShieldCheck;
+  findings: ShieldFinding[];
+} {
+  const nodes = snapshot.nodes;
+  const findings: ShieldFinding[] = [];
+  if (!nodes) {
+    return {
+      check: {
+        id: 'compute-nodes',
+        name: 'Compute Nodes',
+        detail: 'Node security state was not sampled',
+        state: 'passed',
+      },
+      findings,
+    };
+  }
+
+  if (nodes.outdated > 0) {
+    findings.push({
+      code: 'outdated-node-agents',
+      title: 'Node agents are below the minimum version',
+      detail: `${nodes.outdated} node agent${nodes.outdated === 1 ? ' is' : 's are'} below the supported security baseline.`,
+      resource: 'nodes',
+      severity: 'medium',
+      remediation:
+        'Stop the old process, update the checked-out agent, and restart it with the encrypted credential.',
+    });
+  }
+  if (nodes.stale > 0) {
+    findings.push({
+      code: 'stale-node-heartbeats',
+      title: 'Compute node heartbeats are stale',
+      detail: `${nodes.stale} node${nodes.stale === 1 ? ' has' : 's have'} missed the online heartbeat window.`,
+      resource: 'nodes',
+      severity: 'medium',
+      remediation:
+        'Check the outbound HTTPS connection and local agent process before dispatching work.',
+    });
+  }
+  if (nodes.offline > 0) {
+    findings.push({
+      code: 'offline-compute-nodes',
+      title: 'Compute nodes are offline',
+      detail: `${nodes.offline} active node${nodes.offline === 1 ? ' is' : 's are'} not reporting. Queued work remains in D1 and is not lost.`,
+      resource: 'nodes',
+      severity: 'low',
+      remediation:
+        'Restart the local agent, or revoke the node if the machine should no longer connect.',
+    });
+  }
+  if (nodes.revoked > 0) {
+    findings.push({
+      code: 'revoked-nodes-retained',
+      title: 'Revoked nodes are retained in audit history',
+      detail: `${nodes.revoked} revoked node record${nodes.revoked === 1 ? ' is' : 's are'} retained with its credential erased.`,
+      resource: 'nodes',
+      severity: 'low',
+      remediation:
+        'No credential remains usable. Keep the row for audit history, or add a deliberate retention policy later.',
+    });
+  }
+  if (nodes.unsignedJobs > 0) {
+    findings.push({
+      code: 'unsigned-node-jobs',
+      title: 'Node jobs are missing signed claims',
+      detail: `${nodes.unsignedJobs} claimed or completed job${nodes.unsignedJobs === 1 ? ' has' : 's have'} no control-plane signature.`,
+      resource: 'node-jobs',
+      severity: 'critical',
+      remediation:
+        'Stop the affected nodes, revoke their credentials, and investigate the job rows before re-pairing.',
+    });
+  }
+  if (nodes.staleLeases > 0) {
+    findings.push({
+      code: 'stale-node-leases',
+      title: 'Node job leases expired without recovery',
+      detail: `${nodes.staleLeases} lease${nodes.staleLeases === 1 ? ' is' : 's are'} past timeout while still marked active.`,
+      resource: 'node-jobs',
+      severity: 'high',
+      remediation:
+        'Open Nodes to trigger recovery, then inspect agent connectivity and completion errors.',
+    });
+  }
+  if (nodes.anomalousEvents > 0) {
+    findings.push({
+      code: 'anomalous-node-activity',
+      title: 'Anomalous node activity was blocked',
+      detail: `${nodes.anomalousEvents} high-severity node security event${nodes.anomalousEvents === 1 ? ' was' : 's were'} recorded in the last day.`,
+      resource: 'nodes',
+      severity: 'high',
+      remediation:
+        'Review the Nodes security events and revoke any credential whose machine or local passphrase may be compromised.',
+    });
+  }
+  if (nodes.revokedActivity > 0) {
+    findings.push({
+      code: 'revoked-node-activity',
+      title: 'A revoked node tried to reconnect',
+      detail: `${nodes.revokedActivity} request${nodes.revokedActivity === 1 ? ' used' : 's used'} a revoked node identifier in the last day.`,
+      resource: 'nodes',
+      severity: 'high',
+      remediation:
+        'Confirm the old agent process is stopped. The credential remains rejected and cannot claim work.',
+    });
+  }
+
+  return {
+    check: {
+      id: 'compute-nodes',
+      name: 'Compute Nodes',
+      detail: `${nodes.total} paired · ${nodes.stale} stale · ${nodes.offline} offline · ${nodes.revoked} revoked · signed outbound-only claims`,
+      state: findings.some(
+        (finding) =>
+          finding.severity === 'critical' || finding.severity === 'high',
+      )
+        ? 'failed'
+        : findings.length > 0
+          ? 'review'
+          : 'passed',
+    },
+    findings,
+  };
+}
+
 /** Runs every rule against a snapshot and scores the result. */
 export function runShieldRules(snapshot: ShieldSnapshot): ShieldReport {
   const results = [
@@ -642,6 +778,7 @@ export function runShieldRules(snapshot: ShieldSnapshot): ShieldReport {
     checkIdentity(snapshot),
     checkDatabase(snapshot),
     checkStorage(snapshot),
+    checkNodes(snapshot),
     checkSurface(snapshot),
     checkHardening(snapshot),
   ];

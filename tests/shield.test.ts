@@ -59,6 +59,41 @@ void test('a clean workspace scores 100 and reports nothing', () => {
   assert.ok(report.checks.every((check) => check.state === 'passed'));
 });
 
+void test('node security checks flag stale, unsigned, and anomalous state', () => {
+  const report = runShieldRules(
+    snapshot({
+      nodes: {
+        total: 3,
+        stale: 1,
+        offline: 1,
+        revoked: 1,
+        outdated: 1,
+        unsignedJobs: 1,
+        staleLeases: 1,
+        anomalousEvents: 2,
+        revokedActivity: 1,
+      },
+    }),
+  );
+  const codes = new Set(report.findings.map((finding) => finding.code));
+  for (const code of [
+    'outdated-node-agents',
+    'stale-node-heartbeats',
+    'offline-compute-nodes',
+    'revoked-nodes-retained',
+    'unsigned-node-jobs',
+    'stale-node-leases',
+    'anomalous-node-activity',
+    'revoked-node-activity',
+  ]) {
+    assert.equal(codes.has(code), true, code);
+  }
+  assert.equal(
+    report.checks.find((check) => check.id === 'compute-nodes')?.state,
+    'failed',
+  );
+});
+
 void test('pausing Zero Mode is reported as a high-severity finding', () => {
   const report = runShieldRules(snapshot({ zeroModeEnabled: false }));
   const finding = report.findings.find(
