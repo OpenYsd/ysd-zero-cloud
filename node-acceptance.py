@@ -135,14 +135,16 @@ check("pairing ticket created", status == 201 and pairing, f"got {status}")
 
 capabilities = {
     "cpu": {"cores": 4, "model": "Acceptance CPU"},
-    "memory": {"totalBytes": 8 * 1024**3},
-    "gpu": {"available": False, "model": None},
+    "memory": {"totalBytes": 8 * 1024**3, "freeBytes": 6 * 1024**3},
+    "gpu": {"available": False, "model": None, "vramBytes": None},
+    "disk": {"totalBytes": 20 * 1024**3, "freeBytes": 15 * 1024**3},
     "docker": {"available": True},
+    "ai": {"runtimes": [], "cachedModels": [], "maxConcurrentJobs": 1},
     "contracts": {"ai": False, "gameServers": True},
 }
 pair_body = {
     "code": pairing["code"],
-    "agentVersion": "0.1.0",
+    "agentVersion": "0.2.0",
     "protocolVersion": 1,
     "platform": "acceptance",
     "architecture": "x64",
@@ -158,7 +160,7 @@ check("pairing ticket cannot be replayed", status in (401, 409), f"got {status}"
 
 section("signed heartbeat and replay protection")
 heartbeat = {
-    "agentVersion": "0.1.0",
+    "agentVersion": "0.2.0",
     "capabilities": capabilities,
     "metrics": {
         "cpuLoadPercent": 12.5,
@@ -196,7 +198,7 @@ check("shell-shaped payload rejected", status == 400, f"got {status}")
 status, _ = one.request("POST", "/api/nodes/jobs", {
     "type": "ai.inference", "payload": {"prompt": "run"}
 })
-check("AI contract remains a placeholder", status == 409, f"got {status}")
+check("AI work cannot bypass AI Center", status == 400, f"got {status}")
 
 idempotency = f"node-job-{RUN}"
 job_body = {

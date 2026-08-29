@@ -402,9 +402,9 @@ export function NodesView({ state, now }: { state: NodesState; now: number }) {
               </h2>
             </div>
             <p className="mt-2 max-w-xl text-[10px] leading-4 text-white/30">
-              No shell text, script, image, container, AI model, or game-server
-              action can be submitted. Those contracts stay disabled until a
-              later security review.
+              Diagnostics remain isolated from AI Compute. Neither surface can
+              submit shell text, scripts, images, containers, arbitrary model
+              sources, or game-server actions.
             </p>
           </div>
           <div className="grid gap-2 sm:grid-cols-[180px_1fr_auto_auto]">

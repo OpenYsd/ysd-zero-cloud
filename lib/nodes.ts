@@ -3,13 +3,19 @@
  *
  * This module is runtime-neutral: both the Cloudflare control plane and the
  * outbound-only Node Agent use the exact same validators and signatures.
- * Nothing here can execute a shell command. Phase 3 deliberately exposes only
- * two diagnostic handlers; AI and game-server contracts remain placeholders.
+ * Nothing here can execute a shell command. Phase 4 adds dedicated AI handlers
+ * while game-server execution remains an inert contract.
  */
 
+import {
+  parseAiCapabilities,
+  validateAiJobPayload,
+  type AiCapabilities,
+} from './ai.ts';
+
 export const NODE_PROTOCOL_VERSION = 1;
-export const CURRENT_AGENT_VERSION = '0.1.0';
-export const MINIMUM_AGENT_VERSION = '0.1.0';
+export const CURRENT_AGENT_VERSION = '0.2.0';
+export const MINIMUM_AGENT_VERSION = '0.2.0';
 
 export const NODE_TIMING = {
   heartbeatMs: 25_000,
@@ -25,10 +31,11 @@ export const NODE_TIMING = {
 export const EXECUTABLE_NODE_JOB_TYPES = [
   'diagnostic.ping',
   'diagnostic.snapshot',
+  'ai.inference',
+  'ai.model.acquire',
 ] as const;
 
 export const PLACEHOLDER_NODE_JOB_TYPES = [
-  'ai.inference',
   'game-server.lifecycle',
 ] as const;
 
@@ -44,9 +51,11 @@ export type NodeJobType = (typeof NODE_JOB_TYPES)[number];
 
 export type NodeCapabilities = {
   cpu: { cores: number; model: string };
-  memory: { totalBytes: number };
-  gpu: { available: boolean; model: string | null };
+  memory: { totalBytes: number; freeBytes: number };
+  gpu: { available: boolean; model: string | null; vramBytes: number | null };
+  disk: { totalBytes: number; freeBytes: number };
   docker: { available: boolean };
+  ai: AiCapabilities;
   contracts: { ai: boolean; gameServers: boolean };
 };
 
@@ -61,6 +70,7 @@ export type NodeStatus = 'online' | 'stale' | 'offline' | 'revoked';
 export type NodeJobState =
   | 'queued'
   | 'leased'
+  | 'cancelling'
   | 'succeeded'
   | 'failed'
   | 'timed_out'
@@ -165,6 +175,7 @@ export function parseCapabilities(value: unknown): NodeCapabilities | null {
   const cpu = isRecord(value.cpu) ? value.cpu : null;
   const memory = isRecord(value.memory) ? value.memory : null;
   const gpu = isRecord(value.gpu) ? value.gpu : null;
+  const disk = isRecord(value.disk) ? value.disk : null;
   const docker = isRecord(value.docker) ? value.docker : null;
   const contracts = isRecord(value.contracts) ? value.contracts : null;
   if (!cpu || !memory || !gpu || !docker || !contracts) return null;
@@ -175,7 +186,37 @@ export function parseCapabilities(value: unknown): NodeCapabilities | null {
     1,
     Number.MAX_SAFE_INTEGER,
   );
-  if (cores === null || totalBytes === null) return null;
+  const freeBytes =
+    memory.freeBytes === undefined
+      ? 0
+      : finiteInteger(memory.freeBytes, 0, totalBytes ?? 0);
+  const diskTotalBytes = disk
+    ? finiteInteger(disk.totalBytes, 0, Number.MAX_SAFE_INTEGER)
+    : 0;
+  const diskFreeBytes = disk
+    ? finiteInteger(disk.freeBytes, 0, diskTotalBytes ?? 0)
+    : 0;
+  const vramBytes =
+    gpu.vramBytes === null || gpu.vramBytes === undefined
+      ? null
+      : finiteInteger(gpu.vramBytes, 0, Number.MAX_SAFE_INTEGER);
+  const ai =
+    value.ai === undefined
+      ? { runtimes: [], cachedModels: [], maxConcurrentJobs: 1 }
+      : parseAiCapabilities(value.ai);
+  if (
+    cores === null ||
+    totalBytes === null ||
+    freeBytes === null ||
+    diskTotalBytes === null ||
+    diskFreeBytes === null ||
+    (vramBytes === null &&
+      gpu.vramBytes !== null &&
+      gpu.vramBytes !== undefined) ||
+    !ai
+  ) {
+    return null;
+  }
   if (
     typeof gpu.available !== 'boolean' ||
     typeof docker.available !== 'boolean' ||
@@ -188,13 +229,17 @@ export function parseCapabilities(value: unknown): NodeCapabilities | null {
   const gpuModel = gpu.available ? cleanText(gpu.model, 128) : '';
   return {
     cpu: { cores, model: cleanText(cpu.model, 128) || 'Unknown CPU' },
-    memory: { totalBytes },
-    gpu: { available: gpu.available, model: gpuModel || null },
+    memory: { totalBytes, freeBytes },
+    gpu: {
+      available: gpu.available,
+      model: gpuModel || null,
+      vramBytes: gpu.available ? vramBytes : null,
+    },
+    disk: { totalBytes: diskTotalBytes, freeBytes: diskFreeBytes },
     docker: { available: docker.available },
-    // These advertise only that the local machine could support a later
-    // contract. The Phase 3 control plane still refuses both job types.
+    ai,
     contracts: {
-      ai: contracts.ai,
+      ai: contracts.ai && ai.runtimes.some((runtime) => runtime.available),
       gameServers: contracts.gameServers,
     },
   };
@@ -270,7 +315,7 @@ export function validateJob(
       status: 409,
       code: 'placeholder',
       error:
-        'This is a Phase 3 API contract only. AI and Game Server execution are not enabled.',
+        'Game Server execution remains a Phase 5 API contract only.',
     };
   }
   if (!isExecutableJobType(typeValue)) {
@@ -291,6 +336,19 @@ export function validateJob(
   }
 
   let payload: Record<string, unknown>;
+  if (typeValue === 'ai.inference' || typeValue === 'ai.model.acquire') {
+    const ai = validateAiJobPayload(typeValue, payloadValue);
+    if (!ai.ok) {
+      return {
+        ok: false,
+        status: 400,
+        code: 'payload',
+        error: ai.error,
+      };
+    }
+    payload = { ...ai.payload };
+    return { ok: true, type: typeValue, payload };
+  }
   if (typeValue === 'diagnostic.ping') {
     if (!onlyKeys(payloadValue, ['message'])) {
       return {
@@ -552,7 +610,7 @@ export function evaluateCompletion(
   leaseId: string,
   now: number,
 ): CompletionDecision {
-  if (job.state !== 'leased') {
+  if (job.state !== 'leased' && job.state !== 'cancelling') {
     return {
       allowed: false,
       reason: 'state',
@@ -593,10 +651,11 @@ export function recoverExpiredLease(
 
 export function sanitizeJobResult(
   value: unknown,
+  maximumBytes = 16_384,
 ): Record<string, unknown> | null {
   if (!isRecord(value)) return null;
   const serialized = stableJson(value);
-  if (serialized.length > 16_384) return null;
+  if (new TextEncoder().encode(serialized).byteLength > maximumBytes) return null;
   if (
     /"(?:command|shell|script|token|secret|password)"\s*:/i.test(serialized)
   ) {

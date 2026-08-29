@@ -7,6 +7,7 @@ import authRateLimitSchema from '../../db/migrations/0003_auth_rate_limit.sql?ra
 import securitySchema from '../../db/migrations/0004_security.sql?raw';
 import storageSchema from '../../db/migrations/0005_storage.sql?raw';
 import computeNodesSchema from '../../db/migrations/0006_compute_nodes.sql?raw';
+import aiComputeSchema from '../../db/migrations/0007_ai_compute.sql?raw';
 
 /**
  * D1 access and schema management.
@@ -24,6 +25,7 @@ const MIGRATIONS: { name: string; sql: string }[] = [
   { name: '0004_security', sql: securitySchema },
   { name: '0005_storage', sql: storageSchema },
   { name: '0006_compute_nodes', sql: computeNodesSchema },
+  { name: '0007_ai_compute', sql: aiComputeSchema },
 ];
 
 const LEDGER = `CREATE TABLE IF NOT EXISTS ysd_migration (
@@ -59,6 +61,9 @@ export const WORKSPACE_TABLES = [
   'node_metric',
   'node_job_event',
   'node_security_event',
+  'ai_model',
+  'ai_model_cache',
+  'ai_inference',
 ] as const;
 
 export function getDatabase(): D1Database {

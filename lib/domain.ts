@@ -1,4 +1,5 @@
 import type { DeployTarget, Framework } from './smart-deploy.ts';
+import type { AiModelState, AiRuntime } from './ai.ts';
 import type {
   NodeCapabilities,
   NodeJobState,
@@ -64,7 +65,8 @@ export type LogSource =
   | 'auth'
   | 'storage'
   | 'networking'
-  | 'node';
+  | 'node'
+  | 'ai';
 
 export const LOG_LEVELS = ['INFO', 'WARN', 'ERROR'] as const;
 
@@ -79,6 +81,7 @@ export const LOG_SOURCES = [
   'storage',
   'networking',
   'node',
+  'ai',
 ] as const;
 
 export type StorageObject = {
@@ -198,6 +201,83 @@ export type NodesState = {
   projectedMonthlyCost: 0;
 };
 
+export type AiModelCache = {
+  nodeId: string;
+  nodeName: string;
+  state: AiModelState;
+  sizeBytes: number;
+  checksum: string | null;
+  error: string | null;
+  lastVerifiedAt: number | null;
+  lastUsedAt: number | null;
+};
+
+export type AiModel = {
+  id: string;
+  catalogId: string;
+  displayName: string;
+  runtime: AiRuntime;
+  family: string;
+  runtimeModel: string;
+  source: 'ollama-library' | 'local-runtime';
+  sizeBytes: number;
+  expectedMemoryBytes: number;
+  requiredVramBytes: number;
+  checksum: string | null;
+  downloadable: boolean;
+  enabled: boolean;
+  state: AiModelState;
+  caches: AiModelCache[];
+  lastVerifiedAt: number | null;
+  lastUsedAt: number | null;
+};
+
+export type AiRun = {
+  jobId: string;
+  modelId: string;
+  modelName: string;
+  runtime: AiRuntime;
+  state: NodeJobState;
+  requestedNodeId: string | null;
+  selectedNodeId: string | null;
+  selectedNodeName: string | null;
+  promptCharacters: number;
+  systemPromptCharacters: number;
+  maxTokens: number;
+  responseFormat: 'text' | 'json';
+  inputTokensEstimate: number | null;
+  outputTokensEstimate: number | null;
+  latencyMs: number | null;
+  attempts: number;
+  result: Record<string, unknown> | null;
+  lastError: string | null;
+  cancelRequestedAt: number | null;
+  createdAt: number;
+  updatedAt: number;
+  completedAt: number | null;
+};
+
+export type AiState = {
+  nodes: ComputeNode[];
+  models: AiModel[];
+  runs: AiRun[];
+  summary: {
+    aiCapableNodes: number;
+    onlineNodes: number;
+    readyModels: number;
+    queued: number;
+    running: number;
+    completed: number;
+    failed: number;
+    cancelled: number;
+    averageLatencyMs: number | null;
+  };
+  supportedRuntimes: readonly AiRuntime[];
+  localOnly: true;
+  zeroModeEnforced: true;
+  projectedMonthlyCost: 0;
+};
+
 export type DeploymentState = 'planned' | 'blocked';
 
 export type Deployment = {
@@ -309,6 +389,7 @@ export const LIVE_SECTIONS: readonly Section[] = [
   'storage',
   'networking',
   'nodes',
+  'ai',
 ];
 
 export function isLiveSection(section: Section): boolean {

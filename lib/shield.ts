@@ -106,6 +106,29 @@ export type ShieldSnapshot = {
     anomalousEvents: number;
     revokedActivity: number;
   };
+  ai?: {
+    totalAiNodes: number;
+    eligibleOnlineNodes: number;
+    staleNodes: number;
+    offlineNodes: number;
+    outdatedNodes: number;
+    unsupportedRuntime: number;
+    invalidModelHash: number;
+    oversizedModels: number;
+    insufficientDisk: number;
+    unsignedJobs: number;
+    forgedClaims: number;
+    replayedJobs: number;
+    expiredLeases: number;
+    repeatedFailures: number;
+    suspiciousVolume: number;
+    resourceExhaustion: number;
+    unexpectedOutbound: number;
+    forbiddenProvider: number;
+    revokedActivity: number;
+    modelPathAbuse: number;
+    payloadAbuse: number;
+  };
   now: number;
 };
 
@@ -770,6 +793,146 @@ function checkNodes(snapshot: ShieldSnapshot): {
   };
 }
 
+function checkAiCompute(snapshot: ShieldSnapshot): {
+  check: ShieldCheck;
+  findings: ShieldFinding[];
+} {
+  const ai = snapshot.ai;
+  const findings: ShieldFinding[] = [];
+  if (!ai) {
+    return {
+      check: {
+        id: 'ai-compute',
+        name: 'YSD AI Compute',
+        detail: 'AI security state was not sampled',
+        state: 'passed',
+      },
+      findings,
+    };
+  }
+
+  if (ai.totalAiNodes === 0) {
+    findings.push({
+      code: 'ai-no-local-node',
+      title: 'No local AI node is connected',
+      detail:
+        'The control plane is ready, but no user-owned node currently reports an allowlisted local AI runtime.',
+      resource: 'ai',
+      severity: 'low',
+      remediation:
+        'Pair an outbound-only node and start Ollama or llama.cpp locally when AI execution is needed.',
+    });
+  } else if (ai.eligibleOnlineNodes === 0) {
+    findings.push({
+      code: 'ai-no-eligible-node',
+      title: 'No AI node is eligible for scheduling',
+      detail: `${ai.totalAiNodes} AI-capable node${ai.totalAiNodes === 1 ? ' is' : 's are'} known, but none is online with a supported agent and runtime.`,
+      resource: 'ai/nodes',
+      severity: 'medium',
+      remediation:
+        'Update the agent, restore its outbound connection, and confirm the local runtime health before submitting inference.',
+    });
+  }
+
+  const readinessIssues = ai.staleNodes + ai.offlineNodes + ai.outdatedNodes;
+  if (readinessIssues > 0) {
+    findings.push({
+      code: 'ai-node-readiness',
+      title: 'AI nodes need attention',
+      detail: `${ai.staleNodes} stale · ${ai.offlineNodes} offline · ${ai.outdatedNodes} below the minimum agent version.`,
+      resource: 'ai/nodes',
+      severity: ai.outdatedNodes > 0 || ai.staleNodes > 0 ? 'medium' : 'low',
+      remediation:
+        'Use the current agent version and restore signed outbound heartbeats; revoke machines that should stay disconnected.',
+    });
+  }
+
+  const integrityFailures =
+    ai.unsignedJobs + ai.forgedClaims + ai.replayedJobs + ai.invalidModelHash;
+  if (integrityFailures > 0) {
+    findings.push({
+      code: 'ai-integrity-failure',
+      title: 'AI job or model integrity checks failed',
+      detail: `${ai.unsignedJobs} unsigned · ${ai.forgedClaims} forged · ${ai.replayedJobs} replayed · ${ai.invalidModelHash} invalid model hash.`,
+      resource: 'ai/security',
+      severity: 'critical',
+      remediation:
+        'Revoke affected node credentials, stop inference, inspect the audit events, and re-pair only after the local machine is trusted.',
+    });
+  }
+
+  const boundaryViolations =
+    ai.unexpectedOutbound +
+    ai.forbiddenProvider +
+    ai.modelPathAbuse +
+    ai.payloadAbuse;
+  if (boundaryViolations > 0) {
+    findings.push({
+      code: 'ai-execution-boundary-violation',
+      title: 'AI execution boundary abuse was blocked',
+      detail: `${ai.unexpectedOutbound} unexpected outbound · ${ai.forbiddenProvider} forbidden provider · ${ai.modelPathAbuse} model path · ${ai.payloadAbuse} malicious payload event.`,
+      resource: 'ai/security',
+      severity: 'critical',
+      remediation:
+        'Review the initiating account and node audit events. Keep local-only origins and the reviewed model catalog unchanged.',
+    });
+  }
+
+  if (ai.revokedActivity > 0) {
+    findings.push({
+      code: 'ai-revoked-node-activity',
+      title: 'A revoked node attempted AI activity',
+      detail: `${ai.revokedActivity} revoked-node event${ai.revokedActivity === 1 ? ' was' : 's were'} blocked in the last day.`,
+      resource: 'ai/nodes',
+      severity: 'high',
+      remediation:
+        'Confirm the old agent process is stopped and inspect the machine. Its erased credential remains unusable.',
+    });
+  }
+
+  const operationalIssues =
+    ai.unsupportedRuntime +
+    ai.oversizedModels +
+    ai.insufficientDisk +
+    ai.expiredLeases +
+    ai.repeatedFailures +
+    ai.suspiciousVolume +
+    ai.resourceExhaustion;
+  if (operationalIssues > 0) {
+    findings.push({
+      code: 'ai-operational-anomaly',
+      title: 'AI workload anomalies need review',
+      detail: `${ai.unsupportedRuntime} runtime · ${ai.oversizedModels} oversized model · ${ai.insufficientDisk} disk · ${ai.expiredLeases} stale lease · ${ai.repeatedFailures} repeated failure · ${ai.suspiciousVolume} suspicious volume · ${ai.resourceExhaustion} resource event.`,
+      resource: 'ai/operations',
+      severity:
+        ai.oversizedModels > 0 ||
+        ai.expiredLeases > 0 ||
+        ai.suspiciousVolume > 0
+          ? 'high'
+          : 'medium',
+      remediation:
+        'Inspect AI jobs and node metrics, restore safe capacity, and keep model size, lease, rate, and runtime guards enforced.',
+    });
+  }
+
+  return {
+    check: {
+      id: 'ai-compute',
+      name: 'YSD AI Compute',
+      detail: `${ai.eligibleOnlineNodes} eligible local node${ai.eligibleOnlineNodes === 1 ? '' : 's'} · signed jobs · allowlisted runtimes · $0 platform compute`,
+      state: findings.some(
+        (finding) =>
+          finding.severity === 'critical' || finding.severity === 'high',
+      )
+        ? 'failed'
+        : findings.length > 0
+          ? 'review'
+          : 'passed',
+    },
+    findings,
+  };
+}
+
 /** Runs every rule against a snapshot and scores the result. */
 export function runShieldRules(snapshot: ShieldSnapshot): ShieldReport {
   const results = [
@@ -779,6 +942,7 @@ export function runShieldRules(snapshot: ShieldSnapshot): ShieldReport {
     checkDatabase(snapshot),
     checkStorage(snapshot),
     checkNodes(snapshot),
+    checkAiCompute(snapshot),
     checkSurface(snapshot),
     checkHardening(snapshot),
   ];

@@ -31,6 +31,7 @@ import { STORAGE_LIMITS } from '@/lib/storage';
 import { readNetworkState } from './networking';
 import { storageShieldState } from './storage';
 import { nodesForShield } from './nodes';
+import { aiForShield } from './ai';
 
 /**
  * YSD Shield: gathering the snapshot and persisting the result.
@@ -86,6 +87,7 @@ async function collectSnapshot(
     columnsByTable,
     storage,
     nodes,
+    ai,
   ] = await Promise.all([
     secretsForShield(workspaceId),
     listTables({ workspaceId, userId }),
@@ -120,6 +122,7 @@ async function collectSnapshot(
     listTableColumns(),
     storageShieldState(workspaceId),
     nodesForShield(workspaceId, now),
+    aiForShield(workspaceId, now),
   ]);
 
   const network = readNetworkState();
@@ -199,6 +202,7 @@ async function collectSnapshot(
       publicStorageEndpoints: network.publicStorageEndpoints,
     },
     nodes,
+    ai,
     now,
   };
 }

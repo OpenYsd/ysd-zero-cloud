@@ -30,7 +30,7 @@ void test('every live section is a real section', () => {
 });
 
 void test('preview sections are not reported as live', () => {
-  for (const section of ['ai', 'game-servers'] as const) {
+  for (const section of ['game-servers'] as const) {
     assert.equal(
       isLiveSection(section),
       false,
@@ -39,10 +39,11 @@ void test('preview sections are not reported as live', () => {
   }
 });
 
-void test('storage, networking, and nodes are live surfaces', () => {
+void test('storage, networking, nodes, and AI are live surfaces', () => {
   assert.equal(isLiveSection('storage'), true);
   assert.equal(isLiveSection('networking'), true);
   assert.equal(isLiveSection('nodes'), true);
+  assert.equal(isLiveSection('ai'), true);
 });
 
 void test('log guards reject anything outside the catalog', () => {
@@ -52,6 +53,7 @@ void test('log guards reject anything outside the catalog', () => {
   assert.equal(isLogSource('storage'), true);
   assert.equal(isLogSource('networking'), true);
   assert.equal(isLogSource('node'), true);
+  assert.equal(isLogSource('ai'), true);
   assert.equal(isLogSource('anything-else'), false);
 });
 

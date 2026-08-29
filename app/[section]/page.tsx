@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import { notFound } from 'next/navigation';
 import { AdminView } from '@/components/admin-view';
+import { AiCenter } from '@/components/ai-center';
 import { LogsView } from '@/components/logs-view';
 import { NetworkingView } from '@/components/networking-view';
 import { NodesView } from '@/components/nodes-view';
@@ -26,6 +27,7 @@ import { FREE_TIER_LIMITS } from '@/lib/free-tier';
 import { getIntegrationCatalog } from '@/lib/integrations';
 import { can } from '@/lib/roles';
 import { requestTime } from '@/lib/server/clock';
+import { readAiState } from '@/lib/server/ai';
 import { countOwners, listManagedUsers } from '@/lib/server/roles';
 import { listDeployments } from '@/lib/server/deployments';
 import { runtimeEnv } from '@/lib/server/env';
@@ -145,6 +147,9 @@ async function SectionBody({
       return (
         <NodesView state={await readNodesState(workspaceId, now)} now={now} />
       );
+
+    case 'ai':
+      return <AiCenter state={await readAiState(workspaceId, now)} now={now} />;
 
     case 'secrets':
       return <SecretsView secrets={await listSecrets(workspaceId)} now={now} />;

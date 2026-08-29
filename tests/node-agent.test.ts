@@ -11,10 +11,20 @@ import {
   sha256,
   signJobClaim,
   stableJson,
+  type NodeCapabilities,
   type SignedJobClaim,
 } from '../lib/nodes.ts';
 
 const TOKEN = `node_${'b'.repeat(24)}.local-agent-secret`;
+const TEST_CAPABILITIES: NodeCapabilities = {
+  cpu: { cores: 2, model: 'test' },
+  memory: { totalBytes: 4 * 1024 ** 3, freeBytes: 3 * 1024 ** 3 },
+  gpu: { available: false, model: null, vramBytes: null },
+  disk: { totalBytes: 10 * 1024 ** 3, freeBytes: 8 * 1024 ** 3 },
+  docker: { available: false },
+  ai: { runtimes: [], cachedModels: [], maxConcurrentJobs: 1 },
+  contracts: { ai: false, gameServers: false },
+};
 
 void test('agent credential file is encrypted and rejects the wrong key', async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'ysd-node-agent-'));
@@ -61,13 +71,7 @@ void test('agent executes signed diagnostics without a shell surface', async () 
     token: TOKEN,
     claim,
     signature,
-    capabilities: {
-      cpu: { cores: 2, model: 'test' },
-      memory: { totalBytes: 1024 },
-      gpu: { available: false, model: null },
-      docker: { available: false },
-      contracts: { ai: false, gameServers: false },
-    },
+    capabilities: TEST_CAPABILITIES,
   });
   assert.equal(result.status, 'succeeded');
   if (result.status === 'succeeded') assert.equal(result.result.reply, 'pong');
@@ -77,15 +81,13 @@ void test('agent executes signed diagnostics without a shell surface', async () 
       token: `${TOKEN}forged`,
       claim,
       signature,
-      capabilities: {
-        cpu: { cores: 1, model: 'test' },
-        memory: { totalBytes: 1 },
-        gpu: { available: false, model: null },
-        docker: { available: false },
-        contracts: { ai: false, gameServers: false },
-      },
+      capabilities: TEST_CAPABILITIES,
     }),
-    { status: 'failed', error: 'The control-plane job signature is invalid.' },
+    {
+      status: 'failed',
+      error: 'The control-plane job signature is invalid.',
+      retryable: false,
+    },
   );
 });
 
@@ -107,17 +109,12 @@ void test('agent refuses an expired signed lease', async () => {
     token: TOKEN,
     claim,
     signature,
-    capabilities: {
-      cpu: { cores: 1, model: 'test' },
-      memory: { totalBytes: 1 },
-      gpu: { available: false, model: null },
-      docker: { available: false },
-      contracts: { ai: false, gameServers: false },
-    },
+    capabilities: TEST_CAPABILITIES,
     now: 101,
   });
   assert.deepEqual(result, {
     status: 'failed',
     error: 'The job claim is stale or incompatible.',
+    retryable: false,
   });
 });

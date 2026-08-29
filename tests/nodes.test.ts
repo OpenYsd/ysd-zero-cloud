@@ -32,16 +32,42 @@ void test('capabilities and metrics accept bounded hardware facts', () => {
   assert.deepEqual(
     parseCapabilities({
       cpu: { cores: 8, model: 'CPU' },
-      memory: { totalBytes: 16 * 1024 ** 3 },
-      gpu: { available: true, model: 'GPU' },
+      memory: { totalBytes: 16 * 1024 ** 3, freeBytes: 8 * 1024 ** 3 },
+      gpu: { available: true, model: 'GPU', vramBytes: 4 * 1024 ** 3 },
+      disk: { totalBytes: 100 * 1024 ** 3, freeBytes: 80 * 1024 ** 3 },
       docker: { available: true },
+      ai: {
+        runtimes: [
+          {
+            runtime: 'ollama',
+            available: true,
+            version: '0.12.0',
+            transport: 'loopback-http',
+          },
+        ],
+        cachedModels: [],
+        maxConcurrentJobs: 1,
+      },
       contracts: { ai: true, gameServers: true },
     }),
     {
       cpu: { cores: 8, model: 'CPU' },
-      memory: { totalBytes: 16 * 1024 ** 3 },
-      gpu: { available: true, model: 'GPU' },
+      memory: { totalBytes: 16 * 1024 ** 3, freeBytes: 8 * 1024 ** 3 },
+      gpu: { available: true, model: 'GPU', vramBytes: 4 * 1024 ** 3 },
+      disk: { totalBytes: 100 * 1024 ** 3, freeBytes: 80 * 1024 ** 3 },
       docker: { available: true },
+      ai: {
+        runtimes: [
+          {
+            runtime: 'ollama',
+            available: true,
+            version: '0.12.0',
+            transport: 'loopback-http',
+          },
+        ],
+        cachedModels: [],
+        maxConcurrentJobs: 1,
+      },
       contracts: { ai: true, gameServers: true },
     },
   );
@@ -56,15 +82,15 @@ void test('capabilities and metrics accept bounded hardware facts', () => {
   );
 });
 
-void test('only diagnostic job payloads are executable', () => {
+void test('diagnostics are strict and AI needs its full reviewed contract', () => {
   assert.equal(validateJob('diagnostic.ping', { message: 'hello' }).ok, true);
   assert.equal(validateJob('diagnostic.snapshot', {}).ok, true);
-  assert.deepEqual(validateJob('ai.inference', { prompt: 'x' }), {
+  assert.equal(validateJob('ai.inference', { prompt: 'x' }).ok, false);
+  assert.deepEqual(validateJob('game-server.lifecycle', {}), {
     ok: false,
     status: 409,
     code: 'placeholder',
-    error:
-      'This is a Phase 3 API contract only. AI and Game Server execution are not enabled.',
+    error: 'Game Server execution remains a Phase 5 API contract only.',
   });
   for (const payload of [
     { shell: 'rm -rf /' },
@@ -202,8 +228,8 @@ void test('credentials use fixed-time digest comparison and version gates', asyn
   const digest = await sha256(TOKEN);
   assert.equal(constantTimeEqual(digest, await sha256(TOKEN)), true);
   assert.equal(constantTimeEqual(digest, await sha256(`${TOKEN}x`)), false);
-  assert.equal(agentVersionSupported('0.1.0'), true);
-  assert.equal(agentVersionSupported('0.0.9'), false);
+  assert.equal(agentVersionSupported('0.2.0'), true);
+  assert.equal(agentVersionSupported('0.1.9'), false);
   assert.equal(agentVersionSupported('not-a-version'), false);
 });
 

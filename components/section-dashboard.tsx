@@ -75,9 +75,9 @@ export const SECTION_META: Record<
     description: 'Buckets and objects across zero-cost storage providers.',
   },
   ai: {
-    title: 'AI',
-    eyebrow: 'Intelligence',
-    description: 'Models, inference endpoints, prompts, and usage controls.',
+    title: 'YSD AI Compute',
+    eyebrow: 'Local Intelligence',
+    description: 'Run approved models on your own outbound-only compute nodes.',
   },
   'game-servers': {
     title: 'Game Servers',

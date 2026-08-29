@@ -68,9 +68,10 @@ function parseArguments(): Arguments {
 }
 
 async function jsonRequest<T>(url: string, init: RequestInit): Promise<T> {
+  const timeout = AbortSignal.timeout(30_000);
   const response = await fetch(url, {
     ...init,
-    signal: AbortSignal.timeout(30_000),
+    signal: init.signal ? AbortSignal.any([init.signal, timeout]) : timeout,
   });
   const body = (await response.json()) as T & { error?: string };
   if (!response.ok) {
@@ -99,7 +100,7 @@ async function pair(arguments_: Arguments): Promise<void> {
       protocolVersion: NODE_PROTOCOL_VERSION,
       platform: os.platform(),
       architecture: os.arch(),
-      capabilities: collectCapabilities(),
+      capabilities: await collectCapabilities(),
     }),
   });
   await saveCredentials(arguments_.configPath, {
@@ -122,6 +123,7 @@ async function signedPost<T>(input: {
   token: string;
   pathname: string;
   body: Record<string, unknown>;
+  signal?: AbortSignal;
 }): Promise<T> {
   const raw = JSON.stringify(input.body);
   const timestamp = Date.now();
@@ -143,20 +145,63 @@ async function signedPost<T>(input: {
       'X-YSD-Signature': signature,
     },
     body: raw,
+    signal: input.signal,
   });
 }
 
-async function heartbeat(origin: string, token: string): Promise<void> {
+async function heartbeat(
+  origin: string,
+  token: string,
+  runningJobs = 0,
+): Promise<void> {
   await signedPost({
     origin,
     token,
     pathname: '/api/nodes/agent/heartbeat',
     body: {
       agentVersion: CURRENT_AGENT_VERSION,
-      capabilities: collectCapabilities(),
-      metrics: collectMetrics(0),
+      capabilities: await collectCapabilities(),
+      metrics: collectMetrics(runningJobs),
     },
   });
+}
+
+async function monitorClaim(input: {
+  origin: string;
+  token: string;
+  claim: SignedJobClaim;
+  execution: AbortController;
+  signal: AbortSignal;
+}): Promise<void> {
+  let lastHeartbeat = Date.now();
+  while (!input.signal.aborted && !input.execution.signal.aborted) {
+    try {
+      const status = await signedPost<{
+        state: string;
+        cancelRequested: boolean;
+      }>({
+        origin: input.origin,
+        token: input.token,
+        pathname: `/api/nodes/agent/jobs/${input.claim.jobId}/status`,
+        body: { leaseId: input.claim.leaseId },
+        signal: input.signal,
+      });
+      if (status.cancelRequested || status.state !== 'leased') {
+        input.execution.abort('control-plane-cancelled');
+        return;
+      }
+      if (Date.now() - lastHeartbeat >= NODE_TIMING.heartbeatMs) {
+        await heartbeat(input.origin, input.token, 1);
+        lastHeartbeat = Date.now();
+      }
+      await delay(1_500, undefined, { signal: input.signal });
+    } catch (error) {
+      if (input.signal.aborted) return;
+      // Losing authenticated lease visibility is a fail-closed condition.
+      input.execution.abort(error);
+      return;
+    }
+  }
 }
 
 async function poll(origin: string, token: string): Promise<boolean> {
@@ -169,12 +214,29 @@ async function poll(origin: string, token: string): Promise<boolean> {
     body: {},
   });
   if (!response.job) return false;
-  const completed = await executeSignedJob({
+  const capabilities = await collectCapabilities();
+  const execution = new AbortController();
+  const monitor = new AbortController();
+  const monitorPromise = monitorClaim({
+    origin,
     token,
     claim: response.job.claim,
-    signature: response.job.signature,
-    capabilities: collectCapabilities(),
+    execution,
+    signal: monitor.signal,
   });
+  let completed: Awaited<ReturnType<typeof executeSignedJob>>;
+  try {
+    completed = await executeSignedJob({
+      token,
+      claim: response.job.claim,
+      signature: response.job.signature,
+      capabilities,
+      signal: execution.signal,
+    });
+  } finally {
+    monitor.abort('job-complete');
+    await monitorPromise;
+  }
   await signedPost({
     origin,
     token,

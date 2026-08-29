@@ -113,4 +113,12 @@ export const ZERO_COST_RESOURCES = {
     freeTierEligible: true,
     note: 'Unlimited static requests',
   },
+  userOwnedAiCompute: {
+    name: 'User-owned AI compute node',
+    provider: 'Local machine',
+    kind: 'ai',
+    estimatedMonthlyCost: 0,
+    freeTierEligible: true,
+    note: 'Inference runs on hardware the workspace operator already owns; Cloudflare is only the D1-backed control plane',
+  },
 } as const satisfies Record<string, PlannedResource>;

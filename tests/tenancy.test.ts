@@ -26,6 +26,9 @@ void test('workspace-owned tables are limited by workspaceId', () => {
     'node_metric',
     'node_job_event',
     'node_security_event',
+    'ai_model',
+    'ai_model_cache',
+    'ai_inference',
   ]) {
     const predicate = scopeForTable(
       table,

@@ -1,6 +1,16 @@
 import { env } from 'cloudflare:workers';
 
 import { createId, decryptSecret, encryptSecret } from '@/lib/crypto';
+import {
+  AI_LIMITS,
+  APPROVED_AI_MODELS,
+  aiLeaseDuration,
+  aiModelCached,
+  aiRuntimeAvailable,
+  estimateTokens,
+  safeModelChecksum,
+  validateAiJobPayload,
+} from '@/lib/ai';
 import type {
   ComputeNode,
   NodeJob,
@@ -157,9 +167,11 @@ function capabilitiesFromRow(value: string): NodeCapabilities {
   }
   return {
     cpu: { cores: 1, model: 'Unknown CPU' },
-    memory: { totalBytes: 1 },
-    gpu: { available: false, model: null },
+    memory: { totalBytes: 1, freeBytes: 0 },
+    gpu: { available: false, model: null, vramBytes: null },
+    disk: { totalBytes: 0, freeBytes: 0 },
     docker: { available: false },
+    ai: { runtimes: [], cachedModels: [], maxConcurrentJobs: 1 },
     contracts: { ai: false, gameServers: false },
   };
 }
@@ -218,6 +230,148 @@ function toJob(row: JobRow): NodeJob {
     updatedAt: row.updatedAt,
     completedAt: row.completedAt,
   };
+}
+
+type AiModelRow = {
+  id: string;
+  catalogId: string;
+  runtime: 'ollama' | 'llama.cpp';
+  runtimeModel: string;
+  checksum: string | null;
+};
+
+export async function ensureAiCatalog(
+  workspaceId: string,
+  now: number,
+): Promise<void> {
+  const database = await db();
+  await database.batch(
+    APPROVED_AI_MODELS.map((model) =>
+      database
+        .prepare(
+          `INSERT OR IGNORE INTO ai_model
+           (id, workspaceId, catalogId, displayName, runtime, family,
+            runtimeModel, source, sizeBytes, expectedMemoryBytes,
+            requiredVramBytes, checksum, enabled, state, lastVerifiedAt,
+            lastUsedAt, createdAt, updatedAt)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'available',
+                   NULL, NULL, ?, ?)`,
+        )
+        .bind(
+          createId('aim'),
+          workspaceId,
+          model.id,
+          model.displayName,
+          model.runtime,
+          model.family,
+          model.runtimeModel,
+          model.source,
+          model.sizeBytes,
+          model.expectedMemoryBytes,
+          model.requiredVramBytes,
+          model.checksum,
+          now,
+          now,
+        ),
+    ),
+  );
+}
+
+async function syncAiNodeSnapshot(
+  workspaceId: string,
+  nodeId: string,
+  capabilities: NodeCapabilities,
+  now: number,
+): Promise<void> {
+  await ensureAiCatalog(workspaceId, now);
+  const models = await query<AiModelRow>(
+    `SELECT id, catalogId, runtime, runtimeModel, checksum
+     FROM ai_model WHERE workspaceId = ? AND enabled = 1`,
+    workspaceId,
+  );
+  const database = await db();
+  await database.batch(
+    models.map((model) => {
+      const cached = capabilities.ai.cachedModels.find(
+        (entry) =>
+          entry.runtime === model.runtime &&
+          (entry.runtimeModel === model.runtimeModel ||
+            (model.runtime === 'llama.cpp' &&
+              entry.runtimeModel === 'local-model')),
+      );
+      const runtimeReady = aiRuntimeAvailable(capabilities.ai, model.runtime);
+      const checksumMismatch = Boolean(
+        cached?.checksum &&
+          model.checksum &&
+          !constantTimeEqual(cached.checksum, model.checksum),
+      );
+      const state = checksumMismatch
+        ? 'error'
+        : cached
+          ? 'ready'
+          : runtimeReady
+            ? 'available'
+            : 'unavailable';
+      return database
+        .prepare(
+          `INSERT INTO ai_model_cache
+           (workspaceId, nodeId, modelId, state, sizeBytes, checksum, error,
+            lastVerifiedAt, lastUsedAt, updatedAt)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
+           ON CONFLICT(nodeId, modelId) DO UPDATE SET
+             state = excluded.state,
+             sizeBytes = excluded.sizeBytes,
+             checksum = excluded.checksum,
+             error = excluded.error,
+             lastVerifiedAt = excluded.lastVerifiedAt,
+             updatedAt = excluded.updatedAt`,
+        )
+        .bind(
+          workspaceId,
+          nodeId,
+          model.id,
+          state,
+          cached?.sizeBytes ?? 0,
+          cached?.checksum ?? null,
+          checksumMismatch ? 'The reported model checksum does not match.' : null,
+          now,
+          now,
+        );
+    }),
+  );
+}
+
+function jobEligibleForNode(
+  job: JobRow,
+  payload: Record<string, unknown>,
+  capabilities: NodeCapabilities,
+): boolean {
+  if (job.type !== 'ai.inference' && job.type !== 'ai.model.acquire') {
+    return true;
+  }
+  const validated = validateAiJobPayload(job.type, payload);
+  if (!validated.ok) return false;
+  const aiPayload = validated.payload;
+  if (!aiRuntimeAvailable(capabilities.ai, aiPayload.runtime)) return false;
+  if (job.type === 'ai.model.acquire') {
+    if (!('expectedSizeBytes' in aiPayload)) return false;
+    return (
+      capabilities.disk.freeBytes >=
+      aiPayload.expectedSizeBytes + AI_LIMITS.diskReserveBytes
+    );
+  }
+  if (!('expectedMemoryBytes' in aiPayload)) return false;
+  return (
+    aiModelCached(
+      capabilities.ai,
+      aiPayload.runtime,
+      aiPayload.runtimeModel,
+    ) &&
+    capabilities.memory.freeBytes >= aiPayload.expectedMemoryBytes &&
+    (aiPayload.requiredVramBytes === 0 ||
+      (capabilities.gpu.available &&
+        (capabilities.gpu.vramBytes ?? 0) >= aiPayload.requiredVramBytes))
+  );
 }
 
 export type PairingTicket = {
@@ -380,6 +534,7 @@ export async function pairNode(input: PairNodeInput): Promise<
     now,
     now,
   );
+  await syncAiNodeSnapshot(pairing.workspaceId, nodeId, capabilities, now);
   await writeLog({
     workspaceId: pairing.workspaceId,
     source: 'node',
@@ -580,15 +735,6 @@ export async function recordHeartbeat(input: {
   | { ok: true; status: 'online'; serverTime: number }
   | { ok: false; status: number; error: string }
 > {
-  const capabilities = parseCapabilities(input.capabilities);
-  const metrics = parseMetrics(input.metrics);
-  if (!capabilities || !metrics) {
-    return {
-      ok: false,
-      status: 400,
-      error: 'Heartbeat capabilities or metrics are invalid.',
-    };
-  }
   if (
     typeof input.agentVersion !== 'string' ||
     !agentVersionSupported(input.agentVersion)
@@ -597,6 +743,15 @@ export async function recordHeartbeat(input: {
       ok: false,
       status: 426,
       error: `Agent ${MINIMUM_AGENT_VERSION} or newer is required.`,
+    };
+  }
+  const capabilities = parseCapabilities(input.capabilities);
+  const metrics = parseMetrics(input.metrics);
+  if (!capabilities || !metrics) {
+    return {
+      ok: false,
+      status: 400,
+      error: 'Heartbeat capabilities or metrics are invalid.',
     };
   }
 
@@ -629,6 +784,12 @@ export async function recordHeartbeat(input: {
     metrics.runningJobs,
     now,
   );
+  await syncAiNodeSnapshot(
+    input.context.node.workspaceId,
+    input.context.node.id,
+    capabilities,
+    now,
+  );
   await pruneNodeHistory(input.context.node.id, now);
   return { ok: true, status: 'online', serverTime: now };
 }
@@ -637,22 +798,31 @@ async function requeueExpiredJobs(
   workspaceId: string,
   now: number,
 ): Promise<void> {
-  await execute(
-    `UPDATE node_job
-     SET state = CASE WHEN attempts < maxAttempts THEN 'queued' ELSE 'timed_out' END,
-         assignedNodeId = NULL,
-         leaseId = NULL,
-         leaseExpiresAt = NULL,
-         claimSignature = NULL,
-         lastError = 'Lease expired before completion.',
-         completedAt = CASE WHEN attempts < maxAttempts THEN NULL ELSE ? END,
-         updatedAt = ?
-     WHERE workspaceId = ? AND state = 'leased' AND leaseExpiresAt <= ?`,
-    now,
-    now,
-    workspaceId,
-    now,
-  );
+  const database = await db();
+  await database.batch([
+    database
+      .prepare(
+        `UPDATE node_job
+         SET state = CASE WHEN attempts < maxAttempts THEN 'queued' ELSE 'timed_out' END,
+             assignedNodeId = NULL,
+             leaseId = NULL,
+             leaseExpiresAt = NULL,
+             claimSignature = NULL,
+             lastError = 'Lease expired before completion.',
+             completedAt = CASE WHEN attempts < maxAttempts THEN NULL ELSE ? END,
+             updatedAt = ?
+         WHERE workspaceId = ? AND state = 'leased' AND leaseExpiresAt <= ?`,
+      )
+      .bind(now, now, workspaceId, now),
+    database
+      .prepare(
+        `UPDATE node_job
+         SET state = 'cancelled', lastError = 'Cancellation confirmed at lease expiry.',
+             completedAt = ?, updatedAt = ?
+         WHERE workspaceId = ? AND state = 'cancelling' AND leaseExpiresAt <= ?`,
+      )
+      .bind(now, now, workspaceId, now),
+  ]);
 }
 
 export async function claimNextJob(
@@ -660,6 +830,7 @@ export async function claimNextJob(
 ): Promise<{ claim: SignedJobClaim; signature: string } | null> {
   const now = Date.now();
   await requeueExpiredJobs(context.node.workspaceId, now);
+  const capabilities = capabilitiesFromRow(context.node.capabilities);
 
   const candidates = await query<JobRow>(
     `SELECT * FROM node_job
@@ -693,8 +864,10 @@ export async function claimNextJob(
       );
       continue;
     }
+    if (!jobEligibleForNode(job, payload, capabilities)) continue;
 
     const leaseId = createId('lease');
+    const leaseExpiresAt = now + aiLeaseDuration(job.type, payload);
     const claim: SignedJobClaim = {
       protocolVersion: NODE_PROTOCOL_VERSION,
       jobId: job.id,
@@ -704,7 +877,7 @@ export async function claimNextJob(
       payload,
       payloadHash: job.payloadHash,
       leaseId,
-      leaseExpiresAt: now + NODE_TIMING.leaseMs,
+      leaseExpiresAt,
       attempt: job.attempts + 1,
     };
     const signature = await signJobClaim(context.token, claim);
@@ -776,6 +949,170 @@ async function recordJobSecurityEvent(
   );
 }
 
+export async function readAgentJobStatus(
+  context: AgentContext,
+  jobId: string,
+  leaseId: unknown,
+): Promise<
+  | {
+      ok: true;
+      state: NodeJobState;
+      cancelRequested: boolean;
+      leaseExpiresAt: number | null;
+    }
+  | { ok: false; status: number; error: string }
+> {
+  if (
+    !/^job_[a-f0-9]{24}$/.test(jobId) ||
+    typeof leaseId !== 'string' ||
+    !/^lease_[a-f0-9]{24}$/.test(leaseId)
+  ) {
+    return { ok: false, status: 400, error: 'Job status request is invalid.' };
+  }
+  const job = await queryOne<JobRow>(
+    'SELECT * FROM node_job WHERE workspaceId = ? AND id = ?',
+    context.node.workspaceId,
+    jobId,
+  );
+  if (!job) return { ok: false, status: 404, error: 'Job not found.' };
+  if (job.assignedNodeId !== context.node.id || job.leaseId !== leaseId) {
+    await recordJobSecurityEvent(
+      context.node,
+      job.id,
+      'ai-job-status-forgery',
+      'critical',
+      'A node requested cancellation state for a lease it does not own.',
+    );
+    return { ok: false, status: 403, error: 'The job lease is invalid.' };
+  }
+  return {
+    ok: true,
+    state: job.state,
+    cancelRequested:
+      job.state === 'cancelling' || job.state === 'cancelled',
+    leaseExpiresAt: job.leaseExpiresAt,
+  };
+}
+
+function boundedResultInteger(
+  value: unknown,
+  maximum = Number.MAX_SAFE_INTEGER,
+): number | null {
+  return typeof value === 'number' &&
+    Number.isSafeInteger(value) &&
+    value >= 0 &&
+    value <= maximum
+    ? value
+    : null;
+}
+
+async function recordAiJobOutcome(input: {
+  job: JobRow;
+  state: NodeJobState;
+  result: Record<string, unknown> | null;
+  error: string | null;
+  now: number;
+}): Promise<void> {
+  if (input.job.type === 'ai.inference') {
+    const payload = safeJsonRecord(input.job.payload);
+    const prompt = typeof payload?.prompt === 'string' ? payload.prompt : '';
+    const systemPrompt =
+      typeof payload?.systemPrompt === 'string' ? payload.systemPrompt : '';
+    const inputTokens =
+      boundedResultInteger(input.result?.inputTokens, 1_000_000) ??
+      estimateTokens(`${systemPrompt}\n${prompt}`);
+    const outputTokens =
+      boundedResultInteger(input.result?.outputTokens, 1_000_000) ??
+      (typeof input.result?.text === 'string'
+        ? estimateTokens(input.result.text)
+        : null);
+    const latencyMs = boundedResultInteger(input.result?.latencyMs, 3_600_000);
+    await execute(
+      `UPDATE ai_inference
+       SET inputTokensEstimate = ?, outputTokensEstimate = ?, latencyMs = ?,
+           updatedAt = ? WHERE workspaceId = ? AND jobId = ?`,
+      inputTokens,
+      outputTokens,
+      latencyMs,
+      input.now,
+      input.job.workspaceId,
+      input.job.id,
+    );
+    if (input.state === 'succeeded' && payload?.modelId) {
+      await execute(
+        `UPDATE ai_model SET lastUsedAt = ?, lastVerifiedAt = ?, updatedAt = ?
+         WHERE workspaceId = ? AND catalogId = ?`,
+        input.now,
+        input.now,
+        input.now,
+        input.job.workspaceId,
+        payload.modelId,
+      );
+      if (input.job.assignedNodeId) {
+        await execute(
+          `UPDATE ai_model_cache SET lastUsedAt = ?, updatedAt = ?
+           WHERE workspaceId = ? AND nodeId = ?
+             AND modelId IN (
+               SELECT id FROM ai_model WHERE workspaceId = ? AND catalogId = ?
+             )`,
+          input.now,
+          input.now,
+          input.job.workspaceId,
+          input.job.assignedNodeId,
+          input.job.workspaceId,
+          payload.modelId,
+        );
+      }
+    }
+    return;
+  }
+
+  if (input.job.type === 'ai.model.acquire' && input.job.assignedNodeId) {
+    const payload = safeJsonRecord(input.job.payload);
+    if (typeof payload?.modelId !== 'string') return;
+    const model = await queryOne<{ id: string }>(
+      'SELECT id FROM ai_model WHERE workspaceId = ? AND catalogId = ?',
+      input.job.workspaceId,
+      payload.modelId,
+    );
+    if (!model) return;
+    const successful = input.state === 'succeeded';
+    const reportedChecksum = safeModelChecksum(input.result?.checksum);
+    if (successful && reportedChecksum) {
+      await execute(
+        `UPDATE ai_model SET checksum = COALESCE(checksum, ?),
+           lastVerifiedAt = ?, updatedAt = ?
+         WHERE workspaceId = ? AND id = ?`,
+        reportedChecksum,
+        input.now,
+        input.now,
+        input.job.workspaceId,
+        model.id,
+      );
+    }
+    await execute(
+      `INSERT INTO ai_model_cache
+       (workspaceId, nodeId, modelId, state, sizeBytes, checksum, error,
+        lastVerifiedAt, lastUsedAt, updatedAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
+       ON CONFLICT(nodeId, modelId) DO UPDATE SET
+         state = excluded.state, sizeBytes = excluded.sizeBytes,
+         checksum = excluded.checksum, error = excluded.error,
+         lastVerifiedAt = excluded.lastVerifiedAt, updatedAt = excluded.updatedAt`,
+      input.job.workspaceId,
+      input.job.assignedNodeId,
+      model.id,
+      successful ? 'ready' : 'error',
+      boundedResultInteger(input.result?.sizeBytes, AI_LIMITS.maximumModelBytes) ??
+        0,
+      reportedChecksum,
+      successful ? null : (input.error ?? 'Model acquisition failed.'),
+      successful ? input.now : null,
+      input.now,
+    );
+  }
+}
+
 export type CompleteJobInput = {
   leaseId: unknown;
   claim: unknown;
@@ -783,6 +1120,7 @@ export type CompleteJobInput = {
   status: unknown;
   result: unknown;
   error: unknown;
+  retryable: unknown;
 };
 
 export async function completeJob(
@@ -796,7 +1134,9 @@ export async function completeJob(
   if (
     typeof input.leaseId !== 'string' ||
     typeof input.claimSignature !== 'string' ||
-    (input.status !== 'succeeded' && input.status !== 'failed') ||
+    (input.status !== 'succeeded' &&
+      input.status !== 'failed' &&
+      input.status !== 'cancelled') ||
     typeof input.claim !== 'object' ||
     input.claim === null
   ) {
@@ -858,8 +1198,14 @@ export async function completeJob(
   let retry = false;
   let result: Record<string, unknown> | null = null;
   let error: string | null = null;
-  if (input.status === 'succeeded') {
-    result = sanitizeJobResult(input.result);
+  if (job.state === 'cancelling' || input.status === 'cancelled') {
+    nextState = 'cancelled';
+    error = 'The job was cancelled.';
+  } else if (input.status === 'succeeded') {
+    result = sanitizeJobResult(
+      input.result,
+      job.type.startsWith('ai.') ? 64 * 1024 : 16_384,
+    );
     if (!result) {
       return {
         ok: false,
@@ -874,7 +1220,7 @@ export async function completeJob(
       typeof input.error === 'string'
         ? safeError(input.error)
         : 'The agent reported a job failure.';
-    retry = job.attempts < job.maxAttempts;
+    retry = input.retryable === true && job.attempts < job.maxAttempts;
     nextState = retry ? 'queued' : 'failed';
   }
 
@@ -887,7 +1233,9 @@ export async function completeJob(
          claimSignature = CASE WHEN ? = 'queued' THEN NULL ELSE claimSignature END,
          completedAt = CASE WHEN ? = 'queued' THEN NULL ELSE ? END,
          updatedAt = ?
-     WHERE workspaceId = ? AND id = ? AND state = 'leased' AND leaseId = ?`,
+     WHERE workspaceId = ? AND id = ? AND leaseId = ?
+       AND ((? = 'cancelled' AND state IN ('leased','cancelling'))
+         OR (? <> 'cancelled' AND state = 'leased'))`,
     nextState,
     result ? stableJson(result) : null,
     error,
@@ -901,14 +1249,47 @@ export async function completeJob(
     context.node.workspaceId,
     job.id,
     input.leaseId,
+    nextState,
+    nextState,
   );
   if (!changed(update)) {
-    return {
-      ok: false,
-      status: 409,
-      error: 'The lease changed before completion.',
-    };
+    const raced = await queryOne<Pick<JobRow, 'state'>>(
+      'SELECT state FROM node_job WHERE workspaceId = ? AND id = ?',
+      context.node.workspaceId,
+      job.id,
+    );
+    if (raced?.state === 'cancelling') {
+      const cancelled = await execute(
+        `UPDATE node_job SET state = 'cancelled', lastError = ?, completedAt = ?, updatedAt = ?
+         WHERE workspaceId = ? AND id = ? AND state = 'cancelling' AND leaseId = ?`,
+        'Cancellation won the completion race.',
+        now,
+        now,
+        context.node.workspaceId,
+        job.id,
+        input.leaseId,
+      );
+      if (changed(cancelled)) {
+        nextState = 'cancelled';
+        retry = false;
+        result = null;
+        error = 'Cancellation won the completion race.';
+      } else {
+        return {
+          ok: false,
+          status: 409,
+          error: 'The lease changed before completion.',
+        };
+      }
+    } else {
+      return {
+        ok: false,
+        status: 409,
+        error: 'The lease changed before completion.',
+      };
+    }
   }
+  await recordAiJobOutcome({ job, state: nextState, result, error, now });
   await writeJobEvent({
     workspaceId: context.node.workspaceId,
     nodeId: context.node.id,
@@ -921,7 +1302,8 @@ export async function completeJob(
   await writeLog({
     workspaceId: context.node.workspaceId,
     source: 'node',
-    level: nextState === 'succeeded' ? 'INFO' : 'WARN',
+    level:
+      nextState === 'succeeded' || nextState === 'cancelled' ? 'INFO' : 'WARN',
     message: `Node job ${job.type} ${retry ? 'will retry' : nextState}`,
     actor: `agent:${context.node.id}`,
     resource: job.id,
@@ -974,8 +1356,8 @@ export async function enqueueJob(input: {
     if (duplicate) return { ok: true, job: toJob(duplicate), created: false };
   }
   const queued = await queryOne<{ total: number }>(
-    `SELECT COUNT(*) AS total FROM node_job
-     WHERE workspaceId = ? AND state IN ('queued', 'leased')`,
+     `SELECT COUNT(*) AS total FROM node_job
+      WHERE workspaceId = ? AND state IN ('queued', 'leased', 'cancelling')`,
     input.workspaceId,
   );
   if ((queued?.total ?? 0) >= MAX_QUEUED_JOBS_PER_WORKSPACE) {
@@ -1052,6 +1434,13 @@ export async function revokeNode(input: {
   if (!node) return false;
 
   const now = Date.now();
+  const activeAi = await queryOne<{ total: number }>(
+    `SELECT COUNT(*) AS total FROM node_job
+     WHERE workspaceId = ? AND assignedNodeId = ?
+       AND type LIKE 'ai.%' AND state IN ('leased','cancelling')`,
+    input.workspaceId,
+    input.nodeId,
+  );
   const database = await db();
   await database.batch([
     database
@@ -1064,13 +1453,35 @@ export async function revokeNode(input: {
     database
       .prepare(
         `UPDATE node_job
-         SET state = CASE WHEN attempts < maxAttempts THEN 'queued' ELSE 'timed_out' END,
+         SET state = CASE
+               WHEN state = 'cancelling' THEN 'cancelled'
+               WHEN attempts < maxAttempts THEN 'queued'
+               ELSE 'timed_out'
+             END,
              assignedNodeId = NULL, leaseId = NULL, leaseExpiresAt = NULL,
-             claimSignature = NULL, lastError = 'Assigned node was revoked.', updatedAt = ?
-         WHERE workspaceId = ? AND assignedNodeId = ? AND state = 'leased'`,
+             claimSignature = NULL, lastError = 'Assigned node was revoked.',
+             completedAt = CASE
+               WHEN state = 'cancelling' OR attempts >= maxAttempts THEN ?
+               ELSE NULL
+             END,
+             updatedAt = ?
+         WHERE workspaceId = ? AND assignedNodeId = ?
+           AND state IN ('leased','cancelling')`,
       )
-      .bind(now, input.workspaceId, input.nodeId),
+      .bind(now, now, input.workspaceId, input.nodeId),
   ]);
+  if ((activeAi?.total ?? 0) > 0) {
+    await execute(
+      `INSERT INTO node_security_event
+       (id, workspaceId, nodeId, type, severity, detail, networkFingerprint, createdAt)
+       VALUES (?, ?, ?, 'revoked-node-ai-activity', 'high', ?, NULL, ?)`,
+      createId('nsec'),
+      input.workspaceId,
+      input.nodeId,
+      `Node was revoked during ${activeAi!.total} active AI job${activeAi!.total === 1 ? '' : 's'}.`,
+      now,
+    );
+  }
   await writeLog({
     workspaceId: input.workspaceId,
     source: 'node',
@@ -1126,7 +1537,9 @@ export async function readNodesState(
       offline: nodes.filter((node) => node.status === 'offline').length,
       revoked: nodes.filter((node) => node.status === 'revoked').length,
       queuedJobs: jobs.filter((job) => job.state === 'queued').length,
-      activeLeases: jobs.filter((job) => job.state === 'leased').length,
+      activeLeases: jobs.filter(
+        (job) => job.state === 'leased' || job.state === 'cancelling',
+      ).length,
     },
     protocolVersion: NODE_PROTOCOL_VERSION,
     currentAgentVersion: CURRENT_AGENT_VERSION,
@@ -1167,13 +1580,13 @@ export async function nodesForShield(
     [
       queryOne<{ total: number }>(
         `SELECT COUNT(*) AS total FROM node_job
-       WHERE workspaceId = ? AND state IN ('leased','succeeded','failed')
+       WHERE workspaceId = ? AND state IN ('leased','cancelling','succeeded','failed')
          AND (claimSignature IS NULL OR claimSignature = '')`,
         workspaceId,
       ),
       queryOne<{ total: number }>(
         `SELECT COUNT(*) AS total FROM node_job
-       WHERE workspaceId = ? AND state = 'leased' AND leaseExpiresAt <= ?`,
+       WHERE workspaceId = ? AND state IN ('leased','cancelling') AND leaseExpiresAt <= ?`,
         workspaceId,
         now,
       ),

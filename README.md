@@ -1,8 +1,9 @@
 # YSD Zero Cloud
 
-YSD Zero Cloud is a zero-cost-first cloud operating system. Version `0.4.0` runs authentication,
+YSD Zero Cloud is a zero-cost-first cloud operating system. Version `0.5.0` runs authentication,
 persistence, security scanning, the cost guard, private-object storage policy, network inventory,
-and an outbound-only user-owned compute control plane against Cloudflare Workers and D1.
+an outbound-only user-owned compute control plane, and local AI scheduling against Cloudflare
+Workers and D1.
 
 **Live:** <https://ysd-zero-cloud.ysd-zero-cloud.workers.dev>
 
@@ -31,9 +32,10 @@ deployed Worker's explicit zero-cost configuration.
 | Storage           | Private R2 adapter, D1 authorization index, and hard account/workspace quotas |
 | Networking        | Deployed workers.dev origin, TLS, route exposure, and binding inventory       |
 | Nodes             | Paired user-owned agents, signed job leases, heartbeats, metrics, and audit   |
+| YSD AI Compute    | Approved local models, safe scheduling, cancellation, results, and metrics   |
 
-AI and Game Servers are still design previews with capability contracts only. Storage, Networking,
-and Nodes are live surfaces.
+Game Servers remain a design preview with a capability contract only. Storage, Networking, Nodes,
+and YSD AI Compute are live surfaces.
 The current Cloudflare account returns `10042: Please enable R2`, so Storage honestly renders the
 implemented adapter as unavailable and refuses uploads; no bucket, public endpoint, or billable
 resource is created while that account-level gate remains.
@@ -156,14 +158,29 @@ completion. Cloudflare never performs the workload compute.
 - Claims bind the workspace, node, job type, payload digest, lease id, expiry, and attempt. Expired
   leases return to the queue up to three attempts, then become timed out. An idempotency key stops a
   browser retry from creating a duplicate job.
-- The agent has no `child_process` dependency, `eval`, generic script, or shell handler. Phase 3 can
-  run only `diagnostic.ping` and `diagnostic.snapshot`. `ai.inference` and
-  `game-server.lifecycle` are explicit API contracts that answer 409 until a later phase.
+- The agent has no `child_process` dependency, `eval`, generic script, or shell handler. It runs
+  diagnostics and reviewed local AI handlers only. Ollama and llama.cpp use fixed loopback APIs;
+  model acquisition uses an approved catalog and explicit operator consent. Game Server execution
+  remains disabled.
 - The local credential file is AES-256-GCM encrypted with a passphrase that never leaves the node.
   See `agent/README.md` for pairing and service-run instructions.
 
 YSD Shield inspects stale and offline nodes, minimum agent version, revoked-node activity, unsigned
-jobs, stale leases, and high-severity authentication anomalies.
+jobs, stale leases, forged or replayed AI claims, model integrity, forbidden providers, payload
+abuse, resource pressure, and anomalous volume.
+
+## YSD AI Compute
+
+AI Center dispatches inference only to a paired, online machine that already owns the compute.
+The scheduler requires the selected allowlisted runtime and model cache, sufficient free RAM/VRAM,
+safe CPU load, and a free concurrency slot. D1 stores workspace-scoped model/cache metadata, job
+leases, token estimates, latency, bounded results, cancellation state, and audit events. Prompts
+cannot introduce a network target, filesystem path, shell field, provider override, or executable.
+
+The initial reviewed catalog contains small Ollama library models and a generic already-loaded
+llama.cpp local model. Downloads are optional, explicitly approved, disk-guarded, and remain on the
+user's node. No Workers AI binding, paid queue, GPU service, billing relationship, or provider
+fallback is configured.
 
 ## Security
 
@@ -366,6 +383,5 @@ Workers output.
 1. Execute accepted plans through a deploy pipeline rather than recording them.
 2. Enable the already-implemented private R2 binding only if Cloudflare confirms `$0` account activation.
 3. Add organizations, roles, and per-member audit scoping.
-4. Add reviewed AI and Game Server handlers on top of the existing node contracts without adding a
-   generic shell surface.
+4. Add reviewed Game Server handlers without adding a generic shell or inbound network surface.
 5. Add owned-domain inventory only after a domain exists; keep workers.dev as the zero-cost default.

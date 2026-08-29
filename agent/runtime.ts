@@ -1,4 +1,12 @@
 import os from 'node:os';
+import { statfs } from 'node:fs/promises';
+
+import {
+  acquireAiModel,
+  discoverAiCapabilities,
+  executeAiInference,
+  type LocalFetch,
+} from './ai-runtime.ts';
 
 import {
   CURRENT_AGENT_VERSION,
@@ -19,20 +27,49 @@ import {
  * phase into remote shell access.
  */
 
-export function collectCapabilities(): NodeCapabilities {
+function nonNegativeEnvironmentBytes(name: string): number | null {
+  const raw = process.env[name]?.trim();
+  if (!raw) return null;
+  const value = Number(raw);
+  return Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+export async function collectCapabilities(
+  fetcher: LocalFetch = fetch,
+): Promise<NodeCapabilities> {
   const processors = os.cpus();
   const gpuModel = process.env.YSD_NODE_GPU?.trim().slice(0, 128) || null;
+  const gpuVramBytes = nonNegativeEnvironmentBytes('YSD_NODE_GPU_VRAM_BYTES');
   const docker = process.env.YSD_NODE_DOCKER?.trim().toLowerCase() === 'true';
+  const ai = await discoverAiCapabilities(fetcher);
+  let disk = { totalBytes: 0, freeBytes: 0 };
+  try {
+    const statistics = await statfs(process.cwd());
+    disk = {
+      totalBytes: Math.max(0, statistics.blocks * statistics.bsize),
+      freeBytes: Math.max(0, statistics.bavail * statistics.bsize),
+    };
+  } catch {
+    // A platform without statfs can still run diagnostics, but cannot acquire models.
+  }
   return {
     cpu: {
       cores: Math.max(1, processors.length),
       model: processors[0]?.model?.trim().slice(0, 128) || 'Unknown CPU',
     },
-    memory: { totalBytes: os.totalmem() },
-    gpu: { available: Boolean(gpuModel), model: gpuModel },
+    memory: { totalBytes: os.totalmem(), freeBytes: os.freemem() },
+    gpu: {
+      available: Boolean(gpuModel),
+      model: gpuModel,
+      vramBytes: gpuVramBytes,
+    },
+    disk,
     docker: { available: docker },
-    // Capability contracts only. Phase 3 never dispatches these job types.
-    contracts: { ai: Boolean(gpuModel), gameServers: docker },
+    ai,
+    contracts: {
+      ai: ai.runtimes.some((runtime) => runtime.available),
+      gameServers: docker,
+    },
   };
 }
 
@@ -51,13 +88,16 @@ export function collectMetrics(runningJobs = 0): NodeMetrics {
 
 export type AgentJobResult =
   | { status: 'succeeded'; result: Record<string, unknown> }
-  | { status: 'failed'; error: string };
+  | { status: 'failed'; error: string; retryable: boolean }
+  | { status: 'cancelled'; error: string; retryable: false };
 
 export async function executeSignedJob(input: {
   token: string;
   claim: SignedJobClaim;
   signature: string;
   capabilities: NodeCapabilities;
+  signal?: AbortSignal;
+  fetcher?: LocalFetch;
   now?: number;
 }): Promise<AgentJobResult> {
   const now = input.now ?? Date.now();
@@ -65,6 +105,7 @@ export async function executeSignedJob(input: {
     return {
       status: 'failed',
       error: 'The control-plane job signature is invalid.',
+      retryable: false,
     };
   }
   if (
@@ -74,12 +115,17 @@ export async function executeSignedJob(input: {
     return {
       status: 'failed',
       error: 'The job claim is stale or incompatible.',
+      retryable: false,
     };
   }
   if (
     (await sha256(stableJson(input.claim.payload))) !== input.claim.payloadHash
   ) {
-    return { status: 'failed', error: 'The job payload digest is invalid.' };
+    return {
+      status: 'failed',
+      error: 'The job payload digest is invalid.',
+      retryable: false,
+    };
   }
 
   switch (input.claim.type) {
@@ -106,10 +152,26 @@ export async function executeSignedJob(input: {
           completedAt: now,
         },
       };
+    case 'ai.inference':
+      return executeAiInference({
+        payload: input.claim.payload,
+        capabilities: input.capabilities,
+        metrics: collectMetrics(1),
+        signal: input.signal,
+        fetcher: input.fetcher,
+      });
+    case 'ai.model.acquire':
+      return acquireAiModel({
+        payload: input.claim.payload,
+        capabilities: input.capabilities,
+        signal: input.signal,
+        fetcher: input.fetcher,
+      });
     default:
       return {
         status: 'failed',
-        error: 'The job type is not in the local Phase 3 allowlist.',
+        error: 'The job type is not in the local execution allowlist.',
+        retryable: false,
       };
   }
 }

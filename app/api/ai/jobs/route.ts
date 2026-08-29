@@ -1,4 +1,4 @@
-import { enqueueJob } from '@/lib/server/nodes';
+import { queueAiInference } from '@/lib/server/ai';
 import { readBoundedJson } from '@/lib/server/node-request';
 import { enforceRateLimit } from '@/lib/server/rate-limit';
 import { requireApiSession } from '@/lib/server/session';
@@ -11,30 +11,19 @@ export async function POST(request: Request): Promise<Response> {
     auth.session.actor.userId,
   );
   if (limited.response) return limited.response;
-  const parsed = await readBoundedJson(request, 8192);
+  const parsed = await readBoundedJson(request, 32 * 1024);
   if (!parsed.ok) return parsed.response;
-  if (
-    parsed.body.type !== 'diagnostic.ping' &&
-    parsed.body.type !== 'diagnostic.snapshot'
-  ) {
-    return Response.json(
-      { error: 'AI work must be created through the workspace-scoped AI Center.' },
-      { status: 400 },
-    );
-  }
-  const result = await enqueueJob({
+  const result = await queueAiInference({
     workspaceId: auth.session.workspace.id,
     actor: auth.session.user.email,
-    type: parsed.body.type,
-    payload: parsed.body.payload,
-    targetNodeId: parsed.body.targetNodeId,
+    body: parsed.body,
     idempotencyKey: request.headers.get('idempotency-key'),
   });
   if (!result.ok) {
     return Response.json({ error: result.error }, { status: result.status });
   }
   return Response.json(
-    { job: result.job, duplicate: !result.created },
+    { run: result.run, duplicate: !result.created },
     { status: result.created ? 201 : 200 },
   );
 }
