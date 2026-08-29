@@ -25,6 +25,7 @@ const ICONS: Record<IntegrationProvider, typeof Cloud> = {
   'github-oauth': GitBranch,
   cloudflare: Cloud,
   'cloudflare-d1': Database,
+  'cloudflare-r2': Database,
   'better-auth': UserRoundCheck,
   turnstile: ShieldCheck,
   email: MailCheck,
@@ -34,6 +35,7 @@ const STATUS_LABEL = {
   bound: 'Bound',
   configured: 'Connected',
   mock: 'Not configured',
+  gated: 'Deferred · no domain',
 } as const;
 
 type Toggle = {
@@ -135,7 +137,9 @@ export function SettingsView({
                   className={
                     integration.status === 'mock'
                       ? 'ml-auto shrink-0 border-white/[0.09] text-white/35'
-                      : 'ml-auto shrink-0 border-[#b7ff3c]/15 text-[#c8ff69]'
+                      : integration.status === 'gated'
+                        ? 'ml-auto shrink-0 border-amber-400/20 text-amber-300'
+                        : 'ml-auto shrink-0 border-[#b7ff3c]/15 text-[#c8ff69]'
                   }
                 >
                   {STATUS_LABEL[integration.status]}

@@ -4,7 +4,12 @@ import { env, waitUntil } from 'cloudflare:workers';
 import { hasGithubOAuth } from '@/lib/integrations';
 import { buildAuthOptions, resolveAuthSecret } from './auth-options';
 import { ensureSchema, getDatabase } from './db';
-import { isEmailConfigured, sendEmail, verificationMessage } from './email';
+import {
+  emailVerificationStatus,
+  isEmailConfigured,
+  sendEmail,
+  verificationMessage,
+} from './email';
 import { runtimeEnv } from './env';
 
 /**
@@ -39,7 +44,7 @@ export function authSecret(): string {
  * their own instance, which is worse than an unverified address.
  */
 export function emailVerificationRequired(): boolean {
-  if (!isEmailConfigured()) return false;
+  if (emailVerificationStatus().state !== 'enabled') return false;
   const flag = runtimeEnv.YSD_REQUIRE_EMAIL_VERIFICATION?.trim().toLowerCase();
   return flag !== 'false' && flag !== '0';
 }

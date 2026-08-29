@@ -103,7 +103,7 @@ export const ZERO_COST_RESOURCES = {
     kind: 'storage',
     estimatedMonthlyCost: 0,
     freeTierEligible: true,
-    note: '10 GB storage with no egress fee',
+    note: 'Private Standard bucket; app guard stops at 1 GB and 5% of monthly operations',
   },
   cloudflarePages: {
     name: 'Cloudflare static assets',

@@ -33,7 +33,12 @@ export type Secret = {
   updatedAt: number;
 };
 
-export const SECRET_ENVIRONMENTS = ['Production', 'Preview', 'Development', 'All'] as const;
+export const SECRET_ENVIRONMENTS = [
+  'Production',
+  'Preview',
+  'Development',
+  'All',
+] as const;
 export type SecretEnvironment = (typeof SECRET_ENVIRONMENTS)[number];
 
 export function isSecretEnvironment(value: string): value is SecretEnvironment {
@@ -49,7 +54,9 @@ export type LogSource =
   | 'database'
   | 'secret'
   | 'shield'
-  | 'auth';
+  | 'auth'
+  | 'storage'
+  | 'networking';
 
 export const LOG_LEVELS = ['INFO', 'WARN', 'ERROR'] as const;
 
@@ -61,7 +68,48 @@ export const LOG_SOURCES = [
   'secret',
   'shield',
   'auth',
+  'storage',
+  'networking',
 ] as const;
+
+export type StorageObject = {
+  id: string;
+  name: string;
+  contentType: string;
+  size: number;
+  etag: string;
+  uploadedBy: string;
+  createdAt: number;
+};
+
+export type StorageUsage = {
+  bytesUsed: number;
+  bytesReserved: number;
+  objectCount: number;
+  period: string;
+  classAWrites: number;
+  classBReads: number;
+  updatedAt: number;
+};
+
+export type StorageState = {
+  available: boolean;
+  bucket: string | null;
+  access: 'private';
+  objects: StorageObject[];
+  usage: StorageUsage;
+  limits: {
+    accountBytes: number;
+    workspaceBytes: number;
+    objectBytes: number;
+    accountObjects: number;
+    workspaceObjects: number;
+    accountClassA: number;
+    workspaceClassA: number;
+    accountClassB: number;
+    workspaceClassB: number;
+  };
+};
 
 export function isLogLevel(value: string): value is LogLevel {
   return (LOG_LEVELS as readonly string[]).includes(value);
@@ -124,7 +172,12 @@ export function isWorkspaceSetting(value: string): value is WorkspaceSetting {
 }
 
 /** Database Studio shapes, mirrored for the client grid. */
-export type ColumnInfo = { name: string; type: string; notNull: boolean; primaryKey: boolean };
+export type ColumnInfo = {
+  name: string;
+  type: string;
+  notNull: boolean;
+  primaryKey: boolean;
+};
 
 export type TableSummary = {
   name: string;
@@ -184,6 +237,8 @@ export const LIVE_SECTIONS: readonly Section[] = [
   'shield',
   'admin',
   'settings',
+  'storage',
+  'networking',
 ];
 
 export function isLiveSection(section: Section): boolean {

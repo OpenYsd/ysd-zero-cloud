@@ -2,7 +2,9 @@ import type { Metadata } from 'next';
 import { notFound } from 'next/navigation';
 import { AdminView } from '@/components/admin-view';
 import { LogsView } from '@/components/logs-view';
+import { NetworkingView } from '@/components/networking-view';
 import { ProjectsView } from '@/components/projects-view';
+import { StorageView } from '@/components/storage-view';
 import {
   DatabasesOverview,
   DeploymentsList,
@@ -27,11 +29,13 @@ import { countOwners, listManagedUsers } from '@/lib/server/roles';
 import { listDeployments } from '@/lib/server/deployments';
 import { runtimeEnv } from '@/lib/server/env';
 import { listLogs } from '@/lib/server/logs';
+import { readNetworkState } from '@/lib/server/networking';
 import { listProjects } from '@/lib/server/projects';
 import { listSecrets } from '@/lib/server/secrets';
 import { requireSession } from '@/lib/server/session';
 import { readShieldState } from '@/lib/server/shield-scan';
 import { databaseBytes, listTables } from '@/lib/server/studio';
+import { listStorage } from '@/lib/server/storage';
 import { summarizeUsage } from '@/lib/server/usage';
 
 export const dynamic = 'force-dynamic';
@@ -42,10 +46,16 @@ export async function generateMetadata({
   params: Promise<{ section: string }>;
 }): Promise<Metadata> {
   const { section } = await params;
-  return { title: isSection(section) ? SECTION_META[section].title : 'Not found' };
+  return {
+    title: isSection(section) ? SECTION_META[section].title : 'Not found',
+  };
 }
 
-export default async function SectionPage({ params }: { params: Promise<{ section: string }> }) {
+export default async function SectionPage({
+  params,
+}: {
+  params: Promise<{ section: string }>;
+}) {
   const { section } = await params;
   if (!isSection(section)) notFound();
 
@@ -60,8 +70,17 @@ export default async function SectionPage({ params }: { params: Promise<{ sectio
 
   return (
     <div className="mx-auto w-full max-w-[1440px] space-y-5">
-      <PageHeader eyebrow={meta.eyebrow} title={meta.title} description={meta.description} />
-      <SectionBody section={section} workspace={workspace} actor={actor} now={now} />
+      <PageHeader
+        eyebrow={meta.eyebrow}
+        title={meta.title}
+        description={meta.description}
+      />
+      <SectionBody
+        section={section}
+        workspace={workspace}
+        actor={actor}
+        now={now}
+      />
     </div>
   );
 }
@@ -81,13 +100,18 @@ async function SectionBody({
 
   switch (section) {
     case 'projects':
-      return <ProjectsView projects={await listProjects(workspaceId)} now={now} />;
+      return (
+        <ProjectsView projects={await listProjects(workspaceId)} now={now} />
+      );
 
     case 'deployments':
       return (
         <>
           <SmartDeployPanel />
-          <DeploymentsList deployments={await listDeployments(workspaceId)} now={now} />
+          <DeploymentsList
+            deployments={await listDeployments(workspaceId)}
+            now={now}
+          />
         </>
       );
 
@@ -96,12 +120,24 @@ async function SectionBody({
         listTables({ workspaceId, userId: workspace.ownerUserId }),
         databaseBytes(),
       ]);
-      const limit = FREE_TIER_LIMITS.find((entry) => entry.id === 'database-bytes')?.limit ?? 0;
-      return <DatabasesOverview tables={tables} bytes={bytes} limitBytes={limit} />;
+      const limit =
+        FREE_TIER_LIMITS.find((entry) => entry.id === 'database-bytes')
+          ?.limit ?? 0;
+      return (
+        <DatabasesOverview tables={tables} bytes={bytes} limitBytes={limit} />
+      );
     }
 
     case 'logs':
-      return <LogsView initialEvents={await listLogs(workspaceId, { limit: 100 })} />;
+      return (
+        <LogsView initialEvents={await listLogs(workspaceId, { limit: 100 })} />
+      );
+
+    case 'storage':
+      return <StorageView state={await listStorage(workspaceId)} now={now} />;
+
+    case 'networking':
+      return <NetworkingView state={readNetworkState()} />;
 
     case 'secrets':
       return <SecretsView secrets={await listSecrets(workspaceId)} now={now} />;
@@ -137,12 +173,27 @@ async function SectionBody({
     }
 
     case 'admin': {
-      const [users, ownerCount] = await Promise.all([listManagedUsers(), countOwners()]);
-      return <AdminView users={users} actor={actor} ownerCount={ownerCount} now={now} />;
+      const [users, ownerCount] = await Promise.all([
+        listManagedUsers(),
+        countOwners(),
+      ]);
+      return (
+        <AdminView
+          users={users}
+          actor={actor}
+          ownerCount={ownerCount}
+          now={now}
+        />
+      );
     }
 
     case 'settings':
-      return <SettingsView workspace={workspace} integrations={getIntegrationCatalog(runtimeEnv)} />;
+      return (
+        <SettingsView
+          workspace={workspace}
+          integrations={getIntegrationCatalog(runtimeEnv)}
+        />
+      );
 
     default:
       return <PreviewSection section={section} />;

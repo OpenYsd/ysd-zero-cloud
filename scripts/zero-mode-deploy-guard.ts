@@ -15,6 +15,7 @@ const decision = inspectDeploymentConfig(config, {
   freeTierVerified: process.env.YSD_FREE_TIER_VERIFIED === 'true',
   estimatedMonthlyCost,
   expectedD1DatabaseId,
+  expectedR2BucketName: process.env.YSD_R2_BUCKET_NAME?.trim() ?? '',
 });
 
 if (!decision.allowed) {

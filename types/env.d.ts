@@ -10,6 +10,8 @@ declare namespace Cloudflare {
   interface Env {
     /** Workspace database. Provisioned by the `d1` entry in `.openai/hosting.json`. */
     DB: D1Database;
+    /** Private object storage. Optional until R2 is enabled for the account. */
+    STORAGE?: R2Bucket;
 
     /** Signing key for Better Auth sessions. Required outside development. */
     BETTER_AUTH_SECRET?: string;
@@ -27,6 +29,8 @@ declare namespace Cloudflare {
     /** Transactional email (Resend free tier). Both values enable verification. */
     RESEND_API_KEY?: string;
     YSD_EMAIL_FROM?: string;
+    /** Explicit production gate: `disabled-no-domain` until an owned domain exists. */
+    YSD_EMAIL_VERIFICATION_MODE?: string;
     /** Set to "false" to keep verification optional even with mail configured. */
     YSD_REQUIRE_EMAIL_VERIFICATION?: string;
 
@@ -44,6 +48,8 @@ declare namespace Cloudflare {
 
     /** Public site origin used for metadata. */
     NEXT_PUBLIC_SITE_URL?: string;
+    /** `workers-dev-only` while no custom domain or Tunnel exists. */
+    YSD_NETWORK_MODE?: string;
 
     /** Set by Wrangler on deployed Workers. */
     WORKERS_CI?: string;

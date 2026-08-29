@@ -1,8 +1,8 @@
 # YSD Zero Cloud
 
-YSD Zero Cloud is a zero-cost-first cloud operating system. Version `0.2.0` replaces the mock
-foundation with a real one: authentication, persistence, security scanning, and the cost guard all
-run against a live Cloudflare D1 database.
+YSD Zero Cloud is a zero-cost-first cloud operating system. Version `0.3.0` runs authentication,
+persistence, security scanning, the cost guard, private-object storage policy, and network inventory
+against Cloudflare Workers and D1.
 
 **Live:** <https://ysd-zero-cloud.ysd-zero-cloud.workers.dev>
 
@@ -11,26 +11,30 @@ and makes no changes to, `OpenYsd/ysd-ai`.
 
 ## What is live
 
-Every figure on these surfaces is read from your own D1 database at request time.
+Live surfaces are derived at request time from your own D1 database or the
+deployed Worker's explicit zero-cost configuration.
 
-| Surface | Backed by |
-| --- | --- |
-| Sign in / sign up | Better Auth on D1, email + password, optional GitHub OAuth |
-| Home | Live project, deployment, table, and usage counts |
-| Projects | `project` table, with create and delete |
-| Deployments | Smart Deploy plans recorded in `deployment`, accepted and blocked alike |
-| Databases | Live schema introspection of the D1 database |
-| Database Studio | Real rows, paginated and filtered, with credential columns redacted |
-| SQL Editor | Real statements, classified by the SQL guard; limited to the instance owner |
-| Logs | The `log_event` audit trail every mutating action writes to |
-| Secrets | AES-GCM sealed values in `secret`, write-only by design |
-| Usage | Counts measured from D1 against the free-tier catalog |
-| Zero Mode | A workspace setting the server enforces, not a client preference |
-| YSD Shield | Rules scored against a real snapshot of the workspace |
+| Surface           | Backed by                                                                     |
+| ----------------- | ----------------------------------------------------------------------------- |
+| Sign in / sign up | Better Auth on D1, email + password, optional GitHub OAuth                    |
+| Home              | Live project, deployment, table, and usage counts                             |
+| Projects          | `project` table, with create and delete                                       |
+| Deployments       | Smart Deploy plans recorded in `deployment`, accepted and blocked alike       |
+| Databases         | Live schema introspection of the D1 database                                  |
+| Database Studio   | Real rows, paginated and filtered, with credential columns redacted           |
+| SQL Editor        | Real statements, classified by the SQL guard; limited to the instance owner   |
+| Logs              | The `log_event` audit trail every mutating action writes to                   |
+| Secrets           | AES-GCM sealed values in `secret`, write-only by design                       |
+| Usage             | Counts measured from D1 against the free-tier catalog                         |
+| Zero Mode         | A workspace setting the server enforces, not a client preference              |
+| YSD Shield        | Rules scored against a real snapshot of the workspace                         |
+| Storage           | Private R2 adapter, D1 authorization index, and hard account/workspace quotas |
+| Networking        | Deployed workers.dev origin, TLS, route exposure, and binding inventory       |
 
-Storage, AI, Game Servers, Nodes, and Networking are still design previews. They are labelled
-`Preview` in the navigation and carry a notice on the page explaining what is missing, because a
-convincing screen of invented numbers is worse than an honest empty one.
+AI, Game Servers, and Nodes are still design previews. Storage and Networking are live surfaces.
+The current Cloudflare account returns `10042: Please enable R2`, so Storage honestly renders the
+implemented adapter as unavailable and refuses uploads; no bucket, public endpoint, or billable
+resource is created while that account-level gate remains.
 
 ## Zero Mode
 
@@ -63,14 +67,14 @@ side effect:
 
 ## Roles
 
-Three instance roles: `owner`, `admin`, `member`. They govern the *instance* —
+Three instance roles: `owner`, `admin`, `member`. They govern the _instance_ —
 who may administer accounts, who may reach the raw SQL Editor — and never what
 anyone may see inside another workspace. Tenant isolation is enforced
 separately and is not widened by any role.
 
 - **owner** — everything, including the SQL Editor. Bootstrapped from
   `YSD_OWNER_EMAIL`, or the earliest account when that is unset.
-- **admin** — account management: roles, suspension. Deliberately does *not*
+- **admin** — account management: roles, suspension. Deliberately does _not_
   inherit the SQL Editor, because a raw statement cannot be scoped to one
   workspace.
 - **member** — their own workspace, nothing else. Every new sign-up is a member.
@@ -89,7 +93,7 @@ Public sign-up stays open, so the unauthenticated surface is layered:
    every guarded response advertises `RateLimit-*` headers.
 2. **Turnstile** — free on every Cloudflare plan. Configuration-gated: without
    keys the widget cannot render, so requiring a token would lock everyone out.
-   Verification fails *closed* if Cloudflare cannot be reached.
+   Verification fails _closed_ if Cloudflare cannot be reached.
 3. **Brute-force lockout** — separate from rate limiting, because a stuffing
    run spread across many addresses stays under any per-IP limit while still
    hammering one account. Failures are counted back to the last success, so a
@@ -99,11 +103,37 @@ Public sign-up stays open, so the unauthenticated surface is layered:
    several addresses, is recorded to the audit log. These are reported, not
    blocked: people travel and buy laptops.
 
-Email verification is wired end to end but only *required* when a mail provider
+Email verification is wired end to end but only _required_ when a mail provider
 is configured, for the same reason Turnstile is gated.
+
+Production explicitly sets `YSD_EMAIL_VERIFICATION_MODE=disabled-no-domain` because the Cloudflare
+account has no owned sending domain. That gate overrides stale email credentials and keeps delivery
+off. Shield reports **Email verification unavailable: no owned sending domain** as a low-severity
+operational constraint, not as a code defect. No Resend account is required until an owned domain is
+deliberately added later.
 
 YSD Shield checks all of the above and reports anything unconfigured, so a
 missing protection is visible rather than assumed.
+
+## Private object storage
+
+R2 is never exposed through `r2.dev` or a custom domain. The only planned binding is `STORAGE`, and
+objects are addressed through session-protected `/api/storage/*` routes after D1 confirms the
+workspace owner. Upload bodies require a bounded `Content-Length`, each object stops at 10 MB, each
+workspace at 256 MB, and the whole account at 1 GB. Monthly Class A and Class B operations stop at
+5% of R2 Standard's published free allowances. There is no overflow or paid fallback.
+
+Until Cloudflare enables R2 for this account, the binding is omitted from the deployed config and
+the API returns 503 before attempting an R2 operation. When R2 can be enabled at a confirmed `$0`,
+create only `ysd-zero-cloud-storage`, bind it as `STORAGE`, and set
+`YSD_R2_BUCKET_NAME=ysd-zero-cloud-storage` for the deployment guard.
+
+## Networking
+
+Networking is inventory, not a provisioning loophole. It derives the actual HTTPS workers.dev
+origin and shows which routes are public, session-scoped, or internal bindings. The production mode
+is `workers-dev-only`: zero custom domains, zero tunnels, zero public R2 endpoints, and no Argo,
+Spectrum, load balancer, or paid route.
 
 ## Security
 
@@ -219,15 +249,16 @@ Copy `.env.example` to `.env.local`. Only `BETTER_AUTH_SECRET` is required, and 
 development; every other entry unlocks an optional integration and is reported as
 `Not configured` in Settings until it is set.
 
-| Integration | Adds | Keys |
-| --- | --- | --- |
-| Cloudflare D1 | Workspace database and auth storage | `DB` binding |
-| Better Auth | D1-backed identities and sessions | `BETTER_AUTH_SECRET` |
-| Cloudflare Turnstile | Bot protection for sign-in and sign-up | `TURNSTILE_SITE_KEY`, `TURNSTILE_SECRET_KEY` |
-| Verification email | Verified-email links on Resend's free tier | `RESEND_API_KEY`, `YSD_EMAIL_FROM` |
-| GitHub sign-in | OAuth sign-in | `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` |
-| GitHub repositories | Real framework detection in Smart Deploy | `GITHUB_TOKEN` |
-| Cloudflare account | Reports D1 storage size | `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_D1_DATABASE_ID` |
+| Integration          | Adds                                                              | Keys                                                                         |
+| -------------------- | ----------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| Cloudflare D1        | Workspace database and auth storage                               | `DB` binding                                                                 |
+| Cloudflare R2        | Private object storage (account enablement currently unavailable) | `STORAGE` binding                                                            |
+| Better Auth          | D1-backed identities and sessions                                 | `BETTER_AUTH_SECRET`                                                         |
+| Cloudflare Turnstile | Bot protection for sign-in and sign-up                            | `TURNSTILE_SITE_KEY`, `TURNSTILE_SECRET_KEY`                                 |
+| Verification email   | Configuration-gated off until an owned sending domain exists      | `YSD_EMAIL_VERIFICATION_MODE`, then `RESEND_API_KEY`, `YSD_EMAIL_FROM`       |
+| GitHub sign-in       | OAuth sign-in                                                     | `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`                                   |
+| GitHub repositories  | Real framework detection in Smart Deploy                          | `GITHUB_TOKEN`                                                               |
+| Cloudflare account   | Reports D1 storage size                                           | `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_D1_DATABASE_ID` |
 
 Without a `GITHUB_TOKEN`, Smart Deploy still inspects public repositories anonymously and marks the
 plan `inspected`; when it cannot read the repository it falls back to name-based inference and says
@@ -293,7 +324,7 @@ Workers output.
 ## Roadmap
 
 1. Execute accepted plans through a deploy pipeline rather than recording them.
-2. Back Storage with R2 and retire that preview.
+2. Enable the already-implemented private R2 binding only if Cloudflare confirms `$0` account activation.
 3. Add organizations, roles, and per-member audit scoping.
 4. Connected-node agent, which unlocks the Game Servers and Nodes surfaces.
-5. Read domains and routes from the Cloudflare API for Networking.
+5. Add owned-domain inventory only after a domain exists; keep workers.dev as the zero-cost default.

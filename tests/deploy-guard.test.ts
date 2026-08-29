@@ -67,6 +67,34 @@ void test('paid or unrequested bindings fail closed', () => {
   }
 });
 
+void test('one explicitly-attested private R2 binding is allowed', () => {
+  const decision = inspectDeploymentConfig(
+    {
+      ...config(),
+      r2_buckets: [
+        { binding: 'STORAGE', bucket_name: 'ysd-zero-cloud-storage' },
+      ],
+    },
+    { ...input(), expectedR2BucketName: 'ysd-zero-cloud-storage' },
+  );
+  assert.deepEqual(decision, { allowed: true, reasons: [] });
+});
+
+void test('R2 fails closed without the exact bucket attestation', () => {
+  for (const expectedR2BucketName of ['', 'other-bucket']) {
+    const decision = inspectDeploymentConfig(
+      {
+        ...config(),
+        r2_buckets: [
+          { binding: 'STORAGE', bucket_name: 'ysd-zero-cloud-storage' },
+        ],
+      },
+      { ...input(), expectedR2BucketName },
+    );
+    assert.equal(decision.allowed, false);
+  }
+});
+
 void test('a different D1 database is blocked', () => {
   const decision = inspectDeploymentConfig(
     { ...config(), d1_databases: [{ binding: 'DB', database_id: 'other' }] },

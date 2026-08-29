@@ -6,6 +6,8 @@ export type DeploymentGuardInput = {
   freeTierVerified: boolean;
   estimatedMonthlyCost: number;
   expectedD1DatabaseId: string;
+  /** Empty until R2 is enabled; otherwise the one private bucket permitted. */
+  expectedR2BucketName?: string;
 };
 
 export type DeploymentGuardDecision = {
@@ -20,7 +22,6 @@ const DISALLOWED_ARRAY_BINDINGS = [
   'hyperdrive',
   'kv_namespaces',
   'pipelines',
-  'r2_buckets',
   'secrets_store_secrets',
   'services',
   'vectorize',
@@ -84,6 +85,25 @@ export function inspectDeploymentConfig(
       reasons.push('The D1 binding must be named DB.');
     if (database.database_id !== input.expectedD1DatabaseId) {
       reasons.push('The generated config points at an unexpected D1 database.');
+    }
+  }
+
+  const buckets = Array.isArray(config.r2_buckets) ? config.r2_buckets : [];
+  const expectedBucket = input.expectedR2BucketName?.trim() ?? '';
+  if (!expectedBucket && buckets.length > 0) {
+    reasons.push(
+      'The generated config enables an R2 bucket without a Zero Mode attestation.',
+    );
+  } else if (expectedBucket) {
+    if (buckets.length !== 1) {
+      reasons.push('Exactly one private R2 bucket binding is required.');
+    } else {
+      const bucket = isRecord(buckets[0]) ? buckets[0] : {};
+      if (bucket.binding !== 'STORAGE')
+        reasons.push('The R2 binding must be named STORAGE.');
+      if (bucket.bucket_name !== expectedBucket) {
+        reasons.push('The generated config points at an unexpected R2 bucket.');
+      }
     }
   }
 

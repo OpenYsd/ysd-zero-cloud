@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { readEmailProvider, verificationMessage } from '../lib/email.ts';
+import {
+  emailVerificationStatus,
+  readEmailProvider,
+  verificationMessage,
+} from '../lib/email.ts';
 
 void test('email verification requires both an API key and an explicit sender', () => {
   assert.equal(readEmailProvider({}), null);
@@ -22,6 +26,27 @@ void test('a complete Resend configuration is trimmed and accepted', () => {
       apiKey: 'key',
       from: 'YSD Zero Cloud <noreply@example.com>',
     },
+  );
+});
+
+void test('the no-domain production gate wins over stale provider credentials', () => {
+  const env = {
+    YSD_EMAIL_VERIFICATION_MODE: 'disabled-no-domain',
+    RESEND_API_KEY: 'stale-key',
+    YSD_EMAIL_FROM: 'noreply@example.com',
+  };
+
+  assert.equal(readEmailProvider(env), null);
+  assert.deepEqual(emailVerificationStatus(env), {
+    state: 'unavailable-no-domain',
+    provider: null,
+  });
+});
+
+void test('enabled mode still requires a complete provider configuration', () => {
+  assert.deepEqual(
+    emailVerificationStatus({ YSD_EMAIL_VERIFICATION_MODE: 'enabled' }),
+    { state: 'not-configured', provider: null },
   );
 });
 

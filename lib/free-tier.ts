@@ -11,6 +11,10 @@ export type UsageMetricId =
   | 'deployments'
   | 'database-rows'
   | 'database-bytes'
+  | 'storage-bytes'
+  | 'storage-objects'
+  | 'storage-writes'
+  | 'storage-reads'
   | 'secrets'
   | 'log-events'
   | 'requests';
@@ -32,12 +36,96 @@ export type FreeTierLimit = {
  * workspace may claim so one workspace can never exhaust the account.
  */
 export const FREE_TIER_LIMITS: readonly FreeTierLimit[] = [
-  { id: 'projects', label: 'Projects', provider: 'YSD', limit: 25, unit: 'count', color: '#b7ff3c', note: 'Workspace projects' },
-  { id: 'deployments', label: 'Deployments', provider: 'Cloudflare Workers', limit: 500, unit: 'count', color: '#4ac7ff', note: 'Recorded this period' },
-  { id: 'database-rows', label: 'Database rows', provider: 'Cloudflare D1', limit: 100_000, unit: 'count', color: '#7569ff', note: 'Across workspace tables' },
-  { id: 'database-bytes', label: 'Database size', provider: 'Cloudflare D1', limit: 500 * 1024 * 1024, unit: 'bytes', color: '#ffb84a', note: '500 MB free storage' },
-  { id: 'secrets', label: 'Secrets', provider: 'YSD', limit: 200, unit: 'count', color: '#ef78ff', note: 'Encrypted at rest' },
-  { id: 'log-events', label: 'Log events', provider: 'YSD', limit: 20_000, unit: 'count', color: '#5ce0a8', note: 'Retained events' },
+  {
+    id: 'projects',
+    label: 'Projects',
+    provider: 'YSD',
+    limit: 25,
+    unit: 'count',
+    color: '#b7ff3c',
+    note: 'Workspace projects',
+  },
+  {
+    id: 'deployments',
+    label: 'Deployments',
+    provider: 'Cloudflare Workers',
+    limit: 500,
+    unit: 'count',
+    color: '#4ac7ff',
+    note: 'Recorded this period',
+  },
+  {
+    id: 'database-rows',
+    label: 'Database rows',
+    provider: 'Cloudflare D1',
+    limit: 100_000,
+    unit: 'count',
+    color: '#7569ff',
+    note: 'Across workspace tables',
+  },
+  {
+    id: 'database-bytes',
+    label: 'Database size',
+    provider: 'Cloudflare D1',
+    limit: 500 * 1024 * 1024,
+    unit: 'bytes',
+    color: '#ffb84a',
+    note: '500 MB free storage',
+  },
+  {
+    id: 'storage-bytes',
+    label: 'Private object storage',
+    provider: 'Cloudflare R2',
+    limit: 256 * 1024 * 1024,
+    unit: 'bytes',
+    color: '#79d6ff',
+    note: 'Workspace hard guard',
+  },
+  {
+    id: 'storage-objects',
+    label: 'Stored objects',
+    provider: 'Cloudflare R2',
+    limit: 500,
+    unit: 'count',
+    color: '#5ce0a8',
+    note: 'Workspace hard guard',
+  },
+  {
+    id: 'storage-writes',
+    label: 'Storage writes',
+    provider: 'Cloudflare R2',
+    limit: 5_000,
+    unit: 'requests',
+    color: '#ef78ff',
+    note: 'Monthly Class A guard',
+  },
+  {
+    id: 'storage-reads',
+    label: 'Storage reads',
+    provider: 'Cloudflare R2',
+    limit: 50_000,
+    unit: 'requests',
+    color: '#4ac7ff',
+    note: 'Monthly Class B guard',
+  },
+  {
+    id: 'secrets',
+    label: 'Secrets',
+    provider: 'YSD',
+    limit: 200,
+    unit: 'count',
+    color: '#ef78ff',
+    note: 'Encrypted at rest',
+  },
+  {
+    id: 'log-events',
+    label: 'Log events',
+    provider: 'YSD',
+    limit: 20_000,
+    unit: 'count',
+    color: '#5ce0a8',
+    note: 'Retained events',
+  },
 ] as const;
 
 export type UsageReading = {
@@ -63,12 +151,17 @@ export type UsageReading = {
  * @param used Value per metric. `null` marks a metric the provider will not
  * report; a missing key means the workspace genuinely has none.
  */
-export function readUsage(used: Partial<Record<UsageMetricId, number | null>>): UsageReading[] {
+export function readUsage(
+  used: Partial<Record<UsageMetricId, number | null>>,
+): UsageReading[] {
   return FREE_TIER_LIMITS.map((entry) => {
     const raw = used[entry.id];
     const measured = raw !== null;
     const value = measured ? Math.max(0, raw ?? 0) : 0;
-    const percent = measured && entry.limit > 0 ? Math.min(100, (value / entry.limit) * 100) : 0;
+    const percent =
+      measured && entry.limit > 0
+        ? Math.min(100, (value / entry.limit) * 100)
+        : 0;
     return {
       id: entry.id,
       label: entry.label,
@@ -98,24 +191,32 @@ export function readUsage(used: Partial<Record<UsageMetricId, number | null>>): 
  * @returns `0`, or `NaN` when a measured allowance has been exceeded — the
  * function refuses to name a price rather than guessing at one.
  */
-export function projectedMonthlyCost(readings: readonly UsageReading[]): number {
-  return readings.some((reading) => reading.measured && reading.used > reading.limit)
+export function projectedMonthlyCost(
+  readings: readonly UsageReading[],
+): number {
+  return readings.some(
+    (reading) => reading.measured && reading.used > reading.limit,
+  )
     ? Number.NaN
     : 0;
 }
 
 export function formatUsage(
-  reading: Pick<UsageReading, 'used' | 'limit' | 'unit'> & { measured?: boolean },
+  reading: Pick<UsageReading, 'used' | 'limit' | 'unit'> & {
+    measured?: boolean;
+  },
 ): string {
-  const limit = reading.unit === 'bytes'
-    ? formatBytes(reading.limit)
-    : reading.limit.toLocaleString('en-US');
+  const limit =
+    reading.unit === 'bytes'
+      ? formatBytes(reading.limit)
+      : reading.limit.toLocaleString('en-US');
 
   if (reading.measured === false) return `not reported / ${limit}`;
 
-  const value = reading.unit === 'bytes'
-    ? formatBytes(reading.used)
-    : reading.used.toLocaleString('en-US');
+  const value =
+    reading.unit === 'bytes'
+      ? formatBytes(reading.used)
+      : reading.used.toLocaleString('en-US');
   return `${value} / ${limit}`;
 }
 
@@ -128,6 +229,7 @@ export function formatBytes(bytes: number): string {
     value /= 1024;
     unit += 1;
   }
-  const rounded = value >= 100 || unit === 0 ? Math.round(value) : Number(value.toFixed(1));
+  const rounded =
+    value >= 100 || unit === 0 ? Math.round(value) : Number(value.toFixed(1));
   return `${rounded} ${units[unit]}`;
 }

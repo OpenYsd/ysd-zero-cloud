@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { DENY_ALL, isSchemaOnlyTable, scopeForTable, type TenantScope } from '../lib/tenancy.ts';
+import {
+  DENY_ALL,
+  isSchemaOnlyTable,
+  scopeForTable,
+  type TenantScope,
+} from '../lib/tenancy.ts';
 
 const SCOPE: TenantScope = { workspaceId: 'ws_1', userId: 'usr_1' };
 
@@ -12,15 +17,29 @@ void test('workspace-owned tables are limited by workspaceId', () => {
     'secret',
     'shield_scan',
     'shield_finding',
+    'storage_object',
+    'storage_meter',
   ]) {
-    const predicate = scopeForTable(table, ['id', 'workspaceId', 'createdAt'], SCOPE);
-    assert.equal(predicate.sql, 'workspaceId = ?', `${table} must be workspace-scoped`);
+    const predicate = scopeForTable(
+      table,
+      ['id', 'workspaceId', 'createdAt'],
+      SCOPE,
+    );
+    assert.equal(
+      predicate.sql,
+      'workspaceId = ?',
+      `${table} must be workspace-scoped`,
+    );
     assert.deepEqual(predicate.params, ['ws_1']);
   }
 });
 
 void test('the workspace row is matched by its own id', () => {
-  const predicate = scopeForTable('workspace', ['id', 'name', 'ownerUserId'], SCOPE);
+  const predicate = scopeForTable(
+    'workspace',
+    ['id', 'name', 'ownerUserId'],
+    SCOPE,
+  );
   assert.equal(predicate.sql, 'id = ?');
   assert.deepEqual(predicate.params, ['ws_1']);
 });
@@ -33,7 +52,11 @@ void test('a caller sees only their own user row', () => {
 
 void test('auth records are limited to the caller', () => {
   for (const table of ['account', 'session']) {
-    const predicate = scopeForTable(table, ['id', 'userId', 'createdAt'], SCOPE);
+    const predicate = scopeForTable(
+      table,
+      ['id', 'userId', 'createdAt'],
+      SCOPE,
+    );
     assert.equal(predicate.sql, 'userId = ?', `${table} must be user-scoped`);
     assert.deepEqual(predicate.params, ['usr_1']);
   }
@@ -42,13 +65,25 @@ void test('auth records are limited to the caller', () => {
 void test('verification rows cannot be attributed to a caller, so none are shown', () => {
   // Keyed by email address with no owner column: showing any row would show
   // another operator's pending verification.
-  const predicate = scopeForTable('verification', ['id', 'identifier', 'value'], SCOPE);
+  const predicate = scopeForTable(
+    'verification',
+    ['id', 'identifier', 'value'],
+    SCOPE,
+  );
   assert.deepEqual(predicate, DENY_ALL);
 });
 
 void test('an unclassified table fails closed rather than open', () => {
-  const predicate = scopeForTable('some_future_table', ['id', 'payload'], SCOPE);
-  assert.deepEqual(predicate, DENY_ALL, 'a new table must be invisible until scoped');
+  const predicate = scopeForTable(
+    'some_future_table',
+    ['id', 'payload'],
+    SCOPE,
+  );
+  assert.deepEqual(
+    predicate,
+    DENY_ALL,
+    'a new table must be invisible until scoped',
+  );
 });
 
 void test('schema-only tables carry no tenant data and stay visible', () => {
@@ -61,7 +96,11 @@ void test('schema-only tables carry no tenant data and stay visible', () => {
 });
 
 void test('workspaceId wins over userId when a table carries both', () => {
-  const predicate = scopeForTable('deployment', ['id', 'workspaceId', 'userId'], SCOPE);
+  const predicate = scopeForTable(
+    'deployment',
+    ['id', 'workspaceId', 'userId'],
+    SCOPE,
+  );
   assert.equal(predicate.sql, 'workspaceId = ?');
   assert.deepEqual(predicate.params, ['ws_1']);
 });
@@ -78,6 +117,10 @@ void test('every predicate is a bound expression, never an interpolated value', 
       workspaceId: "ws' OR 1=1 --",
       userId: "usr' OR 1=1 --",
     });
-    assert.doesNotMatch(predicate.sql, /OR 1=1/, `${table} interpolated a scope value into SQL`);
+    assert.doesNotMatch(
+      predicate.sql,
+      /OR 1=1/,
+      `${table} interpolated a scope value into SQL`,
+    );
   }
 });

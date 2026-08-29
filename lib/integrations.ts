@@ -12,11 +12,12 @@ export type IntegrationProvider =
   | 'github-oauth'
   | 'cloudflare'
   | 'cloudflare-d1'
+  | 'cloudflare-r2'
   | 'better-auth'
   | 'turnstile'
   | 'email';
 
-export type IntegrationStatus = 'mock' | 'configured' | 'bound';
+export type IntegrationStatus = 'mock' | 'configured' | 'bound' | 'gated';
 
 export type IntegrationDescriptor = {
   id: IntegrationProvider;
@@ -39,6 +40,13 @@ const definitions: Definition[] = [
     purpose: 'Workspace database, auth storage, and the Studio surfaces',
     envKeys: [],
     binding: 'DB',
+  },
+  {
+    id: 'cloudflare-r2',
+    name: 'Cloudflare R2',
+    purpose: 'Private object storage behind workspace sessions and hard quotas',
+    envKeys: [],
+    binding: 'STORAGE',
   },
   {
     id: 'github-oauth',
@@ -94,7 +102,12 @@ export function getIntegrationCatalog(
 ): IntegrationDescriptor[] {
   return definitions.map((definition) => {
     let status: IntegrationStatus = 'mock';
-    if (definition.binding) {
+    if (
+      definition.id === 'email' &&
+      env.YSD_EMAIL_VERIFICATION_MODE === 'disabled-no-domain'
+    ) {
+      status = 'gated';
+    } else if (definition.binding) {
       status = env[definition.binding] ? 'bound' : 'mock';
     } else if (
       definition.envKeys.length > 0 &&

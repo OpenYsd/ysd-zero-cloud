@@ -20,7 +20,7 @@
   "compatibility_date": "2026-08-28",
   "compatibility_flags": ["nodejs_compat"],
   "observability": {
-    "enabled": true
+    "enabled": true,
   },
   "vars": {
     // The deployed origin. Better Auth otherwise derives it from each request
@@ -28,10 +28,15 @@
     // URL, not a credential. Local development ignores it — see
     // `lib/server/auth.ts` — so the production origin cannot leak into a dev
     // session through this file.
-    "BETTER_AUTH_URL": "https://ysd-zero-cloud.ysd-zero-cloud.workers.dev"
+    "BETTER_AUTH_URL": "https://ysd-zero-cloud.ysd-zero-cloud.workers.dev",
+    // Email delivery is intentionally off until the project owns a sending
+    // domain. This is an operational constraint, not a failed integration.
+    "YSD_EMAIL_VERIFICATION_MODE": "disabled-no-domain",
+    // No custom domain, Tunnel, paid route, or public object endpoint exists.
+    "YSD_NETWORK_MODE": "workers-dev-only",
   },
   "secrets": {
-    "required": ["BETTER_AUTH_SECRET"]
+    "required": ["BETTER_AUTH_SECRET"],
   },
   "d1_databases": [
     {
@@ -41,7 +46,7 @@
       // account-scoped identifier, not a credential: reaching it still
       // requires Cloudflare account access.
       "database_id": "4175f8f4-34ff-4234-bbf4-72cc2602c520",
-      "migrations_dir": "db/migrations"
-    }
-  ]
+      "migrations_dir": "db/migrations",
+    },
+  ],
 }

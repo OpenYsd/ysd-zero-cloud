@@ -1,9 +1,14 @@
-import { projectedMonthlyCost, readUsage, type UsageReading } from '@/lib/free-tier';
+import {
+  projectedMonthlyCost,
+  readUsage,
+  type UsageReading,
+} from '@/lib/free-tier';
 import { count } from './db';
 import { countDeployments } from './deployments';
 import { countProjects } from './projects';
 import { countSecrets } from './secrets';
 import { databaseBytes, listTables } from './studio';
+import { listStorage } from './storage';
 
 /**
  * Usage is measured, not estimated.
@@ -30,13 +35,18 @@ export async function summarizeUsage(
 ): Promise<UsageSummary> {
   const tables = await listTables({ workspaceId, userId });
 
-  const [projects, deployments, secrets, logEvents, bytes] = await Promise.all([
-    countProjects(workspaceId),
-    countDeployments(workspaceId),
-    countSecrets(workspaceId),
-    count('SELECT COUNT(*) AS total FROM log_event WHERE workspaceId = ?', workspaceId),
-    databaseBytes(),
-  ]);
+  const [projects, deployments, secrets, logEvents, bytes, storage] =
+    await Promise.all([
+      countProjects(workspaceId),
+      countDeployments(workspaceId),
+      countSecrets(workspaceId),
+      count(
+        'SELECT COUNT(*) AS total FROM log_event WHERE workspaceId = ?',
+        workspaceId,
+      ),
+      databaseBytes(),
+      listStorage(workspaceId),
+    ]);
 
   const readings = readUsage({
     projects,
@@ -45,6 +55,10 @@ export async function summarizeUsage(
     'log-events': logEvents,
     'database-rows': tables.reduce((total, table) => total + table.rows, 0),
     'database-bytes': bytes,
+    'storage-bytes': storage.usage.bytesUsed,
+    'storage-objects': storage.usage.objectCount,
+    'storage-writes': storage.usage.classAWrites,
+    'storage-reads': storage.usage.classBReads,
   });
 
   return {

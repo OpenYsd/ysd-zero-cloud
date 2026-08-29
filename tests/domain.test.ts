@@ -21,21 +21,35 @@ void test('section guards accept only real sections', () => {
 
 void test('every live section is a real section', () => {
   for (const section of LIVE_SECTIONS) {
-    assert.ok(SECTIONS.includes(section), `${section} is not in the section catalog`);
+    assert.ok(
+      SECTIONS.includes(section),
+      `${section} is not in the section catalog`,
+    );
     assert.equal(isLiveSection(section), true);
   }
 });
 
 void test('preview sections are not reported as live', () => {
-  for (const section of ['storage', 'ai', 'game-servers', 'nodes', 'networking'] as const) {
-    assert.equal(isLiveSection(section), false, `${section} should be a preview`);
+  for (const section of ['ai', 'game-servers', 'nodes'] as const) {
+    assert.equal(
+      isLiveSection(section),
+      false,
+      `${section} should be a preview`,
+    );
   }
+});
+
+void test('storage and networking are live surfaces', () => {
+  assert.equal(isLiveSection('storage'), true);
+  assert.equal(isLiveSection('networking'), true);
 });
 
 void test('log guards reject anything outside the catalog', () => {
   assert.equal(isLogLevel('WARN'), true);
   assert.equal(isLogLevel('warn'), false);
   assert.equal(isLogSource('shield'), true);
+  assert.equal(isLogSource('storage'), true);
+  assert.equal(isLogSource('networking'), true);
   assert.equal(isLogSource('anything-else'), false);
 });
 

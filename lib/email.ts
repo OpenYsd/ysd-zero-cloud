@@ -6,6 +6,56 @@ export type EmailProvider = {
   from: string;
 };
 
+export type EmailVerificationState =
+  | 'enabled'
+  | 'unavailable-no-domain'
+  | 'not-configured';
+
+export type EmailVerificationStatus = {
+  state: EmailVerificationState;
+  provider: EmailProvider | null;
+};
+
+function configuredProvider(
+  env: Record<string, unknown>,
+): EmailProvider | null {
+  const apiKey =
+    typeof env.RESEND_API_KEY === 'string' ? env.RESEND_API_KEY.trim() : '';
+  const from =
+    typeof env.YSD_EMAIL_FROM === 'string' ? env.YSD_EMAIL_FROM.trim() : '';
+  if (!apiKey || !from) return null;
+  return { id: 'resend', apiKey, from };
+}
+
+/**
+ * Why verification is or is not active.
+ *
+ * Production explicitly uses `disabled-no-domain` until an owned sending
+ * domain exists. That gate wins even if stale provider secrets remain, so a
+ * partial setup can never begin sending from an unverified identity or lock
+ * operators out. Moving to `enabled` is a deliberate configuration change
+ * made only after the domain and provider are both ready.
+ */
+export function emailVerificationStatus(
+  env: Record<string, unknown>,
+): EmailVerificationStatus {
+  const mode =
+    typeof env.YSD_EMAIL_VERIFICATION_MODE === 'string'
+      ? env.YSD_EMAIL_VERIFICATION_MODE.trim().toLowerCase()
+      : '';
+
+  if (mode === 'disabled-no-domain') {
+    return { state: 'unavailable-no-domain', provider: null };
+  }
+
+  const provider = configuredProvider(env);
+  if (provider && (mode === '' || mode === 'enabled')) {
+    return { state: 'enabled', provider };
+  }
+
+  return { state: 'not-configured', provider: null };
+}
+
 /**
  * Email verification is enabled only when delivery is actually usable.
  *
@@ -16,12 +66,7 @@ export type EmailProvider = {
 export function readEmailProvider(
   env: Record<string, unknown>,
 ): EmailProvider | null {
-  const apiKey =
-    typeof env.RESEND_API_KEY === 'string' ? env.RESEND_API_KEY.trim() : '';
-  const from =
-    typeof env.YSD_EMAIL_FROM === 'string' ? env.YSD_EMAIL_FROM.trim() : '';
-  if (!apiKey || !from) return null;
-  return { id: 'resend', apiKey, from };
+  return emailVerificationStatus(env).provider;
 }
 
 export function verificationMessage(

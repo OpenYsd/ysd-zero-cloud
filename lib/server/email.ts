@@ -1,7 +1,9 @@
 import { runtimeEnv } from './env';
 import {
+  emailVerificationStatus as readVerificationStatus,
   readEmailProvider as readProviderFrom,
   type EmailProvider,
+  type EmailVerificationStatus,
 } from '@/lib/email';
 
 export { verificationMessage } from '@/lib/email';
@@ -26,6 +28,10 @@ export function readEmailProvider(): EmailProvider | null {
 
 export function isEmailConfigured(): boolean {
   return readEmailProvider() !== null;
+}
+
+export function emailVerificationStatus(): EmailVerificationStatus {
+  return readVerificationStatus(runtimeEnv);
 }
 
 export type SendResult = { ok: true } | { ok: false; error: string };

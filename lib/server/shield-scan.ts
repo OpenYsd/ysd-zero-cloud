@@ -1,14 +1,23 @@
 import { createId } from '@/lib/crypto';
 import { getIntegrationCatalog } from '@/lib/integrations';
 import { runtimeEnv } from './env';
-import { runShieldRules, type ShieldFinding, type ShieldReport, type ShieldSnapshot } from '@/lib/shield';
+import {
+  runShieldRules,
+  type ShieldFinding,
+  type ShieldReport,
+  type ShieldSnapshot,
+} from '@/lib/shield';
 import { count, execute, query, queryOne } from './db';
 import { emailVerificationRequired } from './auth';
 import { countBillableResources } from './deployments';
-import { isEmailConfigured } from './email';
+import { emailVerificationStatus, isEmailConfigured } from './email';
 import { pruneRateLimits } from './rate-limit';
 import { countByRole, countOwners, countSuspended } from './roles';
-import { countFailingNetworks, countRecentBlocks, pruneAttempts } from './security';
+import {
+  countFailingNetworks,
+  countRecentBlocks,
+  pruneAttempts,
+} from './security';
 import { turnstileConfigured } from './turnstile';
 import { can } from '@/lib/roles';
 import { configuredSecurityHeaders } from '@/lib/security-headers';
@@ -18,6 +27,9 @@ import { writeLog } from './logs';
 import { secretsForShield } from './secrets';
 import { listTables } from './studio';
 import { getWorkspace } from './workspace';
+import { STORAGE_LIMITS } from '@/lib/storage';
+import { readNetworkState } from './networking';
+import { storageShieldState } from './storage';
 
 /**
  * YSD Shield: gathering the snapshot and persisting the result.
@@ -45,9 +57,13 @@ export type ScanRecord = {
   createdAt: number;
 };
 
-async function collectSnapshot(workspaceId: string, userId: string): Promise<ShieldSnapshot> {
+async function collectSnapshot(
+  workspaceId: string,
+  userId: string,
+): Promise<ShieldSnapshot> {
   const workspace = await getWorkspace(workspaceId);
   const now = Date.now();
+  const emailStatus = emailVerificationStatus();
 
   const [
     secrets,
@@ -67,39 +83,43 @@ async function collectSnapshot(workspaceId: string, userId: string): Promise<Shi
     orphanRoles,
     suspendedPrivileged,
     columnsByTable,
+    storage,
   ] = await Promise.all([
-      secretsForShield(workspaceId),
-      listTables({ workspaceId, userId }),
-      countBillableResources(workspaceId),
-      count('SELECT COUNT(*) AS total FROM "user"'),
-      count('SELECT COUNT(*) AS total FROM "user" WHERE emailVerified = 0'),
-      count('SELECT COUNT(*) AS total FROM "session"'),
-      countExpiredSessions(now),
-      query<{ name: string }>(
-        "SELECT name FROM project WHERE workspaceId = ? AND visibility = 'public'",
-        workspaceId,
-      ),
-      countOwners(),
-      countByRole('admin'),
-      countSuspended(),
-      count(
-        `SELECT COUNT(*) AS total FROM user_role r
+    secretsForShield(workspaceId),
+    listTables({ workspaceId, userId }),
+    countBillableResources(workspaceId),
+    count('SELECT COUNT(*) AS total FROM "user"'),
+    count('SELECT COUNT(*) AS total FROM "user" WHERE emailVerified = 0'),
+    count('SELECT COUNT(*) AS total FROM "session"'),
+    countExpiredSessions(now),
+    query<{ name: string }>(
+      "SELECT name FROM project WHERE workspaceId = ? AND visibility = 'public'",
+      workspaceId,
+    ),
+    countOwners(),
+    countByRole('admin'),
+    countSuspended(),
+    count(
+      `SELECT COUNT(*) AS total FROM user_role r
          JOIN "user" u ON u.id = r.userId
          WHERE r.role IN ('owner', 'admin') AND u.emailVerified = 0`,
-      ),
-      countRecentBlocks(),
-      countFailingNetworks(),
-      count(
-        `SELECT COUNT(*) AS total FROM user_role r
+    ),
+    countRecentBlocks(),
+    countFailingNetworks(),
+    count(
+      `SELECT COUNT(*) AS total FROM user_role r
          LEFT JOIN "user" u ON u.id = r.userId
          WHERE u.id IS NULL`,
-      ),
-      count(
-        `SELECT COUNT(*) AS total FROM user_role
+    ),
+    count(
+      `SELECT COUNT(*) AS total FROM user_role
          WHERE role IN ('owner','admin') AND suspendedAt IS NOT NULL`,
-      ),
-      listTableColumns(),
-    ]);
+    ),
+    listTableColumns(),
+    storageShieldState(workspaceId),
+  ]);
+
+  const network = readNetworkState();
 
   return {
     zeroModeEnabled: workspace?.zeroMode ?? true,
@@ -107,6 +127,7 @@ async function collectSnapshot(workspaceId: string, userId: string): Promise<Shi
       turnstileConfigured: turnstileConfigured(),
       emailProviderConfigured: isEmailConfigured(),
       emailVerificationRequired: emailVerificationRequired(),
+      emailVerificationState: emailStatus.state,
       // Enabled unconditionally in `lib/server/auth-options.ts`; reported so a
       // future change that switches it off cannot pass unnoticed.
       rateLimitEnabled: true,
@@ -148,12 +169,32 @@ async function collectSnapshot(workspaceId: string, userId: string): Promise<Shi
     sessions: { total: sessions, expired: expiredSessions },
     tables: tables
       .filter((table) => table.name !== 'ysd_migration')
-      .map((table) => ({ name: table.name, hasPrimaryKey: table.hasPrimaryKey, rows: table.rows })),
+      .map((table) => ({
+        name: table.name,
+        hasPrimaryKey: table.hasPrimaryKey,
+        rows: table.rows,
+      })),
     integrations: getIntegrationCatalog(runtimeEnv).map((entry) => ({
       id: entry.id,
-      status: entry.status === 'mock' ? 'mock' : 'configured',
+      status:
+        entry.status === 'configured' || entry.status === 'bound'
+          ? 'configured'
+          : 'mock',
     })),
     publicProjects: publicProjects.map((row) => row.name),
+    storage: {
+      available: storage.available,
+      private: storage.private,
+      bytesUsed: storage.usage.bytesUsed,
+      limitBytes: STORAGE_LIMITS.workspaceBytes,
+      objectCount: storage.usage.objectCount,
+    },
+    network: {
+      tls: network.tls,
+      customDomains: network.customDomains,
+      tunnels: network.tunnels,
+      publicStorageEndpoints: network.publicStorageEndpoints,
+    },
     now,
   };
 }
@@ -304,7 +345,9 @@ export type ShieldState = {
 };
 
 /** The last recorded scan, for rendering the Shield page without re-scanning. */
-export async function readShieldState(workspaceId: string): Promise<ShieldState> {
+export async function readShieldState(
+  workspaceId: string,
+): Promise<ShieldState> {
   const row = await queryOne<{
     id: string;
     score: number;

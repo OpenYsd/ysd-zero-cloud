@@ -31,6 +31,11 @@ export type ProtectionSnapshot = {
   turnstileConfigured: boolean;
   emailProviderConfigured: boolean;
   emailVerificationRequired: boolean;
+  /** Distinguishes a deliberate no-domain gate from an incomplete setup. */
+  emailVerificationState?:
+    | 'enabled'
+    | 'unavailable-no-domain'
+    | 'not-configured';
   rateLimitEnabled: boolean;
   /** Lockouts triggered in the last day. */
   recentBlocks: number;
@@ -77,6 +82,19 @@ export type ShieldSnapshot = {
   integrations: { id: string; status: 'mock' | 'configured' }[];
   /** Projects reachable without authentication. */
   publicProjects: string[];
+  storage?: {
+    available: boolean;
+    private: boolean;
+    bytesUsed: number;
+    limitBytes: number;
+    objectCount: number;
+  };
+  network?: {
+    tls: boolean;
+    customDomains: number;
+    tunnels: number;
+    publicStorageEndpoints: number;
+  };
   now: number;
 };
 
@@ -100,16 +118,21 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 /** Tables that must never be world-readable, regardless of their contents. */
 const CREDENTIAL_TABLES = new Set(['account', 'session', 'verification']);
 
-function checkZeroMode(snapshot: ShieldSnapshot): { check: ShieldCheck; findings: ShieldFinding[] } {
+function checkZeroMode(snapshot: ShieldSnapshot): {
+  check: ShieldCheck;
+  findings: ShieldFinding[];
+} {
   const findings: ShieldFinding[] = [];
   if (!snapshot.zeroModeEnabled) {
     findings.push({
       code: 'zero-mode-disabled',
       title: 'Zero Mode is paused',
-      detail: 'Deployment plans can provision billable resources while the cost guard is off.',
+      detail:
+        'Deployment plans can provision billable resources while the cost guard is off.',
       resource: 'workspace',
       severity: 'high',
-      remediation: 'Re-enable Zero Mode in Settings so billable plans are rejected before they run.',
+      remediation:
+        'Re-enable Zero Mode in Settings so billable plans are rejected before they run.',
     });
   }
   if (snapshot.billableResources > 0) {
@@ -119,7 +142,8 @@ function checkZeroMode(snapshot: ShieldSnapshot): { check: ShieldCheck; findings
       detail: `${snapshot.billableResources} planned resource${snapshot.billableResources === 1 ? '' : 's'} carried a projected charge.`,
       resource: 'deployments',
       severity: 'medium',
-      remediation: 'Replace the paid target with a free-tier equivalent, or delete the plan.',
+      remediation:
+        'Replace the paid target with a free-tier equivalent, or delete the plan.',
     });
   }
   return {
@@ -129,13 +153,21 @@ function checkZeroMode(snapshot: ShieldSnapshot): { check: ShieldCheck; findings
       detail: snapshot.zeroModeEnabled
         ? 'Zero Mode is enforcing free-tier-only plans'
         : 'Zero Mode is paused',
-      state: findings.length === 0 ? 'passed' : snapshot.zeroModeEnabled ? 'review' : 'failed',
+      state:
+        findings.length === 0
+          ? 'passed'
+          : snapshot.zeroModeEnabled
+            ? 'review'
+            : 'failed',
     },
     findings,
   };
 }
 
-function checkSecrets(snapshot: ShieldSnapshot): { check: ShieldCheck; findings: ShieldFinding[] } {
+function checkSecrets(snapshot: ShieldSnapshot): {
+  check: ShieldCheck;
+  findings: ShieldFinding[];
+} {
   const findings: ShieldFinding[] = [];
 
   for (const secret of snapshot.secrets) {
@@ -148,7 +180,8 @@ function checkSecrets(snapshot: ShieldSnapshot): { check: ShieldCheck; findings:
         detail: `Last updated ${ageDays} days ago against a ${secret.rotationDays} day policy.`,
         resource: `${secret.environment}/${secret.name}`,
         severity: ageDays > secret.rotationDays * 2 ? 'high' : 'medium',
-        remediation: 'Rotate the value and update every workload that reads it.',
+        remediation:
+          'Rotate the value and update every workload that reads it.',
       });
     }
   }
@@ -158,7 +191,10 @@ function checkSecrets(snapshot: ShieldSnapshot): { check: ShieldCheck; findings:
   const byFingerprint = new Map<string, string[]>();
   for (const secret of snapshot.secrets) {
     const scope = `${secret.environment}/${secret.name}`;
-    byFingerprint.set(secret.fingerprint, [...(byFingerprint.get(secret.fingerprint) ?? []), scope]);
+    byFingerprint.set(secret.fingerprint, [
+      ...(byFingerprint.get(secret.fingerprint) ?? []),
+      scope,
+    ]);
   }
   for (const [, scopes] of byFingerprint) {
     if (scopes.length < 2) continue;
@@ -168,7 +204,8 @@ function checkSecrets(snapshot: ShieldSnapshot): { check: ShieldCheck; findings:
       detail: `The same value is stored for ${scopes.slice().sort().join(', ')}.`,
       resource: scopes[0]!,
       severity: 'medium',
-      remediation: 'Give each environment its own value so a leak stays contained.',
+      remediation:
+        'Give each environment its own value so a leak stays contained.',
     });
   }
 
@@ -186,17 +223,23 @@ function checkSecrets(snapshot: ShieldSnapshot): { check: ShieldCheck; findings:
   };
 }
 
-function checkIdentity(snapshot: ShieldSnapshot): { check: ShieldCheck; findings: ShieldFinding[] } {
+function checkIdentity(snapshot: ShieldSnapshot): {
+  check: ShieldCheck;
+  findings: ShieldFinding[];
+} {
   const findings: ShieldFinding[] = [];
+  const emailUnavailable =
+    snapshot.protections.emailVerificationState === 'unavailable-no-domain';
 
-  if (snapshot.users.unverified > 0) {
+  if (snapshot.users.unverified > 0 && !emailUnavailable) {
     findings.push({
       code: 'unverified-accounts',
       title: 'Accounts without a verified email',
       detail: `${snapshot.users.unverified} of ${snapshot.users.total} accounts have not confirmed their address.`,
       resource: 'identity',
       severity: 'low',
-      remediation: 'Enable email verification before inviting collaborators outside your team.',
+      remediation:
+        'Enable email verification before inviting collaborators outside your team.',
     });
   }
 
@@ -222,7 +265,10 @@ function checkIdentity(snapshot: ShieldSnapshot): { check: ShieldCheck; findings
   };
 }
 
-function checkDatabase(snapshot: ShieldSnapshot): { check: ShieldCheck; findings: ShieldFinding[] } {
+function checkDatabase(snapshot: ShieldSnapshot): {
+  check: ShieldCheck;
+  findings: ShieldFinding[];
+} {
   const findings: ShieldFinding[] = [];
 
   for (const table of snapshot.tables) {
@@ -233,11 +279,14 @@ function checkDatabase(snapshot: ShieldSnapshot): { check: ShieldCheck; findings
       detail: `${table.rows.toLocaleString('en-US')} rows cannot be addressed or de-duplicated reliably.`,
       resource: table.name,
       severity: 'medium',
-      remediation: 'Add a primary key so updates and deletes target exactly one row.',
+      remediation:
+        'Add a primary key so updates and deletes target exactly one row.',
     });
   }
 
-  const credentialTables = snapshot.tables.filter((table) => CREDENTIAL_TABLES.has(table.name));
+  const credentialTables = snapshot.tables.filter((table) =>
+    CREDENTIAL_TABLES.has(table.name),
+  );
 
   return {
     check: {
@@ -250,44 +299,144 @@ function checkDatabase(snapshot: ShieldSnapshot): { check: ShieldCheck; findings
   };
 }
 
+function checkStorage(snapshot: ShieldSnapshot): {
+  check: ShieldCheck;
+  findings: ShieldFinding[];
+} {
+  const findings: ShieldFinding[] = [];
+  const storage = snapshot.storage;
+
+  if (!storage) {
+    return {
+      check: {
+        id: 'storage',
+        name: 'Object storage',
+        detail: 'Storage state was not sampled',
+        state: 'passed',
+      },
+      findings,
+    };
+  }
+
+  if (!storage.available) {
+    findings.push({
+      code: 'r2-account-not-enabled',
+      title: 'R2 unavailable: account activation required',
+      detail:
+        'The private storage implementation and quota ledger are ready, but Cloudflare currently refuses R2 bucket access for this account.',
+      resource: 'storage',
+      severity: 'low',
+      remediation:
+        'No code fix or paid upgrade is required. Keep uploads disabled unless R2 can be enabled from Cloudflare at a confirmed cost of $0.',
+    });
+  }
+
+  if (!storage.private) {
+    findings.push({
+      code: 'r2-public-access-enabled',
+      title: 'Object storage has a public endpoint',
+      detail:
+        'Objects can bypass the workspace session and D1 authorization index.',
+      resource: 'storage',
+      severity: 'critical',
+      remediation:
+        'Disable r2.dev and bucket custom domains; serve objects only through the authenticated Worker route.',
+    });
+  }
+
+  if (storage.bytesUsed > storage.limitBytes) {
+    findings.push({
+      code: 'r2-workspace-quota-exceeded',
+      title: 'Workspace storage exceeded its Zero Mode guard',
+      detail: `${storage.bytesUsed.toLocaleString('en-US')} bytes are recorded against a ${storage.limitBytes.toLocaleString('en-US')} byte ceiling.`,
+      resource: 'storage',
+      severity: 'high',
+      remediation:
+        'Delete objects until usage is below the hard limit; do not raise the ceiling into billable capacity.',
+    });
+  }
+
+  return {
+    check: {
+      id: 'storage',
+      name: 'Private object storage',
+      detail: storage.available
+        ? `${storage.objectCount} object${storage.objectCount === 1 ? '' : 's'} · ${storage.bytesUsed.toLocaleString('en-US')} bytes · private binding`
+        : 'R2 binding unavailable · uploads disabled · no public endpoint',
+      state: findings.some(
+        (finding) =>
+          finding.severity === 'critical' || finding.severity === 'high',
+      )
+        ? 'failed'
+        : findings.length > 0
+          ? 'review'
+          : 'passed',
+    },
+    findings,
+  };
+}
+
 /**
  * The abuse controls in front of the unauthenticated endpoints.
  *
  * A protection that is merely *available* is not a protection; these check
  * that each one is actually configured and doing something.
  */
-function checkHardening(snapshot: ShieldSnapshot): { check: ShieldCheck; findings: ShieldFinding[] } {
+function checkHardening(snapshot: ShieldSnapshot): {
+  check: ShieldCheck;
+  findings: ShieldFinding[];
+} {
   const findings: ShieldFinding[] = [];
   const p = snapshot.protections;
+  const emailState =
+    p.emailVerificationState ??
+    (p.emailProviderConfigured ? 'enabled' : 'not-configured');
 
   if (!p.turnstileConfigured) {
     findings.push({
       code: 'turnstile-not-configured',
       title: 'Sign-up and sign-in have no bot challenge',
-      detail: 'Turnstile keys are not set, so automated sign-up and credential stuffing are unimpeded.',
+      detail:
+        'Turnstile keys are not set, so automated sign-up and credential stuffing are unimpeded.',
       resource: 'identity',
       severity: 'high',
-      remediation: 'Create a free Turnstile widget and set TURNSTILE_SITE_KEY and TURNSTILE_SECRET_KEY.',
+      remediation:
+        'Create a free Turnstile widget and set TURNSTILE_SITE_KEY and TURNSTILE_SECRET_KEY.',
     });
   }
 
-  if (!p.emailProviderConfigured) {
+  if (emailState === 'unavailable-no-domain') {
+    findings.push({
+      code: 'email-verification-unavailable-no-domain',
+      title: 'Email verification unavailable: no owned sending domain',
+      detail:
+        'Production delivery is configuration-gated off because this Cloudflare account has no owned sending domain. Authentication remains usable, but addresses are not asserted as verified.',
+      resource: 'identity',
+      severity: 'low',
+      remediation:
+        'No code fix is required. Keep verification disabled until an owned domain is available; then verify the domain and deliberately change YSD_EMAIL_VERIFICATION_MODE to enabled.',
+    });
+  } else if (!p.emailProviderConfigured) {
     findings.push({
       code: 'email-not-configured',
       title: 'Addresses cannot be verified',
-      detail: 'No mail provider is configured, so verification links cannot be delivered and every account stays unverified.',
+      detail:
+        'No mail provider is configured, so verification links cannot be delivered and every account stays unverified.',
       resource: 'identity',
       severity: 'medium',
-      remediation: 'Set RESEND_API_KEY to enable verification, or accept unverified addresses deliberately.',
+      remediation:
+        'Set RESEND_API_KEY to enable verification, or accept unverified addresses deliberately.',
     });
   } else if (!p.emailVerificationRequired) {
     findings.push({
       code: 'email-verification-optional',
       title: 'Email verification is not required',
-      detail: 'Mail is configured but sign-in does not require a verified address.',
+      detail:
+        'Mail is configured but sign-in does not require a verified address.',
       resource: 'identity',
       severity: 'low',
-      remediation: 'Remove YSD_REQUIRE_EMAIL_VERIFICATION=false to require verification.',
+      remediation:
+        'Remove YSD_REQUIRE_EMAIL_VERIFICATION=false to require verification.',
     });
   }
 
@@ -309,18 +458,20 @@ function checkHardening(snapshot: ShieldSnapshot): { check: ShieldCheck; finding
       detail: 'Nobody can administer accounts or reach the SQL Editor.',
       resource: 'identity',
       severity: 'high',
-      remediation: 'Set YSD_OWNER_EMAIL to an account that exists, then sign in with it.',
+      remediation:
+        'Set YSD_OWNER_EMAIL to an account that exists, then sign in with it.',
     });
   }
 
-  if (p.unverifiedPrivileged > 0) {
+  if (p.unverifiedPrivileged > 0 && emailState !== 'unavailable-no-domain') {
     findings.push({
       code: 'unverified-privileged-accounts',
       title: 'Privileged accounts have unverified addresses',
       detail: `${p.unverifiedPrivileged} owner or admin account${p.unverifiedPrivileged === 1 ? '' : 's'} cannot be reached at a confirmed address.`,
       resource: 'identity',
       severity: 'medium',
-      remediation: 'Verify the address, or move the privilege to an account you can prove you control.',
+      remediation:
+        'Verify the address, or move the privilege to an account you can prove you control.',
     });
   }
 
@@ -331,7 +482,8 @@ function checkHardening(snapshot: ShieldSnapshot): { check: ShieldCheck; finding
       detail: `${p.recentBlocks} attempt${p.recentBlocks === 1 ? ' was' : 's were'} refused by the brute-force guard in the last day.`,
       resource: 'identity',
       severity: p.failingNetworks >= 3 ? 'high' : 'low',
-      remediation: 'Review the auth entries in Logs. The guard held, but repeated attempts are worth understanding.',
+      remediation:
+        'Review the auth entries in Logs. The guard held, but repeated attempts are worth understanding.',
     });
   }
 
@@ -341,7 +493,9 @@ function checkHardening(snapshot: ShieldSnapshot): { check: ShieldCheck; finding
       title: 'Security response headers are missing',
       detail: `Not served: ${p.securityHeaders.missing.join(', ')}.`,
       resource: 'edge',
-      severity: p.securityHeaders.missing.includes('content-security-policy') ? 'medium' : 'low',
+      severity: p.securityHeaders.missing.includes('content-security-policy')
+        ? 'medium'
+        : 'low',
       remediation: 'Set them in middleware.ts so every response carries them.',
     });
   }
@@ -353,7 +507,8 @@ function checkHardening(snapshot: ShieldSnapshot): { check: ShieldCheck; finding
       detail: `${p.orphanRoles} role assignment${p.orphanRoles === 1 ? '' : 's'} point at an account that no longer exists.`,
       resource: 'identity',
       severity: 'medium',
-      remediation: 'Delete the orphaned rows; a recreated account could otherwise inherit a stale role.',
+      remediation:
+        'Delete the orphaned rows; a recreated account could otherwise inherit a stale role.',
     });
   }
 
@@ -364,7 +519,8 @@ function checkHardening(snapshot: ShieldSnapshot): { check: ShieldCheck; finding
       detail: `${p.suspendedPrivileged} owner or admin account${p.suspendedPrivileged === 1 ? ' is' : 's are'} suspended and cannot act.`,
       resource: 'identity',
       severity: 'medium',
-      remediation: 'Restore the account, or move its role to someone who can use it.',
+      remediation:
+        'Restore the account, or move its role to someone who can use it.',
     });
   }
 
@@ -372,10 +528,12 @@ function checkHardening(snapshot: ShieldSnapshot): { check: ShieldCheck; finding
     findings.push({
       code: 'sql-editor-unrestricted',
       title: 'The SQL Editor is not owner-restricted',
-      detail: 'A raw statement cannot be scoped to one workspace, so this would expose every tenant.',
+      detail:
+        'A raw statement cannot be scoped to one workspace, so this would expose every tenant.',
       resource: 'database',
       severity: 'critical',
-      remediation: 'Restore the owner-only capability check on the query route.',
+      remediation:
+        'Restore the owner-only capability check on the query route.',
     });
   }
 
@@ -386,20 +544,29 @@ function checkHardening(snapshot: ShieldSnapshot): { check: ShieldCheck; finding
       detail: `${p.unscopedTables.join(', ')} would be invisible in Studio because no scoping rule classifies them.`,
       resource: 'database',
       severity: 'low',
-      remediation: 'Add them to lib/tenancy.ts so their rows are scoped rather than hidden.',
+      remediation:
+        'Add them to lib/tenancy.ts so their rows are scoped rather than hidden.',
     });
   }
 
-  const configured = [p.turnstileConfigured, p.emailProviderConfigured, p.rateLimitEnabled].filter(
+  const configured = [p.turnstileConfigured, p.rateLimitEnabled].filter(
     Boolean,
   ).length;
+  const emailDetail =
+    emailState === 'unavailable-no-domain'
+      ? 'email gated: no owned domain'
+      : emailState === 'enabled'
+        ? 'email verification active'
+        : 'email delivery not configured';
 
   return {
     check: {
       id: 'hardening',
       name: 'Abuse protections',
-      detail: `${configured} of 3 controls configured · ${p.owners} owner${p.owners === 1 ? '' : 's'}, ${p.admins} admin${p.admins === 1 ? '' : 's'}, ${p.suspended} suspended`,
-      state: findings.some((f) => f.severity === 'critical' || f.severity === 'high')
+      detail: `${configured} of 2 active abuse controls configured · ${emailDetail} · ${p.owners} owner${p.owners === 1 ? '' : 's'}, ${p.admins} admin${p.admins === 1 ? '' : 's'}, ${p.suspended} suspended`,
+      state: findings.some(
+        (f) => f.severity === 'critical' || f.severity === 'high',
+      )
         ? 'failed'
         : findings.length > 0
           ? 'review'
@@ -409,7 +576,10 @@ function checkHardening(snapshot: ShieldSnapshot): { check: ShieldCheck; finding
   };
 }
 
-function checkSurface(snapshot: ShieldSnapshot): { check: ShieldCheck; findings: ShieldFinding[] } {
+function checkSurface(snapshot: ShieldSnapshot): {
+  check: ShieldCheck;
+  findings: ShieldFinding[];
+} {
   const findings: ShieldFinding[] = [];
 
   for (const project of snapshot.publicProjects) {
@@ -419,17 +589,45 @@ function checkSurface(snapshot: ShieldSnapshot): { check: ShieldCheck; findings:
       detail: 'Anyone with the URL can load this project.',
       resource: project,
       severity: 'low',
-      remediation: 'Confirm this is intentional, or move the project behind the workspace session.',
+      remediation:
+        'Confirm this is intentional, or move the project behind the workspace session.',
     });
   }
 
-  const configured = snapshot.integrations.filter((entry) => entry.status === 'configured');
+  if (snapshot.network && !snapshot.network.tls) {
+    findings.push({
+      code: 'edge-tls-disabled',
+      title: 'The production origin is not using TLS',
+      detail:
+        'Credentials and session cookies would cross the network without transport encryption.',
+      resource: 'edge',
+      severity: 'critical',
+      remediation:
+        'Use the Cloudflare-managed HTTPS workers.dev origin or an owned HTTPS custom domain.',
+    });
+  }
+
+  if ((snapshot.network?.publicStorageEndpoints ?? 0) > 0) {
+    findings.push({
+      code: 'public-storage-route',
+      title: 'A public object-storage route bypasses workspace authorization',
+      detail: `${snapshot.network!.publicStorageEndpoints} public storage endpoint${snapshot.network!.publicStorageEndpoints === 1 ? '' : 's'} are configured.`,
+      resource: 'edge',
+      severity: 'high',
+      remediation:
+        'Remove public bucket routes and use the session-scoped /api/storage endpoint.',
+    });
+  }
+
+  const configured = snapshot.integrations.filter(
+    (entry) => entry.status === 'configured',
+  );
 
   return {
     check: {
       id: 'surface',
       name: 'Network surface',
-      detail: `${snapshot.publicProjects.length} public project${snapshot.publicProjects.length === 1 ? '' : 's'} · ${configured.length} live integration${configured.length === 1 ? '' : 's'}`,
+      detail: `${snapshot.publicProjects.length} public project${snapshot.publicProjects.length === 1 ? '' : 's'} · ${configured.length} live integration${configured.length === 1 ? '' : 's'} · ${snapshot.network?.customDomains ?? 0} custom domain${snapshot.network?.customDomains === 1 ? '' : 's'} · ${snapshot.network?.tunnels ?? 0} tunnel${snapshot.network?.tunnels === 1 ? '' : 's'}`,
       state: findings.length === 0 ? 'passed' : 'review',
     },
     findings,
@@ -443,6 +641,7 @@ export function runShieldRules(snapshot: ShieldSnapshot): ShieldReport {
     checkSecrets(snapshot),
     checkIdentity(snapshot),
     checkDatabase(snapshot),
+    checkStorage(snapshot),
     checkSurface(snapshot),
     checkHardening(snapshot),
   ];
@@ -450,7 +649,10 @@ export function runShieldRules(snapshot: ShieldSnapshot): ShieldReport {
   const checks = results.map((result) => result.check);
   const findings = results.flatMap((result) => result.findings);
 
-  const penalty = findings.reduce((total, finding) => total + SEVERITY_WEIGHT[finding.severity], 0);
+  const penalty = findings.reduce(
+    (total, finding) => total + SEVERITY_WEIGHT[finding.severity],
+    0,
+  );
   const score = Math.max(0, Math.min(100, 100 - penalty));
   const grade = score >= 85 ? 'strong' : score >= 60 ? 'fair' : 'at-risk';
 

@@ -33,7 +33,12 @@ import type { Role } from '@/lib/roles';
 import { cn } from '@/lib/utils';
 import { ZeroModeProvider, useZeroMode } from '@/components/zero-mode-provider';
 
-export type ShellUser = { name: string; email: string; role: Role; canAdminister: boolean };
+export type ShellUser = {
+  name: string;
+  email: string;
+  role: Role;
+  canAdminister: boolean;
+};
 
 /**
  * The sidebar. `live` is derived from the shared section catalog rather than
@@ -104,7 +109,13 @@ export function CloudShell({
   );
 }
 
-function CloudShellFrame({ children, user }: { children: React.ReactNode; user: ShellUser }) {
+function CloudShellFrame({
+  children,
+  user,
+}: {
+  children: React.ReactNode;
+  user: ShellUser;
+}) {
   const pathname = usePathname();
   const zeroMode = useZeroMode();
 
@@ -114,38 +125,59 @@ function CloudShellFrame({ children, user }: { children: React.ReactNode; user: 
         <div className="flex h-[68px] items-center gap-3 border-b border-white/[0.065] px-5">
           <BrandMark />
           <div>
-            <p className="text-sm font-semibold leading-none tracking-tight text-white">YSD Zero Cloud</p>
-            <p className="mt-1 text-[10px] font-medium uppercase tracking-[0.16em] text-white/35">Cloud OS · v0.2</p>
+            <p className="text-sm font-semibold leading-none tracking-tight text-white">
+              YSD Zero Cloud
+            </p>
+            <p className="mt-1 text-[10px] font-medium uppercase tracking-[0.16em] text-white/35">
+              Cloud OS · v0.3
+            </p>
           </div>
         </div>
 
-        <nav aria-label="Primary navigation" className="flex-1 overflow-y-auto p-3">
-          <p className="px-2 pb-2 pt-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-white/25">Workspace</p>
+        <nav
+          aria-label="Primary navigation"
+          className="flex-1 overflow-y-auto p-3"
+        >
+          <p className="px-2 pb-2 pt-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-white/25">
+            Workspace
+          </p>
           <div className="space-y-0.5">
             {navigation
               .filter((item) => !item.adminOnly || user.canAdminister)
               .map((item) => {
-              const active = item.href === '/' ? pathname === '/' : pathname.startsWith(item.href);
-              const Icon = item.icon;
-              return (
-                <NavLink
-                  key={item.href}
-                  href={item.href}
-                  className={cn(
-                    'group flex h-9 items-center gap-3 rounded-lg px-2.5 text-[13px] font-medium transition-colors',
-                    active ? 'bg-[#b7ff3c]/10 text-[#c8ff69]' : 'text-white/48 hover:bg-white/[0.045] hover:text-white/80',
-                  )}
-                >
-                  <Icon className={cn('size-4', active ? 'text-[#b7ff3c]' : 'text-white/32 group-hover:text-white/65')} />
-                  <span>{item.label}</span>
-                  {!item.live && (
-                    <span className="ml-auto rounded-full border border-white/[0.08] px-1.5 text-[9px] text-white/30">
-                      Preview
-                    </span>
-                  )}
-                </NavLink>
-              );
-            })}
+                const active =
+                  item.href === '/'
+                    ? pathname === '/'
+                    : pathname.startsWith(item.href);
+                const Icon = item.icon;
+                return (
+                  <NavLink
+                    key={item.href}
+                    href={item.href}
+                    className={cn(
+                      'group flex h-9 items-center gap-3 rounded-lg px-2.5 text-[13px] font-medium transition-colors',
+                      active
+                        ? 'bg-[#b7ff3c]/10 text-[#c8ff69]'
+                        : 'text-white/48 hover:bg-white/[0.045] hover:text-white/80',
+                    )}
+                  >
+                    <Icon
+                      className={cn(
+                        'size-4',
+                        active
+                          ? 'text-[#b7ff3c]'
+                          : 'text-white/32 group-hover:text-white/65',
+                      )}
+                    />
+                    <span>{item.label}</span>
+                    {!item.live && (
+                      <span className="ml-auto rounded-full border border-white/[0.08] px-1.5 text-[9px] text-white/30">
+                        Preview
+                      </span>
+                    )}
+                  </NavLink>
+                );
+              })}
           </div>
         </nav>
 
@@ -153,7 +185,9 @@ function CloudShellFrame({ children, user }: { children: React.ReactNode; user: 
           <div className="flex items-center justify-between gap-3">
             <div className="flex items-center gap-2">
               <LockKeyhole className="size-3.5 text-[#b7ff3c]" />
-              <span className="text-xs font-semibold text-white/85">Zero Mode</span>
+              <span className="text-xs font-semibold text-white/85">
+                Zero Mode
+              </span>
             </div>
             <Switch
               checked={zeroMode.enabled}
@@ -176,7 +210,9 @@ function CloudShellFrame({ children, user }: { children: React.ReactNode; user: 
         <header className="sticky top-0 z-30 flex h-[68px] items-center gap-3 border-b border-white/[0.065] bg-[#0d1210]/90 px-4 backdrop-blur-xl sm:px-6">
           <div className="flex min-w-0 items-center gap-2 md:hidden">
             <BrandMark />
-            <span className="hidden text-sm font-semibold sm:block">YSD Zero</span>
+            <span className="hidden text-sm font-semibold sm:block">
+              YSD Zero
+            </span>
           </div>
           <div className="ml-auto flex items-center gap-2">
             <div
@@ -190,7 +226,9 @@ function CloudShellFrame({ children, user }: { children: React.ReactNode; user: 
               <span
                 className={cn(
                   'size-1.5 rounded-full',
-                  zeroMode.enabled ? 'bg-[#b7ff3c] shadow-[0_0_8px_#b7ff3c]' : 'bg-amber-300',
+                  zeroMode.enabled
+                    ? 'bg-[#b7ff3c] shadow-[0_0_8px_#b7ff3c]'
+                    : 'bg-amber-300',
                 )}
               />
               {zeroMode.enabled ? 'Zero Mode enforced' : 'Zero Mode paused'}
@@ -200,17 +238,32 @@ function CloudShellFrame({ children, user }: { children: React.ReactNode; user: 
         </header>
 
         <div className="border-b border-white/[0.065] bg-[#0b100e] px-4 py-2 md:hidden">
-          <nav className="flex gap-1 overflow-x-auto" aria-label="Mobile navigation">
+          <nav
+            className="flex gap-1 overflow-x-auto"
+            aria-label="Mobile navigation"
+          >
             {navigation
               .filter((item) => !item.adminOnly || user.canAdminister)
               .map((item) => {
-              const active = item.href === '/' ? pathname === '/' : pathname.startsWith(item.href);
-              return (
-                <NavLink key={item.href} href={item.href} className={cn('shrink-0 rounded-md px-3 py-1.5 text-[11px] font-medium', active ? 'bg-[#b7ff3c]/10 text-[#c8ff69]' : 'text-white/40')}>
-                  {item.label}
-                </NavLink>
-              );
-            })}
+                const active =
+                  item.href === '/'
+                    ? pathname === '/'
+                    : pathname.startsWith(item.href);
+                return (
+                  <NavLink
+                    key={item.href}
+                    href={item.href}
+                    className={cn(
+                      'shrink-0 rounded-md px-3 py-1.5 text-[11px] font-medium',
+                      active
+                        ? 'bg-[#b7ff3c]/10 text-[#c8ff69]'
+                        : 'text-white/40',
+                    )}
+                  >
+                    {item.label}
+                  </NavLink>
+                );
+              })}
           </nav>
         </div>
 
@@ -263,7 +316,9 @@ function UserMenu({ user }: { user: ShellUser }) {
         <span className="grid size-6 place-items-center rounded-md bg-[#7569ff] text-[10px] font-bold text-white">
           {initials(user.name, user.email)}
         </span>
-        <span className="hidden max-w-[160px] truncate text-xs text-white/70 sm:inline">{user.email}</span>
+        <span className="hidden max-w-[160px] truncate text-xs text-white/70 sm:inline">
+          {user.email}
+        </span>
       </div>
       <Button
         variant="ghost"
