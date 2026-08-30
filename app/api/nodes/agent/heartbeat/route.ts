@@ -11,6 +11,7 @@ export async function POST(request: Request): Promise<Response> {
     capabilities: parsed.body.capabilities,
     metrics: parsed.body.metrics,
     agentVersion: parsed.body.agentVersion,
+    gameServers: parsed.body.gameServers,
   });
   if (!result.ok) {
     return Response.json({ error: result.error }, { status: result.status });

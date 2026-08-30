@@ -129,6 +129,30 @@ export type ShieldSnapshot = {
     modelPathAbuse: number;
     payloadAbuse: number;
   };
+  gameServers?: {
+    total: number;
+    eligibleOnlineNodes: number;
+    staleNodes: number;
+    revokedNodes: number;
+    unexpectedExposure: number;
+    onlineModeDisabled: number;
+    whitelistDisabled: number;
+    outdatedVersions: number;
+    unverifiedBinaries: number;
+    excessiveRam: number;
+    crashLoops: number;
+    unsafeConfig: number;
+    corruptedBackups: number;
+    unsignedJobs: number;
+    expiredLeases: number;
+    suspiciousVolume: number;
+    forgedClaims: number;
+    replayedJobs: number;
+    revokedActivity: number;
+    resourceExhaustion: number;
+    zeroModeBypass: number;
+    payloadAbuse: number;
+  };
   now: number;
 };
 
@@ -933,6 +957,165 @@ function checkAiCompute(snapshot: ShieldSnapshot): {
   };
 }
 
+function checkGameServers(snapshot: ShieldSnapshot): {
+  check: ShieldCheck;
+  findings: ShieldFinding[];
+} {
+  const game = snapshot.gameServers;
+  const findings: ShieldFinding[] = [];
+  if (!game) {
+    return {
+      check: {
+        id: 'game-servers',
+        name: 'YSD Game Servers',
+        detail: 'Game Server security state was not sampled',
+        state: 'passed',
+      },
+      findings,
+    };
+  }
+
+  if (game.total > 0 && game.eligibleOnlineNodes === 0) {
+    findings.push({
+      code: 'game-no-eligible-node',
+      title: 'Game Servers have no eligible local node',
+      detail: `${game.total} server${game.total === 1 ? ' is' : 's are'} recorded, but no current outbound-only node is online with Java capacity.`,
+      resource: 'game-servers/nodes',
+      severity: 'medium',
+      remediation:
+        'Restore the assigned node with the current agent and supported Java runtime, or leave the local server stopped.',
+    });
+  }
+  if (game.staleNodes + game.revokedNodes > 0) {
+    findings.push({
+      code: 'game-node-readiness',
+      title: 'Game Server nodes need attention',
+      detail: `${game.staleNodes} stale · ${game.revokedNodes} revoked. Revoked local processes are not remotely controlled.`,
+      resource: 'game-servers/nodes',
+      severity: game.revokedNodes > 0 ? 'high' : 'medium',
+      remediation:
+        'Confirm revoked agents are stopped locally and restore signed heartbeats only on machines that should remain trusted.',
+    });
+  }
+  if (game.unexpectedExposure > 0) {
+    findings.push({
+      code: 'game-unexpected-network-exposure',
+      title: 'Unexpected Game Server network exposure',
+      detail: `${game.unexpectedExposure} server${game.unexpectedExposure === 1 ? ' no longer binds' : 's no longer bind'} only to the private localhost policy.`,
+      resource: 'game-servers/network',
+      severity: 'critical',
+      remediation:
+        'Stop the server, restore server-ip=127.0.0.1 and RCON disabled, and inspect any manual router or firewall changes.',
+    });
+  }
+  if (game.onlineModeDisabled > 0) {
+    findings.push({
+      code: 'game-online-mode-disabled',
+      title: 'Minecraft identity verification is disabled',
+      detail: `${game.onlineModeDisabled} server${game.onlineModeDisabled === 1 ? ' has' : 's have'} online-mode disabled.`,
+      resource: 'game-servers/config',
+      severity: 'high',
+      remediation:
+        'Enable online-mode unless a deliberate, reviewed local-only test requires otherwise.',
+    });
+  }
+  if (game.whitelistDisabled > 0) {
+    findings.push({
+      code: 'game-whitelist-disabled',
+      title: 'Minecraft whitelist is disabled',
+      detail: `${game.whitelistDisabled} server${game.whitelistDisabled === 1 ? ' accepts' : 's accept'} any authenticated player that can reach its locally configured network.`,
+      resource: 'game-servers/config',
+      severity: 'low',
+      remediation:
+        'Enable and enforce the whitelist for private communities, then add players through the bounded interface.',
+    });
+  }
+
+  const integrity =
+    game.unverifiedBinaries +
+    game.corruptedBackups +
+    game.unsignedJobs +
+    game.forgedClaims +
+    game.replayedJobs;
+  if (integrity > 0) {
+    findings.push({
+      code: 'game-integrity-failure',
+      title: 'Game Server job, binary, or backup integrity failed',
+      detail: `${game.unverifiedBinaries} unverified binary · ${game.corruptedBackups} corrupted backup · ${game.unsignedJobs} unsigned · ${game.forgedClaims} forged · ${game.replayedJobs} replayed.`,
+      resource: 'game-servers/security',
+      severity: 'critical',
+      remediation:
+        'Stop affected servers, revoke suspect node credentials, refuse damaged backups, and reprovision only from verified Mojang metadata.',
+    });
+  }
+  if (game.zeroModeBypass + game.payloadAbuse > 0) {
+    findings.push({
+      code: 'game-execution-boundary-violation',
+      title: 'Game Server execution boundary abuse was blocked',
+      detail: `${game.zeroModeBypass} Zero Mode/provider bypass · ${game.payloadAbuse} command, path, URL, tunnel, or malformed action event.`,
+      resource: 'game-servers/security',
+      severity: 'critical',
+      remediation:
+        'Review the initiating account and node audit trail. Keep fixed Java arguments, private exposure, and local-node provider enforcement unchanged.',
+    });
+  }
+  if (game.revokedActivity > 0) {
+    findings.push({
+      code: 'game-revoked-node-activity',
+      title: 'A revoked node had Game Server activity',
+      detail: `${game.revokedActivity} revoked-node event${game.revokedActivity === 1 ? ' was' : 's were'} blocked or recorded in the last day.`,
+      resource: 'game-servers/nodes',
+      severity: 'high',
+      remediation:
+        'Confirm the old agent and any local Java process are handled directly on that machine. Its erased credential remains unusable.',
+    });
+  }
+
+  const operations =
+    game.outdatedVersions +
+    game.excessiveRam +
+    game.crashLoops +
+    game.unsafeConfig +
+    game.expiredLeases +
+    game.suspiciousVolume +
+    game.resourceExhaustion;
+  if (operations > 0) {
+    findings.push({
+      code: 'game-operational-anomaly',
+      title: 'Game Server workload anomalies need review',
+      detail: `${game.outdatedVersions} outdated · ${game.excessiveRam} excessive RAM · ${game.crashLoops} crash loop · ${game.unsafeConfig} unsafe config · ${game.expiredLeases} stale lease · ${game.suspiciousVolume} suspicious volume · ${game.resourceExhaustion} resource event.`,
+      resource: 'game-servers/operations',
+      severity:
+        game.excessiveRam > 0 ||
+        game.crashLoops > 0 ||
+        game.unsafeConfig > 0 ||
+        game.expiredLeases > 0 ||
+        game.suspiciousVolume > 0
+          ? 'high'
+          : 'medium',
+      remediation:
+        'Inspect lifecycle history and node capacity, update the allowlisted release, and keep crash-loop, lease, RAM, disk, and config guards enforced.',
+    });
+  }
+
+  return {
+    check: {
+      id: 'game-servers',
+      name: 'YSD Game Servers',
+      detail: `${game.total} local Vanilla server${game.total === 1 ? '' : 's'} · private default · verified downloads · signed bounded actions · $0 platform hosting`,
+      state: findings.some(
+        (finding) =>
+          finding.severity === 'critical' || finding.severity === 'high',
+      )
+        ? 'failed'
+        : findings.length > 0
+          ? 'review'
+          : 'passed',
+    },
+    findings,
+  };
+}
+
 /** Runs every rule against a snapshot and scores the result. */
 export function runShieldRules(snapshot: ShieldSnapshot): ShieldReport {
   const results = [
@@ -943,6 +1126,7 @@ export function runShieldRules(snapshot: ShieldSnapshot): ShieldReport {
     checkStorage(snapshot),
     checkNodes(snapshot),
     checkAiCompute(snapshot),
+    checkGameServers(snapshot),
     checkSurface(snapshot),
     checkHardening(snapshot),
   ];

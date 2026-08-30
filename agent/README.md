@@ -4,12 +4,12 @@ The agent turns a machine you own into a YSD Compute Node. It opens no port and
 runs no listener: heartbeat, job polling, claims, and completion all travel as
 outbound HTTPS requests to the existing Worker.
 
-Phase 4 executes diagnostics plus reviewed `ai.inference` and
-`ai.model.acquire` jobs. It speaks only to Ollama on `127.0.0.1:11434` or a
-llama.cpp server on `127.0.0.1:8080`. Job payloads cannot replace those origins,
-select a path, provide a model URL, or execute a command. The runtime does not
-import `child_process`, evaluate code, or expose a generic shell handler. Game
-Server values remain contracts only and are never executed.
+Phase 5 executes diagnostics, reviewed `ai.inference` and `ai.model.acquire`
+jobs, and narrow Minecraft Java Game Server actions. AI speaks only to Ollama on
+`127.0.0.1:11434` or a llama.cpp server on `127.0.0.1:8080`. Game Server
+downloads use only reviewed Mojang HTTPS hosts and launch `java` with fixed
+arguments and `shell=false`. No job can choose an executable, command, script,
+filesystem path, JVM argument, provider, tunnel, or network destination.
 
 ## Pair
 
@@ -43,5 +43,13 @@ if verification fails.
 
 Set `YSD_NODE_GPU` to a GPU model name and `YSD_NODE_GPU_VRAM_BYTES` to its VRAM
 in bytes when you want the scheduler to enforce a GPU model requirement. Set
-`YSD_NODE_DOCKER=true` only to advertise the inactive Game Server capability;
-it does not grant execution access.
+`YSD_NODE_DOCKER=true` only when you want to advertise Docker availability; it
+is not used by the Game Server runtime.
+
+Minecraft Java requires a supported local Java runtime. Accept the Minecraft
+EULA explicitly in the Game Servers create form; the agent never accepts it on
+your behalf. Each server is stored below `.ysd-game-servers/<workspace>/<server>`
+beside the encrypted agent credential. Worlds, complete logs, and checksum-
+verified backups never leave that machine. The agent opens no port, configures
+no UPnP rule, and creates no tunnel; any network access is a separate manual
+decision by the machine owner.

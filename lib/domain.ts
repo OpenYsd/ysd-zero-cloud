@@ -7,6 +7,10 @@ import type {
   NodeMetrics,
   NodeStatus,
 } from './nodes.ts';
+import type {
+  GameServerStatus,
+  MinecraftProperties,
+} from './game-servers.ts';
 
 /**
  * The shapes that cross the server/client boundary.
@@ -66,7 +70,8 @@ export type LogSource =
   | 'storage'
   | 'networking'
   | 'node'
-  | 'ai';
+  | 'ai'
+  | 'game-server';
 
 export const LOG_LEVELS = ['INFO', 'WARN', 'ERROR'] as const;
 
@@ -82,6 +87,7 @@ export const LOG_SOURCES = [
   'networking',
   'node',
   'ai',
+  'game-server',
 ] as const;
 
 export type StorageObject = {
@@ -278,6 +284,100 @@ export type AiState = {
   projectedMonthlyCost: 0;
 };
 
+export type GameServer = {
+  id: string;
+  nodeId: string;
+  nodeName: string;
+  nodeStatus: NodeStatus;
+  name: string;
+  game: 'minecraft-java';
+  serverType: 'vanilla';
+  version: string;
+  status: GameServerStatus;
+  desiredStatus: 'running' | 'stopped';
+  ramMb: number;
+  cpuCores: number;
+  diskQuotaBytes: number;
+  port: number;
+  exposurePolicy: 'private';
+  observedExposure: 'private' | 'unexpected';
+  playerCount: number;
+  players: string[];
+  worlds: string[];
+  cpuLoadPercent: number | null;
+  memoryUsedBytes: number | null;
+  uptimeSeconds: number;
+  onlineMode: boolean;
+  whitelistEnabled: boolean;
+  config: MinecraftProperties;
+  binaryHash: string | null;
+  binaryVerified: boolean;
+  crashCount: number;
+  crashLoop: boolean;
+  lastError: string | null;
+  lastStatusAt: number | null;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type GameServerAction = {
+  id: string;
+  serverId: string;
+  jobId: string;
+  kind: string;
+  state: NodeJobState;
+  requestedBy: string;
+  error: string | null;
+  createdAt: number;
+  updatedAt: number;
+  completedAt: number | null;
+};
+
+export type GameServerBackup = {
+  id: string;
+  serverId: string;
+  name: string;
+  state: 'creating' | 'ready' | 'corrupted' | 'failed' | 'deleted';
+  sizeBytes: number;
+  checksum: string | null;
+  fileCount: number;
+  error: string | null;
+  createdAt: number;
+  verifiedAt: number | null;
+  restoredAt: number | null;
+};
+
+export type GameServerLog = {
+  id: string;
+  serverId: string;
+  level: 'INFO' | 'WARN' | 'ERROR';
+  message: string;
+  createdAt: number;
+};
+
+export type GameServersState = {
+  servers: GameServer[];
+  nodes: ComputeNode[];
+  actions: GameServerAction[];
+  backups: GameServerBackup[];
+  logs: GameServerLog[];
+  summary: {
+    total: number;
+    running: number;
+    stopped: number;
+    attention: number;
+    players: number;
+    allocatedRamMb: number;
+    localBackupBytes: number;
+  };
+  supportedGames: readonly ['minecraft-java'];
+  supportedServerTypes: readonly ['vanilla'];
+  localExecutionOnly: true;
+  defaultExposure: 'private';
+  zeroModeEnforced: true;
+  projectedMonthlyCost: 0;
+};
+
 export type DeploymentState = 'planned' | 'blocked';
 
 export type Deployment = {
@@ -390,6 +490,7 @@ export const LIVE_SECTIONS: readonly Section[] = [
   'networking',
   'nodes',
   'ai',
+  'game-servers',
 ];
 
 export function isLiveSection(section: Section): boolean {

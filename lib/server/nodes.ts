@@ -18,6 +18,15 @@ import type {
   NodeSecurityEvent,
 } from '@/lib/domain';
 import {
+  GAME_SERVER_LIMITS,
+  GAME_SERVER_STATUSES,
+  gameServerLeaseDuration,
+  parseGameServerSnapshots,
+  redactGameLogLine,
+  validateGameServerJobPayload,
+  type GameServerStatus,
+} from '@/lib/game-servers';
+import {
   CURRENT_AGENT_VERSION,
   MINIMUM_AGENT_VERSION,
   NODE_PROTOCOL_VERSION,
@@ -172,6 +181,12 @@ function capabilitiesFromRow(value: string): NodeCapabilities {
     disk: { totalBytes: 0, freeBytes: 0 },
     docker: { available: false },
     ai: { runtimes: [], cachedModels: [], maxConcurrentJobs: 1 },
+    gameServers: {
+      minecraftJavaAvailable: false,
+      javaVersion: null,
+      activeServers: 0,
+      maxConcurrentServers: 1,
+    },
     contracts: { ai: false, gameServers: false },
   };
 }
@@ -346,6 +361,34 @@ function jobEligibleForNode(
   payload: Record<string, unknown>,
   capabilities: NodeCapabilities,
 ): boolean {
+  if (job.type.startsWith('game-server.')) {
+    const validated = validateGameServerJobPayload(job.type, payload);
+    if (!validated.ok) return false;
+    const operation = validated.payload.operation;
+    if (
+      job.type === 'game-server.lifecycle' &&
+      (operation === 'create' || operation === 'start' || operation === 'restart')
+    ) {
+      if (
+        !capabilities.gameServers.minecraftJavaAvailable ||
+        capabilities.gameServers.activeServers >=
+          capabilities.gameServers.maxConcurrentServers
+      ) {
+        return false;
+      }
+      if (operation === 'create') {
+        const ramBytes = (validated.payload.ramMb as number) * 1024 ** 2;
+        const diskBytes = validated.payload.diskQuotaBytes as number;
+        return (
+          capabilities.memory.freeBytes >=
+            ramBytes + GAME_SERVER_LIMITS.memoryReserveBytes &&
+          capabilities.disk.freeBytes >=
+            diskBytes + GAME_SERVER_LIMITS.diskReserveBytes
+        );
+      }
+    }
+    return true;
+  }
   if (job.type !== 'ai.inference' && job.type !== 'ai.model.acquire') {
     return true;
   }
@@ -726,11 +769,165 @@ async function pruneNodeHistory(nodeId: string, now: number): Promise<void> {
   ]);
 }
 
+async function pruneGameServerLogs(
+  workspaceId: string,
+  nodeId: string,
+  now: number,
+): Promise<void> {
+  const database = await db();
+  await database.batch([
+    database
+      .prepare(
+        `DELETE FROM game_server_log
+         WHERE workspaceId = ? AND nodeId = ? AND createdAt < ?`,
+      )
+      .bind(workspaceId, nodeId, now - 7 * 24 * 60 * 60_000),
+    database
+      .prepare(
+        `DELETE FROM game_server_log
+         WHERE workspaceId = ? AND nodeId = ?
+           AND id NOT IN (
+             SELECT id FROM game_server_log
+             WHERE workspaceId = ? AND nodeId = ?
+             ORDER BY createdAt DESC LIMIT 2000
+           )`,
+      )
+      .bind(workspaceId, nodeId, workspaceId, nodeId),
+  ]);
+}
+
+async function syncGameServerSnapshots(input: {
+  workspaceId: string;
+  nodeId: string;
+  value: unknown;
+  now: number;
+}): Promise<boolean> {
+  const snapshots = parseGameServerSnapshots(input.value);
+  if (!snapshots) return false;
+  const rows = await query<{ id: string }>(
+    `SELECT id FROM game_server
+     WHERE workspaceId = ? AND nodeId = ? AND deletedAt IS NULL`,
+    input.workspaceId,
+    input.nodeId,
+  );
+  const known = new Set(rows.map((row) => row.id));
+  const database = await db();
+  const statements: D1PreparedStatement[] = [];
+  for (const snapshot of snapshots) {
+    if (
+      Math.abs(snapshot.observedAt - input.now) > NODE_TIMING.requestSkewMs
+    ) {
+      statements.push(
+        database
+          .prepare(
+            `INSERT INTO node_security_event
+             (id, workspaceId, nodeId, type, severity, detail,
+              networkFingerprint, createdAt)
+             VALUES (?, ?, ?, 'game-stale-server-snapshot', 'medium', ?, NULL, ?)`,
+          )
+          .bind(
+            createId('nsec'),
+            input.workspaceId,
+            input.nodeId,
+            `The node reported an out-of-window snapshot for ${snapshot.serverId}.`,
+            input.now,
+          ),
+      );
+      continue;
+    }
+    if (!known.has(snapshot.serverId)) {
+      statements.push(
+        database
+          .prepare(
+            `INSERT INTO node_security_event
+             (id, workspaceId, nodeId, type, severity, detail,
+              networkFingerprint, createdAt)
+             VALUES (?, ?, ?, 'game-unknown-server-snapshot', 'medium', ?, NULL, ?)`,
+          )
+          .bind(
+            createId('nsec'),
+            input.workspaceId,
+            input.nodeId,
+            `The node reported unknown local server ${snapshot.serverId}.`,
+            input.now,
+          ),
+      );
+      continue;
+    }
+    statements.push(
+      database
+        .prepare(
+          `UPDATE game_server
+           SET status = ?, observedExposure = ?, playerCount = ?, playersJson = ?,
+               cpuLoadPercent = ?, memoryUsedBytes = ?, uptimeSeconds = ?,
+               binaryHash = ?, binaryVerified = ?, crashCount = ?, crashLoop = ?,
+               lastError = CASE WHEN ? = 1
+                 THEN 'Crash-loop protection stopped automatic restarts.'
+                 WHEN ? IN ('running','stopped') THEN NULL ELSE lastError END,
+               lastStatusAt = ?, updatedAt = ?
+           WHERE workspaceId = ? AND nodeId = ? AND id = ? AND deletedAt IS NULL`,
+        )
+        .bind(
+          snapshot.status,
+          snapshot.exposure,
+          snapshot.playerCount,
+          stableJson(snapshot.players),
+          snapshot.cpuLoadPercent,
+          snapshot.memoryUsedBytes,
+          snapshot.uptimeSeconds,
+          snapshot.binaryHash,
+          snapshot.binaryVerified ? 1 : 0,
+          snapshot.crashCount,
+          snapshot.crashLoop ? 1 : 0,
+          snapshot.crashLoop ? 1 : 0,
+          snapshot.status,
+          snapshot.observedAt,
+          input.now,
+          input.workspaceId,
+          input.nodeId,
+          snapshot.serverId,
+        ),
+    );
+    for (const message of snapshot.logTail.slice(-2)) {
+      statements.push(
+        database
+          .prepare(
+            `INSERT INTO game_server_log
+             (id, workspaceId, serverId, nodeId, level, message, createdAt)
+             SELECT ?, ?, ?, ?, ?, ?, ?
+             WHERE NOT EXISTS (
+               SELECT 1 FROM game_server_log
+               WHERE workspaceId = ? AND serverId = ? AND message = ?
+                 AND createdAt >= ?
+             )`,
+          )
+          .bind(
+            createId('glog'),
+            input.workspaceId,
+            snapshot.serverId,
+            input.nodeId,
+            /error|failed|crash/i.test(message) ? 'WARN' : 'INFO',
+            message,
+            input.now,
+            input.workspaceId,
+            snapshot.serverId,
+            message,
+            input.now - 10 * 60_000,
+          ),
+      );
+    }
+  }
+  if (statements.length > 0) await database.batch(statements);
+  await pruneGameServerLogs(input.workspaceId, input.nodeId, input.now);
+  return true;
+}
+
 export async function recordHeartbeat(input: {
   context: AgentContext;
   capabilities: unknown;
   metrics: unknown;
   agentVersion: unknown;
+  gameServers?: unknown;
 }): Promise<
   | { ok: true; status: 'online'; serverTime: number }
   | { ok: false; status: number; error: string }
@@ -747,7 +944,8 @@ export async function recordHeartbeat(input: {
   }
   const capabilities = parseCapabilities(input.capabilities);
   const metrics = parseMetrics(input.metrics);
-  if (!capabilities || !metrics) {
+  const snapshots = parseGameServerSnapshots(input.gameServers ?? []);
+  if (!capabilities || !metrics || !snapshots) {
     return {
       ok: false,
       status: 400,
@@ -790,6 +988,12 @@ export async function recordHeartbeat(input: {
     capabilities,
     now,
   );
+  await syncGameServerSnapshots({
+    workspaceId: input.context.node.workspaceId,
+    nodeId: input.context.node.id,
+    value: snapshots,
+    now,
+  });
   await pruneNodeHistory(input.context.node.id, now);
   return { ok: true, status: 'online', serverTime: now };
 }
@@ -798,6 +1002,41 @@ async function requeueExpiredJobs(
   workspaceId: string,
   now: number,
 ): Promise<void> {
+  const expiredGameJobs = await query<JobRow>(
+    `SELECT * FROM node_job
+     WHERE workspaceId = ? AND type LIKE 'game-server.%'
+       AND state IN ('leased','cancelling') AND leaseExpiresAt <= ?`,
+    workspaceId,
+    now,
+  );
+  for (const job of expiredGameJobs) {
+    const state: NodeJobState =
+      job.state === 'cancelling'
+        ? 'cancelled'
+        : job.attempts < job.maxAttempts
+          ? 'queued'
+          : 'timed_out';
+    await recordGameServerJobOutcome({
+      job,
+      state,
+      result: null,
+      error:
+        state === 'cancelled'
+          ? 'Cancellation confirmed at lease expiry.'
+          : 'Lease expired before completion.',
+      now,
+    });
+    await execute(
+      `INSERT INTO node_security_event
+       (id, workspaceId, nodeId, type, severity, detail, networkFingerprint, createdAt)
+       VALUES (?, ?, ?, 'game-expired-lease', 'medium', ?, NULL, ?)`,
+      createId('nsec'),
+      workspaceId,
+      job.assignedNodeId,
+      `A Game Server lifecycle lease expired. Job ${job.id}.`,
+      now,
+    );
+  }
   const database = await db();
   await database.batch([
     database
@@ -867,7 +1106,11 @@ export async function claimNextJob(
     if (!jobEligibleForNode(job, payload, capabilities)) continue;
 
     const leaseId = createId('lease');
-    const leaseExpiresAt = now + aiLeaseDuration(job.type, payload);
+    const leaseExpiresAt =
+      now +
+      (job.type.startsWith('game-server.')
+        ? gameServerLeaseDuration(job.type, payload)
+        : aiLeaseDuration(job.type, payload));
     const claim: SignedJobClaim = {
       protocolVersion: NODE_PROTOCOL_VERSION,
       jobId: job.id,
@@ -1113,6 +1356,253 @@ async function recordAiJobOutcome(input: {
   }
 }
 
+function safeGamePlayers(value: unknown): string[] | null {
+  if (!Array.isArray(value) || value.length > 500) return null;
+  const players = value.filter(
+    (player): player is string =>
+      typeof player === 'string' && /^[A-Za-z0-9_]{1,16}$/.test(player),
+  );
+  return players.length === value.length ? players : null;
+}
+
+function safeGameStatus(value: unknown): GameServerStatus | null {
+  return GAME_SERVER_STATUSES.includes(value as GameServerStatus)
+    ? (value as GameServerStatus)
+    : null;
+}
+
+async function recordGameServerJobOutcome(input: {
+  job: JobRow;
+  state: NodeJobState;
+  result: Record<string, unknown> | null;
+  error: string | null;
+  now: number;
+}): Promise<void> {
+  if (!input.job.type.startsWith('game-server.')) return;
+  const payload = safeJsonRecord(input.job.payload);
+  const serverId =
+    typeof payload?.serverId === 'string' ? payload.serverId : null;
+  if (!serverId) return;
+
+  await execute(
+    `UPDATE game_server_action
+     SET state = ?, error = ?, updatedAt = ?,
+         completedAt = CASE WHEN ? IN ('queued','leased','cancelling')
+           THEN NULL ELSE ? END
+     WHERE workspaceId = ? AND jobId = ?`,
+    input.state,
+    input.error,
+    input.now,
+    input.state,
+    input.now,
+    input.job.workspaceId,
+    input.job.id,
+  );
+
+  if (input.state === 'queued') return;
+  if (input.state !== 'succeeded') {
+    await execute(
+      `UPDATE game_server
+       SET status = CASE WHEN status IN ('running','stopped') THEN status ELSE 'error' END,
+           lastError = ?, updatedAt = ?
+       WHERE workspaceId = ? AND id = ? AND deletedAt IS NULL`,
+      input.error ?? `Game Server action ${input.state}.`,
+      input.now,
+      input.job.workspaceId,
+      serverId,
+    );
+    if (input.job.type === 'game-server.backup' && payload?.operation === 'create') {
+      await execute(
+        `UPDATE game_server_backup SET state = 'failed', error = ?, updatedAt = ?
+         WHERE workspaceId = ? AND id = ? AND serverId = ?`,
+        input.error ?? 'Local backup creation failed.',
+        input.now,
+        input.job.workspaceId,
+        payload.backupId,
+        serverId,
+      );
+    }
+    return;
+  }
+
+  const resultStatus = safeGameStatus(input.result?.status);
+  const players = safeGamePlayers(input.result?.players);
+  const playerCount = players?.length ?? null;
+  const binaryHash =
+    typeof input.result?.binaryHash === 'string' &&
+    /^sha256:[a-f0-9]{64}$/.test(input.result.binaryHash)
+      ? input.result.binaryHash
+      : null;
+  const exposure =
+    input.result?.exposure === 'private' ||
+    input.result?.exposure === 'unexpected'
+      ? input.result.exposure
+      : null;
+  let desiredStatus: 'running' | 'stopped' | null = null;
+  let persistedStatus = resultStatus;
+  if (input.job.type === 'game-server.lifecycle') {
+    if (payload?.operation === 'start' || payload?.operation === 'restart') {
+      desiredStatus = 'running';
+      persistedStatus ??= 'running';
+    } else if (
+      payload?.operation === 'create' ||
+      payload?.operation === 'stop'
+    ) {
+      desiredStatus = 'stopped';
+      persistedStatus ??= 'stopped';
+    } else if (payload?.operation === 'delete') {
+      await execute(
+        `UPDATE game_server SET status = 'deleted', desiredStatus = 'stopped',
+            deletedAt = ?, updatedAt = ?, lastError = NULL
+         WHERE workspaceId = ? AND id = ?`,
+        input.now,
+        input.now,
+        input.job.workspaceId,
+        serverId,
+      );
+    }
+  }
+
+  if (payload?.operation !== 'delete') {
+    await execute(
+      `UPDATE game_server
+       SET status = COALESCE(?, status),
+           desiredStatus = COALESCE(?, desiredStatus),
+           observedExposure = COALESCE(?, observedExposure),
+           playerCount = COALESCE(?, playerCount),
+           playersJson = COALESCE(?, playersJson),
+           uptimeSeconds = COALESCE(?, uptimeSeconds),
+           binaryHash = COALESCE(?, binaryHash),
+           binaryVerified = CASE WHEN ? IS NULL THEN binaryVerified ELSE ? END,
+           crashCount = COALESCE(?, crashCount),
+           crashLoop = CASE WHEN ? IS NULL THEN crashLoop ELSE ? END,
+           lastError = NULL, lastStatusAt = ?, updatedAt = ?
+       WHERE workspaceId = ? AND id = ? AND deletedAt IS NULL`,
+      persistedStatus,
+      desiredStatus,
+      exposure,
+      playerCount,
+      players ? stableJson(players) : null,
+      boundedResultInteger(input.result?.uptimeSeconds),
+      binaryHash,
+      typeof input.result?.binaryVerified === 'boolean'
+        ? 1
+        : null,
+      input.result?.binaryVerified === true ? 1 : 0,
+      boundedResultInteger(input.result?.crashCount, 1_000_000),
+      typeof input.result?.crashLoop === 'boolean'
+        ? 1
+        : null,
+      input.result?.crashLoop === true ? 1 : 0,
+      input.now,
+      input.now,
+      input.job.workspaceId,
+      serverId,
+    );
+  }
+
+  if (input.job.type === 'game-server.config') {
+    await execute(
+      `UPDATE game_server
+       SET port = ?, config = ?, onlineMode = ?, whitelistEnabled = ?,
+           observedExposure = 'private', updatedAt = ?
+       WHERE workspaceId = ? AND id = ? AND deletedAt IS NULL`,
+      payload?.port,
+      stableJson(payload?.properties ?? {}),
+      (payload?.properties as Record<string, unknown> | undefined)?.onlineMode ===
+        true
+        ? 1
+        : 0,
+      (payload?.properties as Record<string, unknown> | undefined)?.whitelist ===
+        true
+        ? 1
+        : 0,
+      input.now,
+      input.job.workspaceId,
+      serverId,
+    );
+  }
+
+  if (input.job.type === 'game-server.backup') {
+    const backupId =
+      typeof payload?.backupId === 'string' ? payload.backupId : null;
+    if (backupId && payload?.operation === 'create') {
+      await execute(
+        `UPDATE game_server_backup
+         SET state = 'ready', sizeBytes = ?, checksum = ?, fileCount = ?,
+             error = NULL, verifiedAt = ?, updatedAt = ?
+         WHERE workspaceId = ? AND serverId = ? AND id = ?`,
+        boundedResultInteger(input.result?.sizeBytes) ?? 0,
+        typeof input.result?.checksum === 'string' &&
+          /^sha256:[a-f0-9]{64}$/.test(input.result.checksum)
+          ? input.result.checksum
+          : null,
+        boundedResultInteger(input.result?.fileCount, 100_000) ?? 0,
+        input.now,
+        input.now,
+        input.job.workspaceId,
+        serverId,
+        backupId,
+      );
+    } else if (backupId && payload?.operation === 'restore') {
+      await execute(
+        `UPDATE game_server_backup SET restoredAt = ?, verifiedAt = ?,
+            error = NULL, updatedAt = ?
+         WHERE workspaceId = ? AND serverId = ? AND id = ? AND deletedAt IS NULL`,
+        input.now,
+        input.now,
+        input.now,
+        input.job.workspaceId,
+        serverId,
+        backupId,
+      );
+    } else if (backupId && payload?.operation === 'delete') {
+      await execute(
+        `UPDATE game_server_backup SET state = 'deleted', deletedAt = ?, updatedAt = ?
+         WHERE workspaceId = ? AND serverId = ? AND id = ?`,
+        input.now,
+        input.now,
+        input.job.workspaceId,
+        serverId,
+        backupId,
+      );
+    }
+  }
+
+  const logs = Array.isArray(input.result?.logs) ? input.result.logs : [];
+  const safeLogs = logs
+    .map(redactGameLogLine)
+    .filter((line): line is string => Boolean(line))
+    .slice(-GAME_SERVER_LIMITS.maximumLogLines);
+  if (safeLogs.length > 0 && input.job.assignedNodeId) {
+    const database = await db();
+    await database.batch(
+      safeLogs.map((message) =>
+        database
+          .prepare(
+            `INSERT INTO game_server_log
+             (id, workspaceId, serverId, nodeId, level, message, createdAt)
+             VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .bind(
+            createId('glog'),
+            input.job.workspaceId,
+            serverId,
+            input.job.assignedNodeId,
+            /error|failed|crash/i.test(message) ? 'WARN' : 'INFO',
+            message,
+            input.now,
+          ),
+      ),
+    );
+    await pruneGameServerLogs(
+      input.job.workspaceId,
+      input.job.assignedNodeId,
+      input.now,
+    );
+  }
+}
+
 export type CompleteJobInput = {
   leaseId: unknown;
   claim: unknown;
@@ -1204,7 +1694,9 @@ export async function completeJob(
   } else if (input.status === 'succeeded') {
     result = sanitizeJobResult(
       input.result,
-      job.type.startsWith('ai.') ? 64 * 1024 : 16_384,
+      job.type.startsWith('ai.') || job.type.startsWith('game-server.')
+        ? 64 * 1024
+        : 16_384,
     );
     if (!result) {
       return {
@@ -1290,6 +1782,13 @@ export async function completeJob(
     }
   }
   await recordAiJobOutcome({ job, state: nextState, result, error, now });
+  await recordGameServerJobOutcome({
+    job,
+    state: nextState,
+    result,
+    error,
+    now,
+  });
   await writeJobEvent({
     workspaceId: context.node.workspaceId,
     nodeId: context.node.id,
@@ -1441,6 +1940,13 @@ export async function revokeNode(input: {
     input.workspaceId,
     input.nodeId,
   );
+  const activeGameServers = await queryOne<{ total: number }>(
+    `SELECT COUNT(*) AS total FROM game_server
+     WHERE workspaceId = ? AND nodeId = ? AND deletedAt IS NULL
+       AND status IN ('starting','running','stopping','restarting')`,
+    input.workspaceId,
+    input.nodeId,
+  );
   const database = await db();
   await database.batch([
     database
@@ -1452,21 +1958,43 @@ export async function revokeNode(input: {
       .bind(now, input.actor, now, input.workspaceId, input.nodeId),
     database
       .prepare(
-        `UPDATE node_job
-         SET state = CASE
+         `UPDATE node_job
+          SET state = CASE
                WHEN state = 'cancelling' THEN 'cancelled'
+               WHEN type LIKE 'game-server.%' THEN 'failed'
                WHEN attempts < maxAttempts THEN 'queued'
                ELSE 'timed_out'
-             END,
+              END,
              assignedNodeId = NULL, leaseId = NULL, leaseExpiresAt = NULL,
              claimSignature = NULL, lastError = 'Assigned node was revoked.',
-             completedAt = CASE
-               WHEN state = 'cancelling' OR attempts >= maxAttempts THEN ?
-               ELSE NULL
-             END,
+              completedAt = CASE
+                WHEN state = 'cancelling' OR type LIKE 'game-server.%'
+                  OR attempts >= maxAttempts THEN ?
+                ELSE NULL
+              END,
              updatedAt = ?
-         WHERE workspaceId = ? AND assignedNodeId = ?
-           AND state IN ('leased','cancelling')`,
+         WHERE workspaceId = ?
+           AND (assignedNodeId = ?
+             OR (type LIKE 'game-server.%' AND targetNodeId = ?))
+           AND state IN ('queued','leased','cancelling')`,
+      )
+      .bind(now, now, input.workspaceId, input.nodeId, input.nodeId),
+    database
+      .prepare(
+        `UPDATE game_server
+         SET status = 'node_revoked',
+             lastError = 'The assigned node was revoked. The local process may still be running, but no further control-plane commands are accepted.',
+             updatedAt = ?
+         WHERE workspaceId = ? AND nodeId = ? AND deletedAt IS NULL`,
+      )
+      .bind(now, input.workspaceId, input.nodeId),
+    database
+      .prepare(
+        `UPDATE game_server_action
+         SET state = 'failed', error = 'The assigned node was revoked.',
+             completedAt = ?, updatedAt = ?
+         WHERE workspaceId = ? AND nodeId = ?
+           AND state IN ('queued','leased','cancelling')`,
       )
       .bind(now, now, input.workspaceId, input.nodeId),
   ]);
@@ -1479,6 +2007,18 @@ export async function revokeNode(input: {
       input.workspaceId,
       input.nodeId,
       `Node was revoked during ${activeAi!.total} active AI job${activeAi!.total === 1 ? '' : 's'}.`,
+      now,
+    );
+  }
+  if ((activeGameServers?.total ?? 0) > 0) {
+    await execute(
+      `INSERT INTO node_security_event
+       (id, workspaceId, nodeId, type, severity, detail, networkFingerprint, createdAt)
+       VALUES (?, ?, ?, 'revoked-node-game-activity', 'high', ?, NULL, ?)`,
+      createId('nsec'),
+      input.workspaceId,
+      input.nodeId,
+      `Node was revoked while ${activeGameServers!.total} Game Server${activeGameServers!.total === 1 ? ' was' : 's were'} active. Local processes are no longer remotely controlled.`,
       now,
     );
   }

@@ -1,9 +1,9 @@
 # YSD Zero Cloud
 
-YSD Zero Cloud is a zero-cost-first cloud operating system. Version `0.5.0` runs authentication,
+YSD Zero Cloud is a zero-cost-first cloud operating system. Version `0.6.0` runs authentication,
 persistence, security scanning, the cost guard, private-object storage policy, network inventory,
-an outbound-only user-owned compute control plane, and local AI scheduling against Cloudflare
-Workers and D1.
+an outbound-only user-owned compute control plane, local AI scheduling, and private Minecraft Java
+server orchestration against Cloudflare Workers and D1.
 
 **Live:** <https://ysd-zero-cloud.ysd-zero-cloud.workers.dev>
 
@@ -33,9 +33,9 @@ deployed Worker's explicit zero-cost configuration.
 | Networking        | Deployed workers.dev origin, TLS, route exposure, and binding inventory       |
 | Nodes             | Paired user-owned agents, signed job leases, heartbeats, metrics, and audit   |
 | YSD AI Compute    | Approved local models, safe scheduling, cancellation, results, and metrics   |
+| Game Servers      | Private Minecraft Java lifecycle, players, backups, logs, and resource guards|
 
-Game Servers remain a design preview with a capability contract only. Storage, Networking, Nodes,
-and YSD AI Compute are live surfaces.
+Storage, Networking, Nodes, YSD AI Compute, and Game Servers are live surfaces.
 The current Cloudflare account returns `10042: Please enable R2`, so Storage honestly renders the
 implemented adapter as unavailable and refuses uploads; no bucket, public endpoint, or billable
 resource is created while that account-level gate remains.
@@ -158,16 +158,16 @@ completion. Cloudflare never performs the workload compute.
 - Claims bind the workspace, node, job type, payload digest, lease id, expiry, and attempt. Expired
   leases return to the queue up to three attempts, then become timed out. An idempotency key stops a
   browser retry from creating a duplicate job.
-- The agent has no `child_process` dependency, `eval`, generic script, or shell handler. It runs
-  diagnostics and reviewed local AI handlers only. Ollama and llama.cpp use fixed loopback APIs;
-  model acquisition uses an approved catalog and explicit operator consent. Game Server execution
-  remains disabled.
+- The agent has no `eval`, generic script, command, or shell handler. It runs diagnostics, reviewed
+  local AI handlers, and a fixed Minecraft Java invocation with `shell=false`. Ollama and llama.cpp
+  use fixed loopback APIs; model acquisition uses an approved catalog and explicit operator consent.
 - The local credential file is AES-256-GCM encrypted with a passphrase that never leaves the node.
   See `agent/README.md` for pairing and service-run instructions.
 
 YSD Shield inspects stale and offline nodes, minimum agent version, revoked-node activity, unsigned
 jobs, stale leases, forged or replayed AI claims, model integrity, forbidden providers, payload
-abuse, resource pressure, and anomalous volume.
+abuse, resource pressure, anomalous volume, private Game Server exposure, backup integrity, crash
+loops, unsafe properties, and lifecycle activity after revocation.
 
 ## YSD AI Compute
 
@@ -181,6 +181,23 @@ The initial reviewed catalog contains small Ollama library models and a generic 
 llama.cpp local model. Downloads are optional, explicitly approved, disk-guarded, and remain on the
 user's node. No Workers AI binding, paid queue, GPU service, billing relationship, or provider
 fallback is configured.
+
+## YSD Game Servers
+
+Game Servers schedules allowlisted Minecraft Java Vanilla releases on a paired machine owned by the
+operator. The Worker and D1 retain only tenant-scoped control metadata, bounded redacted log tails,
+signed action state, and local-backup checksums. Server binaries, worlds, full logs, and backups stay
+inside a per-workspace, per-server directory on the node.
+
+Lifecycle actions are limited to create, start, stop, restart, status, and delete. Player management
+is limited to list, whitelist, kick, op, and deop; there is no console textbox. Configuration is a
+fixed safe `server.properties` shape. Downloads can reach only Mojang's reviewed HTTPS metadata and
+binary hosts, the binary is hash-verified, Java runs with fixed arguments and no shell, and symlink or
+path traversal boundaries fail closed. RAM, disk reserve, port ownership, concurrency, crash-loop,
+lease, replay, revocation, and idempotency guards apply before local work.
+
+No public port, UPnP rule, tunnel, paid provider, R2 bucket, or inbound agent listener is created.
+Joining a server remains a deliberate local-networking choice made outside YSD.
 
 ## Security
 
@@ -383,5 +400,5 @@ Workers output.
 1. Execute accepted plans through a deploy pipeline rather than recording them.
 2. Enable the already-implemented private R2 binding only if Cloudflare confirms `$0` account activation.
 3. Add organizations, roles, and per-member audit scoping.
-4. Add reviewed Game Server handlers without adding a generic shell or inbound network surface.
+4. Add another game only after it has an equally narrow reviewed runtime contract.
 5. Add owned-domain inventory only after a domain exists; keep workers.dev as the zero-cost default.

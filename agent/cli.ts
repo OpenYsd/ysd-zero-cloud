@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import os from 'node:os';
+import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
 import {
@@ -12,6 +13,10 @@ import {
   type SignedJobClaim,
 } from '../lib/nodes.ts';
 import { loadCredentials, saveCredentials } from './credentials.ts';
+import {
+  collectGameServerSnapshots,
+  shutdownManagedGameServers,
+} from './game-runtime.ts';
 import {
   collectCapabilities,
   collectMetrics,
@@ -67,6 +72,15 @@ function parseArguments(): Arguments {
   };
 }
 
+class ControlPlaneError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
 async function jsonRequest<T>(url: string, init: RequestInit): Promise<T> {
   const timeout = AbortSignal.timeout(30_000);
   const response = await fetch(url, {
@@ -75,7 +89,10 @@ async function jsonRequest<T>(url: string, init: RequestInit): Promise<T> {
   });
   const body = (await response.json()) as T & { error?: string };
   if (!response.ok) {
-    throw new Error(body.error ?? `Control plane answered ${response.status}.`);
+    throw new ControlPlaneError(
+      response.status,
+      body.error ?? `Control plane answered ${response.status}.`,
+    );
   }
   return body;
 }
@@ -152,6 +169,8 @@ async function signedPost<T>(input: {
 async function heartbeat(
   origin: string,
   token: string,
+  workspaceId: string,
+  gameRootDirectory: string,
   runningJobs = 0,
 ): Promise<void> {
   await signedPost({
@@ -162,6 +181,10 @@ async function heartbeat(
       agentVersion: CURRENT_AGENT_VERSION,
       capabilities: await collectCapabilities(),
       metrics: collectMetrics(runningJobs),
+      gameServers: await collectGameServerSnapshots(
+        gameRootDirectory,
+        workspaceId,
+      ),
     },
   });
 }
@@ -172,6 +195,8 @@ async function monitorClaim(input: {
   claim: SignedJobClaim;
   execution: AbortController;
   signal: AbortSignal;
+  workspaceId: string;
+  gameRootDirectory: string;
 }): Promise<void> {
   let lastHeartbeat = Date.now();
   while (!input.signal.aborted && !input.execution.signal.aborted) {
@@ -191,7 +216,13 @@ async function monitorClaim(input: {
         return;
       }
       if (Date.now() - lastHeartbeat >= NODE_TIMING.heartbeatMs) {
-        await heartbeat(input.origin, input.token, 1);
+        await heartbeat(
+          input.origin,
+          input.token,
+          input.workspaceId,
+          input.gameRootDirectory,
+          1,
+        );
         lastHeartbeat = Date.now();
       }
       await delay(1_500, undefined, { signal: input.signal });
@@ -204,7 +235,12 @@ async function monitorClaim(input: {
   }
 }
 
-async function poll(origin: string, token: string): Promise<boolean> {
+async function poll(
+  origin: string,
+  token: string,
+  workspaceId: string,
+  gameRootDirectory: string,
+): Promise<boolean> {
   const response = await signedPost<{
     job: { claim: SignedJobClaim; signature: string } | null;
   }>({
@@ -223,6 +259,8 @@ async function poll(origin: string, token: string): Promise<boolean> {
     claim: response.job.claim,
     execution,
     signal: monitor.signal,
+    workspaceId,
+    gameRootDirectory,
   });
   let completed: Awaited<ReturnType<typeof executeSignedJob>>;
   try {
@@ -232,6 +270,7 @@ async function poll(origin: string, token: string): Promise<boolean> {
       signature: response.job.signature,
       capabilities,
       signal: execution.signal,
+      gameRootDirectory,
     });
   } finally {
     monitor.abort('job-complete');
@@ -264,22 +303,49 @@ async function run(arguments_: Arguments): Promise<never> {
   console.log(
     `YSD Node Agent ${CURRENT_AGENT_VERSION} started in outbound-only mode.`,
   );
+  const gameRootDirectory = path.resolve(
+    path.dirname(arguments_.configPath),
+    '.ysd-game-servers',
+  );
+  console.log(
+    'Game Servers stay private on this machine unless you change local networking yourself.',
+  );
   let lastHeartbeat = 0;
   let backoff = 2_000;
   for (;;) {
     try {
       const now = Date.now();
       if (now - lastHeartbeat >= NODE_TIMING.heartbeatMs) {
-        await heartbeat(credentials.origin, credentials.token);
+        await heartbeat(
+          credentials.origin,
+          credentials.token,
+          credentials.workspaceId,
+          gameRootDirectory,
+        );
         lastHeartbeat = Date.now();
       }
-      const worked = await poll(credentials.origin, credentials.token);
+      const worked = await poll(
+        credentials.origin,
+        credentials.token,
+        credentials.workspaceId,
+        gameRootDirectory,
+      );
       backoff = 2_000;
       if (!worked) await delay(5_000);
     } catch (error) {
       const message =
         error instanceof Error ? error.message : 'Unknown agent error.';
       console.error(`Control-plane connection failed: ${message}`);
+      if (
+        error instanceof ControlPlaneError &&
+        (error.status === 401 || error.status === 403)
+      ) {
+        await shutdownManagedGameServers();
+        throw new Error(
+          'Node authorization was rejected; managed Game Servers were stopped locally.',
+          { cause: error },
+        );
+      }
       await delay(backoff);
       backoff = Math.min(30_000, backoff * 2);
     }

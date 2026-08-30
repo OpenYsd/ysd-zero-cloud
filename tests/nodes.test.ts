@@ -48,6 +48,12 @@ void test('capabilities and metrics accept bounded hardware facts', () => {
         cachedModels: [],
         maxConcurrentJobs: 1,
       },
+      gameServers: {
+        minecraftJavaAvailable: true,
+        javaVersion: 'openjdk version 21',
+        activeServers: 1,
+        maxConcurrentServers: 4,
+      },
       contracts: { ai: true, gameServers: true },
     }),
     {
@@ -68,6 +74,12 @@ void test('capabilities and metrics accept bounded hardware facts', () => {
         cachedModels: [],
         maxConcurrentJobs: 1,
       },
+      gameServers: {
+        minecraftJavaAvailable: true,
+        javaVersion: 'openjdk version 21',
+        activeServers: 1,
+        maxConcurrentServers: 4,
+      },
       contracts: { ai: true, gameServers: true },
     },
   );
@@ -82,16 +94,18 @@ void test('capabilities and metrics accept bounded hardware facts', () => {
   );
 });
 
-void test('diagnostics are strict and AI needs its full reviewed contract', () => {
+void test('diagnostics, AI, and Game Servers need their full reviewed contracts', () => {
   assert.equal(validateJob('diagnostic.ping', { message: 'hello' }).ok, true);
   assert.equal(validateJob('diagnostic.snapshot', {}).ok, true);
   assert.equal(validateJob('ai.inference', { prompt: 'x' }).ok, false);
-  assert.deepEqual(validateJob('game-server.lifecycle', {}), {
-    ok: false,
-    status: 409,
-    code: 'placeholder',
-    error: 'Game Server execution remains a Phase 5 API contract only.',
-  });
+  assert.equal(validateJob('game-server.lifecycle', {}).ok, false);
+  assert.equal(
+    validateJob('game-server.lifecycle', {
+      operation: 'status',
+      serverId: `gsv_${'a'.repeat(24)}`,
+    }).ok,
+    true,
+  );
   for (const payload of [
     { shell: 'rm -rf /' },
     { command: 'whoami' },
@@ -228,8 +242,8 @@ void test('credentials use fixed-time digest comparison and version gates', asyn
   const digest = await sha256(TOKEN);
   assert.equal(constantTimeEqual(digest, await sha256(TOKEN)), true);
   assert.equal(constantTimeEqual(digest, await sha256(`${TOKEN}x`)), false);
-  assert.equal(agentVersionSupported('0.2.0'), true);
-  assert.equal(agentVersionSupported('0.1.9'), false);
+  assert.equal(agentVersionSupported('0.3.0'), true);
+  assert.equal(agentVersionSupported('0.2.9'), false);
   assert.equal(agentVersionSupported('not-a-version'), false);
 });
 

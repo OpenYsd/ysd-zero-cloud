@@ -1,5 +1,6 @@
 import os from 'node:os';
 import { statfs } from 'node:fs/promises';
+import path from 'node:path';
 
 import {
   acquireAiModel,
@@ -7,6 +8,10 @@ import {
   executeAiInference,
   type LocalFetch,
 } from './ai-runtime.ts';
+import {
+  discoverGameServerCapabilities,
+  executeGameServerJob,
+} from './game-runtime.ts';
 
 import {
   CURRENT_AGENT_VERSION,
@@ -22,9 +27,9 @@ import {
 /**
  * Local execution runtime.
  *
- * There is intentionally no child_process import. Handlers call built-in Node
- * APIs only, so neither a job payload nor a later UI change can turn this
- * phase into remote shell access.
+ * AI handlers use fixed loopback APIs. Game Server handlers use the fixed Java
+ * executable with shell=false and reviewed arguments. No payload can select an
+ * executable, command, script, path, or network destination.
  */
 
 function nonNegativeEnvironmentBytes(name: string): number | null {
@@ -41,7 +46,10 @@ export async function collectCapabilities(
   const gpuModel = process.env.YSD_NODE_GPU?.trim().slice(0, 128) || null;
   const gpuVramBytes = nonNegativeEnvironmentBytes('YSD_NODE_GPU_VRAM_BYTES');
   const docker = process.env.YSD_NODE_DOCKER?.trim().toLowerCase() === 'true';
-  const ai = await discoverAiCapabilities(fetcher);
+  const [ai, gameServers] = await Promise.all([
+    discoverAiCapabilities(fetcher),
+    discoverGameServerCapabilities(),
+  ]);
   let disk = { totalBytes: 0, freeBytes: 0 };
   try {
     const statistics = await statfs(process.cwd());
@@ -66,9 +74,10 @@ export async function collectCapabilities(
     disk,
     docker: { available: docker },
     ai,
+    gameServers,
     contracts: {
       ai: ai.runtimes.some((runtime) => runtime.available),
-      gameServers: docker,
+      gameServers: gameServers.minecraftJavaAvailable,
     },
   };
 }
@@ -98,6 +107,7 @@ export async function executeSignedJob(input: {
   capabilities: NodeCapabilities;
   signal?: AbortSignal;
   fetcher?: LocalFetch;
+  gameRootDirectory?: string;
   now?: number;
 }): Promise<AgentJobResult> {
   const now = input.now ?? Date.now();
@@ -164,6 +174,21 @@ export async function executeSignedJob(input: {
       return acquireAiModel({
         payload: input.claim.payload,
         capabilities: input.capabilities,
+        signal: input.signal,
+        fetcher: input.fetcher,
+      });
+    case 'game-server.lifecycle':
+    case 'game-server.config':
+    case 'game-server.player':
+    case 'game-server.backup':
+    case 'game-server.logs':
+      return executeGameServerJob({
+        type: input.claim.type,
+        payload: input.claim.payload,
+        workspaceId: input.claim.workspaceId,
+        rootDirectory:
+          input.gameRootDirectory ?? path.resolve('.ysd-game-servers'),
+        capabilities: input.capabilities.gameServers,
         signal: input.signal,
         fetcher: input.fetcher,
       });

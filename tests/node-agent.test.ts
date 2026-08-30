@@ -23,6 +23,12 @@ const TEST_CAPABILITIES: NodeCapabilities = {
   disk: { totalBytes: 10 * 1024 ** 3, freeBytes: 8 * 1024 ** 3 },
   docker: { available: false },
   ai: { runtimes: [], cachedModels: [], maxConcurrentJobs: 1 },
+  gameServers: {
+    minecraftJavaAvailable: false,
+    javaVersion: null,
+    activeServers: 0,
+    maxConcurrentServers: 1,
+  },
   contracts: { ai: false, gameServers: false },
 };
 

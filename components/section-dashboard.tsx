@@ -5,7 +5,6 @@ import {
   Boxes,
   Code2,
   Database,
-  Gamepad2,
   Gauge,
   HardDrive,
   Network,
@@ -483,20 +482,6 @@ const PREVIEW_COPY: Partial<
       { icon: Gauge, label: 'Requests', value: '—', detail: 'no traffic' },
       { icon: Network, label: 'Latency', value: '—', detail: 'no samples' },
       { icon: Boxes, label: 'Models', value: '—', detail: 'awaiting adapter' },
-    ],
-  },
-  'game-servers': {
-    note: 'Game servers need a long-running host, which a Worker cannot provide. This surface is a design preview until the connected-node runtime lands.',
-    metrics: [
-      { icon: Gamepad2, label: 'Servers', value: '—', detail: 'none running' },
-      { icon: Server, label: 'Players', value: '—', detail: 'no sessions' },
-      { icon: HardDrive, label: 'Memory', value: '—', detail: 'not allocated' },
-      {
-        icon: Gauge,
-        label: 'Idle sleep',
-        value: 'On',
-        detail: 'workspace default',
-      },
     ],
   },
   nodes: {

@@ -8,6 +8,7 @@ import securitySchema from '../../db/migrations/0004_security.sql?raw';
 import storageSchema from '../../db/migrations/0005_storage.sql?raw';
 import computeNodesSchema from '../../db/migrations/0006_compute_nodes.sql?raw';
 import aiComputeSchema from '../../db/migrations/0007_ai_compute.sql?raw';
+import gameServersSchema from '../../db/migrations/0008_game_servers.sql?raw';
 
 /**
  * D1 access and schema management.
@@ -26,6 +27,7 @@ const MIGRATIONS: { name: string; sql: string }[] = [
   { name: '0005_storage', sql: storageSchema },
   { name: '0006_compute_nodes', sql: computeNodesSchema },
   { name: '0007_ai_compute', sql: aiComputeSchema },
+  { name: '0008_game_servers', sql: gameServersSchema },
 ];
 
 const LEDGER = `CREATE TABLE IF NOT EXISTS ysd_migration (
@@ -64,6 +66,10 @@ export const WORKSPACE_TABLES = [
   'ai_model',
   'ai_model_cache',
   'ai_inference',
+  'game_server',
+  'game_server_action',
+  'game_server_backup',
+  'game_server_log',
 ] as const;
 
 export function getDatabase(): D1Database {

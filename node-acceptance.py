@@ -3,7 +3,8 @@
 Runs against the real Worker+D1 API, usually the local dev server where the
 interactive Turnstile challenge is deliberately unconfigured. The script
 proves pairing, signed outbound traffic, job leases, tenant isolation,
-idempotency, replay rejection, malicious payload refusal, and revocation.
+idempotency, replay rejection, malicious payload refusal, Game Server control,
+and revocation during a lifecycle action.
 """
 
 import base64
@@ -123,7 +124,7 @@ for index, client in enumerate((one, two), start=1):
         "email": f"node-{index}-{RUN}@ysd.test",
         "password": f"node-acceptance-password-{index}-{RUN}",
     })
-    check(f"operator {index} signed up", status == 200, f"got {status}: {body}")
+    check(f"operator {index} signed up", status == 200, f"got {status}")
 
 status, _ = anonymous.request("GET", "/api/nodes")
 check("anonymous node inventory is closed", status == 401, f"got {status}")
@@ -140,11 +141,17 @@ capabilities = {
     "disk": {"totalBytes": 20 * 1024**3, "freeBytes": 15 * 1024**3},
     "docker": {"available": True},
     "ai": {"runtimes": [], "cachedModels": [], "maxConcurrentJobs": 1},
+    "gameServers": {
+        "minecraftJavaAvailable": True,
+        "javaVersion": 'openjdk version "21.0.8"',
+        "activeServers": 0,
+        "maxConcurrentServers": 2,
+    },
     "contracts": {"ai": False, "gameServers": True},
 }
 pair_body = {
     "code": pairing["code"],
-    "agentVersion": "0.2.0",
+    "agentVersion": "0.3.0",
     "protocolVersion": 1,
     "platform": "acceptance",
     "architecture": "x64",
@@ -160,7 +167,7 @@ check("pairing ticket cannot be replayed", status in (401, 409), f"got {status}"
 
 section("signed heartbeat and replay protection")
 heartbeat = {
-    "agentVersion": "0.2.0",
+    "agentVersion": "0.3.0",
     "capabilities": capabilities,
     "metrics": {
         "cpuLoadPercent": 12.5,
@@ -168,6 +175,7 @@ heartbeat = {
         "memoryTotalBytes": 8 * 1024**3,
         "runningJobs": 0,
     },
+    "gameServers": [],
 }
 status, _, proof = agent_request(token, "/api/nodes/agent/heartbeat", heartbeat)
 check("signed heartbeat accepted", status == 200, f"got {status}")
@@ -258,11 +266,154 @@ status, _, _ = agent_request(
 )
 check("completion replay rejected", status == 401, f"got {status}")
 
-section("revocation")
+section("Game Server control plane")
+status, _ = anonymous.request("GET", "/api/game-servers")
+check("anonymous Game Server inventory is closed", status == 401, f"got {status}")
+
+properties = {
+    "maxPlayers": 20,
+    "difficulty": "normal",
+    "gamemode": "survival",
+    "onlineMode": True,
+    "whitelist": True,
+    "enforceWhitelist": True,
+    "motd": "YSD acceptance server",
+    "viewDistance": 10,
+    "simulationDistance": 10,
+    "pvp": True,
+    "hardcore": False,
+    "allowFlight": False,
+    "spawnProtection": 16,
+}
+create_server = {
+    "action": "create",
+    "nodeId": node_id,
+    "name": f"Acceptance Vanilla {RUN}",
+    "version": "26.2",
+    "ramMb": 1024,
+    "cpuCores": 1,
+    "diskQuotaBytes": 2 * 1024**3,
+    "port": 25000 + int(RUN[:3], 16) % 30000,
+    "properties": properties,
+    "eulaAccepted": True,
+    "provider": "local-node",
+    "zeroMode": True,
+    "exposure": "private",
+}
+status, _ = one.request(
+    "POST", "/api/game-servers", {**create_server, "downloadUrl": "https://evil.invalid/server.jar"}
+)
+check("Game Server URL injection rejected", status == 400, f"got {status}")
+status, _ = one.request(
+    "POST", "/api/game-servers", {**create_server, "zeroMode": False}
+)
+check("Game Server Zero Mode bypass rejected", status == 400, f"got {status}")
+
+game_idempotency = f"game-create-{RUN}"
+status, created_game = one.request(
+    "POST", "/api/game-servers", create_server,
+    {"Idempotency-Key": game_idempotency},
+)
+game_server_id = (
+    created_game.get("serverId") if isinstance(created_game, dict) else None
+)
+check("private Vanilla server queued", status == 201 and game_server_id, f"got {status}")
+status, repeated_game = one.request(
+    "POST", "/api/game-servers", create_server,
+    {"Idempotency-Key": game_idempotency},
+)
+check(
+    "Game Server create is idempotent",
+    status == 200 and repeated_game.get("serverId") == game_server_id,
+    f"got {status}",
+)
+
+status, other_games = two.request("GET", "/api/game-servers")
+check("second workspace sees no Game Servers", status == 200 and not other_games["servers"])
+status, _ = two.request(
+    "POST", f"/api/game-servers/{game_server_id}/actions",
+    {"action": "status", "provider": "local-node", "zeroMode": True},
+)
+check("cross-tenant Game Server action is refused", status == 404, f"got {status}")
+
+status, game_claimed, _ = agent_request(token, "/api/nodes/agent/claim", {})
+game_job = game_claimed.get("job") if isinstance(game_claimed, dict) else None
+check(
+    "signed Game Server create claim issued",
+    status == 200 and game_job and game_job["claim"]["type"] == "game-server.lifecycle",
+)
+game_completion_path = f'/api/nodes/agent/jobs/{game_job["claim"]["jobId"]}/complete'
+game_completion = {
+    "leaseId": game_job["claim"]["leaseId"],
+    "claim": game_job["claim"],
+    "claimSignature": game_job["signature"],
+    "status": "succeeded",
+    "result": {
+        "serverId": game_server_id,
+        "status": "stopped",
+        "binaryHash": "sha256:" + "a" * 64,
+        "binaryVerified": True,
+        "exposure": "private",
+        "players": [],
+        "playerCount": 0,
+        "uptimeSeconds": 0,
+        "worlds": ["world", "world_nether", "world_the_end"],
+        "logs": [],
+    },
+}
+status, game_completed, _ = agent_request(
+    token, game_completion_path, game_completion
+)
+check(
+    "signed Game Server create completion accepted",
+    status == 200 and game_completed["state"] == "succeeded",
+)
+status, game_state = one.request("GET", "/api/game-servers")
+check(
+    "verified stopped server is visible",
+    status == 200
+    and any(
+        server["id"] == game_server_id
+        and server["status"] == "stopped"
+        and server["binaryVerified"] is True
+        for server in game_state["servers"]
+    ),
+)
+
+status, queued_start = one.request(
+    "POST", f"/api/game-servers/{game_server_id}/actions",
+    {"action": "start", "provider": "local-node", "zeroMode": True},
+    {"Idempotency-Key": f"game-start-{RUN}"},
+)
+check("Game Server start queued", status == 201, f"got {status}")
+status, start_claimed, _ = agent_request(token, "/api/nodes/agent/claim", {})
+start_job = start_claimed.get("job") if isinstance(start_claimed, dict) else None
+check(
+    "Game Server start lease claimed",
+    status == 200
+    and start_job
+    and start_job["claim"]["payload"]["operation"] == "start",
+)
+
+section("revocation during Game Server lifecycle")
 status, _ = one.request("DELETE", f"/api/nodes/{node_id}")
 check("owner revokes node", status == 200, f"got {status}")
 status, _, _ = agent_request(token, "/api/nodes/agent/heartbeat", heartbeat)
 check("revoked token cannot heartbeat", status == 401, f"got {status}")
+
+start_completion = {
+    "leaseId": start_job["claim"]["leaseId"],
+    "claim": start_job["claim"],
+    "claimSignature": start_job["signature"],
+    "status": "succeeded",
+    "result": {"serverId": game_server_id, "status": "running", "logs": []},
+}
+status, _, _ = agent_request(
+    token,
+    f'/api/nodes/agent/jobs/{start_job["claim"]["jobId"]}/complete',
+    start_completion,
+)
+check("revoked lifecycle completion is refused", status == 401, f"got {status}")
 
 status, state = one.request("GET", "/api/nodes")
 check("revoked status is visible", status == 200 and state["summary"]["revoked"] == 1)
@@ -270,6 +421,15 @@ check("completed job remains auditable", any(
     item["id"] == job_id and item["state"] == "succeeded" for item in state["jobs"]
 ))
 check("anomalous activity is visible", len(state["securityEvents"]) >= 3)
+status, game_state = one.request("GET", "/api/game-servers")
+check(
+    "revoked lifecycle is failed and visible",
+    status == 200
+    and any(server["id"] == game_server_id and server["status"] == "node_revoked"
+            for server in game_state["servers"])
+    and any(action["jobId"] == start_job["claim"]["jobId"] and action["state"] == "failed"
+            for action in game_state["actions"]),
+)
 
 print("\n" + "=" * 60)
 print(f"  PASSED {len(PASSED)}   FAILED {len(FAILED)}")

@@ -78,6 +78,12 @@ function capabilities(options: { cached?: boolean; disk?: number } = {}): NodeCa
         : [],
       maxConcurrentJobs: 1,
     },
+    gameServers: {
+      minecraftJavaAvailable: false,
+      javaVersion: null,
+      activeServers: 0,
+      maxConcurrentServers: 1,
+    },
     contracts: { ai: true, gameServers: false },
   };
 }

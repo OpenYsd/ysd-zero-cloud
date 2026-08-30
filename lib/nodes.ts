@@ -3,8 +3,8 @@
  *
  * This module is runtime-neutral: both the Cloudflare control plane and the
  * outbound-only Node Agent use the exact same validators and signatures.
- * Nothing here can execute a shell command. Phase 4 adds dedicated AI handlers
- * while game-server execution remains an inert contract.
+ * Nothing here can execute a shell command. AI and Game Server work use
+ * dedicated, strict handlers on the outbound-only local agent.
  */
 
 import {
@@ -12,10 +12,16 @@ import {
   validateAiJobPayload,
   type AiCapabilities,
 } from './ai.ts';
+import {
+  GAME_SERVER_JOB_TYPES,
+  parseGameServerCapabilities,
+  validateGameServerJobPayload,
+  type GameServerCapabilities,
+} from './game-servers.ts';
 
 export const NODE_PROTOCOL_VERSION = 1;
-export const CURRENT_AGENT_VERSION = '0.2.0';
-export const MINIMUM_AGENT_VERSION = '0.2.0';
+export const CURRENT_AGENT_VERSION = '0.3.0';
+export const MINIMUM_AGENT_VERSION = '0.3.0';
 
 export const NODE_TIMING = {
   heartbeatMs: 25_000,
@@ -33,20 +39,12 @@ export const EXECUTABLE_NODE_JOB_TYPES = [
   'diagnostic.snapshot',
   'ai.inference',
   'ai.model.acquire',
+  ...GAME_SERVER_JOB_TYPES,
 ] as const;
 
-export const PLACEHOLDER_NODE_JOB_TYPES = [
-  'game-server.lifecycle',
-] as const;
-
-export const NODE_JOB_TYPES = [
-  ...EXECUTABLE_NODE_JOB_TYPES,
-  ...PLACEHOLDER_NODE_JOB_TYPES,
-] as const;
+export const NODE_JOB_TYPES = [...EXECUTABLE_NODE_JOB_TYPES] as const;
 
 export type ExecutableNodeJobType = (typeof EXECUTABLE_NODE_JOB_TYPES)[number];
-export type PlaceholderNodeJobType =
-  (typeof PLACEHOLDER_NODE_JOB_TYPES)[number];
 export type NodeJobType = (typeof NODE_JOB_TYPES)[number];
 
 export type NodeCapabilities = {
@@ -56,6 +54,7 @@ export type NodeCapabilities = {
   disk: { totalBytes: number; freeBytes: number };
   docker: { available: boolean };
   ai: AiCapabilities;
+  gameServers: GameServerCapabilities;
   contracts: { ai: boolean; gameServers: boolean };
 };
 
@@ -204,6 +203,15 @@ export function parseCapabilities(value: unknown): NodeCapabilities | null {
     value.ai === undefined
       ? { runtimes: [], cachedModels: [], maxConcurrentJobs: 1 }
       : parseAiCapabilities(value.ai);
+  const gameServers =
+    value.gameServers === undefined
+      ? {
+          minecraftJavaAvailable: false,
+          javaVersion: null,
+          activeServers: 0,
+          maxConcurrentServers: 1,
+        }
+      : parseGameServerCapabilities(value.gameServers);
   if (
     cores === null ||
     totalBytes === null ||
@@ -213,7 +221,8 @@ export function parseCapabilities(value: unknown): NodeCapabilities | null {
     (vramBytes === null &&
       gpu.vramBytes !== null &&
       gpu.vramBytes !== undefined) ||
-    !ai
+    !ai ||
+    !gameServers
   ) {
     return null;
   }
@@ -238,9 +247,11 @@ export function parseCapabilities(value: unknown): NodeCapabilities | null {
     disk: { totalBytes: diskTotalBytes, freeBytes: diskFreeBytes },
     docker: { available: docker.available },
     ai,
+    gameServers,
     contracts: {
       ai: contracts.ai && ai.runtimes.some((runtime) => runtime.available),
-      gameServers: contracts.gameServers,
+      gameServers:
+        contracts.gameServers && gameServers.minecraftJavaAvailable,
     },
   };
 }
@@ -282,12 +293,6 @@ export function isExecutableJobType(
   return (EXECUTABLE_NODE_JOB_TYPES as readonly string[]).includes(value);
 }
 
-export function isPlaceholderJobType(
-  value: string,
-): value is PlaceholderNodeJobType {
-  return (PLACEHOLDER_NODE_JOB_TYPES as readonly string[]).includes(value);
-}
-
 function onlyKeys(
   value: Record<string, unknown>,
   allowed: readonly string[],
@@ -307,15 +312,6 @@ export function validateJob(
       status: 400,
       code: 'type',
       error: 'Choose a supported job type.',
-    };
-  }
-  if (isPlaceholderJobType(typeValue)) {
-    return {
-      ok: false,
-      status: 409,
-      code: 'placeholder',
-      error:
-        'Game Server execution remains a Phase 5 API contract only.',
     };
   }
   if (!isExecutableJobType(typeValue)) {
@@ -348,6 +344,26 @@ export function validateJob(
     }
     payload = { ...ai.payload };
     return { ok: true, type: typeValue, payload };
+  }
+  if (typeValue.startsWith('game-server.')) {
+    const game = validateGameServerJobPayload(typeValue, payloadValue);
+    if (!game.ok) {
+      return {
+        ok: false,
+        status: 400,
+        code: 'payload',
+        error: game.error,
+      };
+    }
+    if (stableJson(game.payload).length > 32 * 1024) {
+      return {
+        ok: false,
+        status: 400,
+        code: 'payload',
+        error: 'The Game Server payload is too large.',
+      };
+    }
+    return { ok: true, type: typeValue, payload: game.payload };
   }
   if (typeValue === 'diagnostic.ping') {
     if (!onlyKeys(payloadValue, ['message'])) {

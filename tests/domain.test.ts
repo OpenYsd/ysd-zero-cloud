@@ -29,21 +29,12 @@ void test('every live section is a real section', () => {
   }
 });
 
-void test('preview sections are not reported as live', () => {
-  for (const section of ['game-servers'] as const) {
-    assert.equal(
-      isLiveSection(section),
-      false,
-      `${section} should be a preview`,
-    );
-  }
-});
-
-void test('storage, networking, nodes, and AI are live surfaces', () => {
+void test('storage, networking, nodes, AI, and Game Servers are live surfaces', () => {
   assert.equal(isLiveSection('storage'), true);
   assert.equal(isLiveSection('networking'), true);
   assert.equal(isLiveSection('nodes'), true);
   assert.equal(isLiveSection('ai'), true);
+  assert.equal(isLiveSection('game-servers'), true);
 });
 
 void test('log guards reject anything outside the catalog', () => {
@@ -54,6 +45,7 @@ void test('log guards reject anything outside the catalog', () => {
   assert.equal(isLogSource('networking'), true);
   assert.equal(isLogSource('node'), true);
   assert.equal(isLogSource('ai'), true);
+  assert.equal(isLogSource('game-server'), true);
   assert.equal(isLogSource('anything-else'), false);
 });
 
