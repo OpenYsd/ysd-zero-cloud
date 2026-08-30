@@ -18,6 +18,10 @@ import {
   shutdownManagedGameServers,
 } from './game-runtime.ts';
 import {
+  collectAppRuntimeSnapshots,
+  shutdownManagedApps,
+} from './app-runtime.ts';
+import {
   collectCapabilities,
   collectMetrics,
   executeSignedJob,
@@ -171,6 +175,7 @@ async function heartbeat(
   token: string,
   workspaceId: string,
   gameRootDirectory: string,
+  appRootDirectory: string,
   runningJobs = 0,
 ): Promise<void> {
   await signedPost({
@@ -185,6 +190,7 @@ async function heartbeat(
         gameRootDirectory,
         workspaceId,
       ),
+      appDeployments: collectAppRuntimeSnapshots(),
     },
   });
 }
@@ -197,6 +203,7 @@ async function monitorClaim(input: {
   signal: AbortSignal;
   workspaceId: string;
   gameRootDirectory: string;
+  appRootDirectory: string;
 }): Promise<void> {
   let lastHeartbeat = Date.now();
   while (!input.signal.aborted && !input.execution.signal.aborted) {
@@ -221,6 +228,7 @@ async function monitorClaim(input: {
           input.token,
           input.workspaceId,
           input.gameRootDirectory,
+          input.appRootDirectory,
           1,
         );
         lastHeartbeat = Date.now();
@@ -240,6 +248,7 @@ async function poll(
   token: string,
   workspaceId: string,
   gameRootDirectory: string,
+  appRootDirectory: string,
 ): Promise<boolean> {
   const response = await signedPost<{
     job: { claim: SignedJobClaim; signature: string } | null;
@@ -261,6 +270,7 @@ async function poll(
     signal: monitor.signal,
     workspaceId,
     gameRootDirectory,
+    appRootDirectory,
   });
   let completed: Awaited<ReturnType<typeof executeSignedJob>>;
   try {
@@ -271,6 +281,7 @@ async function poll(
       capabilities,
       signal: execution.signal,
       gameRootDirectory,
+      appRootDirectory,
     });
   } finally {
     monitor.abort('job-complete');
@@ -307,6 +318,10 @@ async function run(arguments_: Arguments): Promise<never> {
     path.dirname(arguments_.configPath),
     '.ysd-game-servers',
   );
+  const appRootDirectory = path.resolve(
+    path.dirname(arguments_.configPath),
+    '.ysd-app-runtime',
+  );
   console.log(
     'Game Servers stay private on this machine unless you change local networking yourself.',
   );
@@ -321,6 +336,7 @@ async function run(arguments_: Arguments): Promise<never> {
           credentials.token,
           credentials.workspaceId,
           gameRootDirectory,
+          appRootDirectory,
         );
         lastHeartbeat = Date.now();
       }
@@ -329,6 +345,7 @@ async function run(arguments_: Arguments): Promise<never> {
         credentials.token,
         credentials.workspaceId,
         gameRootDirectory,
+        appRootDirectory,
       );
       backoff = 2_000;
       if (!worked) await delay(5_000);
@@ -341,6 +358,7 @@ async function run(arguments_: Arguments): Promise<never> {
         (error.status === 401 || error.status === 403)
       ) {
         await shutdownManagedGameServers();
+        await shutdownManagedApps();
         throw new Error(
           'Node authorization was rejected; managed Game Servers were stopped locally.',
           { cause: error },

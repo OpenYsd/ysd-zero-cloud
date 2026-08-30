@@ -27,6 +27,13 @@ import {
   type GameServerStatus,
 } from '@/lib/game-servers';
 import {
+  APP_RUNTIME_JOB_TYPE,
+  APP_RUNTIME_LIMITS,
+  appRuntimeLeaseDuration,
+  parseAppRuntimeSnapshots,
+  validateAppRuntimeJobPayload,
+} from '@/lib/app-runtime';
+import {
   CURRENT_AGENT_VERSION,
   MINIMUM_AGENT_VERSION,
   NODE_PROTOCOL_VERSION,
@@ -58,6 +65,10 @@ import { authSecret } from './auth';
 import { db, execute, query, queryOne } from './db';
 import { clientAddress, enforceRateLimit } from './rate-limit';
 import { writeLog } from './logs';
+import {
+  recordAppRuntimeJobOutcome,
+  syncAppRuntimeSnapshots,
+} from './app-runtime-control';
 
 /**
  * D1-backed Compute Nodes control plane.
@@ -187,7 +198,17 @@ function capabilitiesFromRow(value: string): NodeCapabilities {
       activeServers: 0,
       maxConcurrentServers: 1,
     },
-    contracts: { ai: false, gameServers: false },
+    appRuntime: {
+      available: false,
+      nodeVersion: '',
+      nodeMajor: 0,
+      permissionModel: false,
+      networkGuard: false,
+      packageManagers: [],
+      activeDeployments: 0,
+      maxDeployments: 1,
+    },
+    contracts: { ai: false, gameServers: false, appRuntime: false },
   };
 }
 
@@ -361,6 +382,17 @@ function jobEligibleForNode(
   payload: Record<string, unknown>,
   capabilities: NodeCapabilities,
 ): boolean {
+  if (job.type === APP_RUNTIME_JOB_TYPE) {
+    const validated = validateAppRuntimeJobPayload(payload);
+    if (!validated.ok || !capabilities.contracts.appRuntime || !capabilities.appRuntime?.available) return false;
+    const app = validated.payload;
+    return (
+      capabilities.appRuntime.packageManagers.includes(app.contract?.packageManager ?? 'npm') &&
+      capabilities.appRuntime.activeDeployments < capabilities.appRuntime.maxDeployments &&
+      capabilities.memory.freeBytes >= app.memoryMb * 1024 ** 2 + APP_RUNTIME_LIMITS.memoryReserveBytes &&
+      capabilities.disk.freeBytes >= app.diskQuotaBytes + APP_RUNTIME_LIMITS.diskReserveBytes
+    );
+  }
   if (job.type.startsWith('game-server.')) {
     const validated = validateGameServerJobPayload(job.type, payload);
     if (!validated.ok) return false;
@@ -928,6 +960,7 @@ export async function recordHeartbeat(input: {
   metrics: unknown;
   agentVersion: unknown;
   gameServers?: unknown;
+  appDeployments?: unknown;
 }): Promise<
   | { ok: true; status: 'online'; serverTime: number }
   | { ok: false; status: number; error: string }
@@ -945,7 +978,8 @@ export async function recordHeartbeat(input: {
   const capabilities = parseCapabilities(input.capabilities);
   const metrics = parseMetrics(input.metrics);
   const snapshots = parseGameServerSnapshots(input.gameServers ?? []);
-  if (!capabilities || !metrics || !snapshots) {
+  const appSnapshots = parseAppRuntimeSnapshots(input.appDeployments ?? []);
+  if (!capabilities || !metrics || !snapshots || !appSnapshots) {
     return {
       ok: false,
       status: 400,
@@ -994,6 +1028,14 @@ export async function recordHeartbeat(input: {
     value: snapshots,
     now,
   });
+  await syncAppRuntimeSnapshots({
+    workspaceId: input.context.node.workspaceId,
+    nodeId: input.context.node.id,
+    snapshots: appSnapshots,
+    cpuLoadPercent: metrics.cpuLoadPercent,
+    memoryUsedBytes: metrics.memoryUsedBytes,
+    now,
+  });
   await pruneNodeHistory(input.context.node.id, now);
   return { ok: true, status: 'online', serverTime: now };
 }
@@ -1002,6 +1044,29 @@ async function requeueExpiredJobs(
   workspaceId: string,
   now: number,
 ): Promise<void> {
+  const expiredAppJobs = await query<JobRow>(
+    `SELECT * FROM node_job WHERE workspaceId = ? AND type = ?
+     AND state IN ('leased','cancelling') AND leaseExpiresAt <= ?`,
+    workspaceId,
+    APP_RUNTIME_JOB_TYPE,
+    now,
+  );
+  for (const job of expiredAppJobs) {
+    await recordAppRuntimeJobOutcome({
+      job,
+      state: job.state === 'cancelling' ? 'cancelled' : 'timed_out',
+      result: null,
+      error: 'The App Runtime lease expired before completion.',
+      now,
+    });
+    await execute(
+      `INSERT INTO node_security_event
+       (id, workspaceId, nodeId, type, severity, detail, networkFingerprint, createdAt)
+       VALUES (?, ?, ?, 'app-expired-lease', 'high', ?, NULL, ?)`,
+      createId('nsec'), workspaceId, job.assignedNodeId,
+      `App Runtime job ${job.id} expired and will not be replayed.`, now,
+    );
+  }
   const expiredGameJobs = await query<JobRow>(
     `SELECT * FROM node_job
      WHERE workspaceId = ? AND type LIKE 'game-server.%'
@@ -1106,11 +1171,16 @@ export async function claimNextJob(
     if (!jobEligibleForNode(job, payload, capabilities)) continue;
 
     const leaseId = createId('lease');
-    const leaseExpiresAt =
-      now +
-      (job.type.startsWith('game-server.')
+    const appPayload = job.type === APP_RUNTIME_JOB_TYPE
+      ? validateAppRuntimeJobPayload(payload)
+      : null;
+    const leaseExpiresAt = now + (
+      job.type.startsWith('game-server.')
         ? gameServerLeaseDuration(job.type, payload)
-        : aiLeaseDuration(job.type, payload));
+        : appPayload?.ok
+          ? appRuntimeLeaseDuration(appPayload.payload.operation)
+          : aiLeaseDuration(job.type, payload)
+    );
     const claim: SignedJobClaim = {
       protocolVersion: NODE_PROTOCOL_VERSION,
       jobId: job.id,
@@ -1694,8 +1764,8 @@ export async function completeJob(
   } else if (input.status === 'succeeded') {
     result = sanitizeJobResult(
       input.result,
-      job.type.startsWith('ai.') || job.type.startsWith('game-server.')
-        ? 64 * 1024
+      job.type.startsWith('ai.') || job.type.startsWith('game-server.') || job.type === APP_RUNTIME_JOB_TYPE
+        ? job.type === APP_RUNTIME_JOB_TYPE ? 192 * 1024 : 64 * 1024
         : 16_384,
     );
     if (!result) {
@@ -1789,6 +1859,9 @@ export async function completeJob(
     error,
     now,
   });
+  if (job.type === APP_RUNTIME_JOB_TYPE) {
+    await recordAppRuntimeJobOutcome({ job, state: nextState, result, error, now });
+  }
   await writeJobEvent({
     workspaceId: context.node.workspaceId,
     nodeId: context.node.id,
@@ -1885,7 +1958,7 @@ export async function enqueueJob(input: {
     await sha256(payload),
     idempotencyKey,
     targetNodeId,
-    DEFAULT_MAX_ATTEMPTS,
+    validated.type === APP_RUNTIME_JOB_TYPE ? 1 : DEFAULT_MAX_ATTEMPTS,
     input.actor,
     now,
     now,
@@ -1947,6 +2020,13 @@ export async function revokeNode(input: {
     input.workspaceId,
     input.nodeId,
   );
+  const activeApps = await queryOne<{ total: number }>(
+    `SELECT COUNT(*) AS total FROM deployment
+     WHERE workspaceId = ? AND nodeId = ? AND deletedAt IS NULL
+       AND state IN ('queued','building','starting','healthy','restarting','rolling_back')`,
+    input.workspaceId,
+    input.nodeId,
+  );
   const database = await db();
   await database.batch([
     database
@@ -1997,6 +2077,25 @@ export async function revokeNode(input: {
            AND state IN ('queued','leased','cancelling')`,
       )
       .bind(now, now, input.workspaceId, input.nodeId),
+    database
+      .prepare(
+        `UPDATE deployment
+         SET state = 'node_revoked',
+             lastError = 'The assigned node was revoked. The local App Runtime is stopped when the agent observes the rejected credential.',
+             finishedAt = ?, updatedAt = ?
+         WHERE workspaceId = ? AND nodeId = ? AND deletedAt IS NULL
+           AND state NOT IN ('blocked','deleted')`,
+      )
+      .bind(now, now, input.workspaceId, input.nodeId),
+    database
+      .prepare(
+        `UPDATE app_deployment_action
+         SET state = 'failed', error = 'The assigned node was revoked.',
+             completedAt = ?, updatedAt = ?
+         WHERE workspaceId = ? AND nodeId = ?
+           AND state IN ('queued','leased','cancelling')`,
+      )
+      .bind(now, now, input.workspaceId, input.nodeId),
   ]);
   if ((activeAi?.total ?? 0) > 0) {
     await execute(
@@ -2019,6 +2118,18 @@ export async function revokeNode(input: {
       input.workspaceId,
       input.nodeId,
       `Node was revoked while ${activeGameServers!.total} Game Server${activeGameServers!.total === 1 ? ' was' : 's were'} active. Local processes are no longer remotely controlled.`,
+      now,
+    );
+  }
+  if ((activeApps?.total ?? 0) > 0) {
+    await execute(
+      `INSERT INTO node_security_event
+       (id, workspaceId, nodeId, type, severity, detail, networkFingerprint, createdAt)
+       VALUES (?, ?, ?, 'revoked-node-app-activity', 'critical', ?, NULL, ?)`,
+      createId('nsec'),
+      input.workspaceId,
+      input.nodeId,
+      `Node was revoked during ${activeApps!.total} managed App Runtime deployment${activeApps!.total === 1 ? '' : 's'}.`,
       now,
     );
   }

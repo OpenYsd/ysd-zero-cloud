@@ -153,6 +153,23 @@ export type ShieldSnapshot = {
     zeroModeBypass: number;
     payloadAbuse: number;
   };
+  appRuntime?: {
+    unsafeScripts: number;
+    lifecycleHooks: number;
+    unsafeRegistry: number;
+    pathAbuse: number;
+    unsignedArtifacts: number;
+    checksumMismatch: number;
+    exposedBind: number;
+    crashLoops: number;
+    staleNodes: number;
+    revokedActivity: number;
+    resourceExhaustion: number;
+    envLeak: number;
+    unexpectedOutbound: number;
+    forbiddenProvider: number;
+    suspiciousVolume: number;
+  };
   now: number;
 };
 
@@ -1116,6 +1133,120 @@ function checkGameServers(snapshot: ShieldSnapshot): {
   };
 }
 
+function checkAppRuntime(snapshot: ShieldSnapshot): {
+  check: ShieldCheck;
+  findings: ShieldFinding[];
+} {
+  const app = snapshot.appRuntime;
+  const findings: ShieldFinding[] = [];
+  if (!app) {
+    return {
+      check: {
+        id: 'app-runtime',
+        name: 'YSD App Runtime',
+        detail: 'App Runtime security state was not sampled',
+        state: 'passed',
+      },
+      findings,
+    };
+  }
+
+  const executionBoundary =
+    app.unsafeScripts + app.lifecycleHooks + app.unsafeRegistry + app.pathAbuse;
+  if (executionBoundary > 0) {
+    findings.push({
+      code: 'app-execution-boundary-violation',
+      title: 'Unsafe App Runtime input was blocked',
+      detail: `${app.unsafeScripts} arbitrary script · ${app.lifecycleHooks} lifecycle hook · ${app.unsafeRegistry} registry config · ${app.pathAbuse} path or symlink event.`,
+      resource: 'deployments/security',
+      severity: 'critical',
+      remediation:
+        'Keep the fixed package-manager and Node entrypoint contract, inspect the source and actor, and do not retry a rejected repository unchanged.',
+    });
+  }
+
+  if (app.unsignedArtifacts + app.checksumMismatch > 0) {
+    findings.push({
+      code: 'app-artifact-integrity-failure',
+      title: 'App artifact integrity could not be verified',
+      detail: `${app.unsignedArtifacts} unverified artifact · ${app.checksumMismatch} checksum failure.`,
+      resource: 'deployments/artifacts',
+      severity: 'critical',
+      remediation:
+        'Stop the affected deployment and rebuild from the pinned GitHub commit. Roll back only to an artifact whose manifest and checksum verify locally.',
+    });
+  }
+
+  if (app.exposedBind + app.unexpectedOutbound + app.forbiddenProvider > 0) {
+    findings.push({
+      code: 'app-network-boundary-violation',
+      title: 'App Runtime network boundary needs attention',
+      detail: `${app.exposedBind} wildcard bind · ${app.unexpectedOutbound} unexpected outbound attempt · ${app.forbiddenProvider} provider or tunnel bypass.`,
+      resource: 'deployments/network',
+      severity: 'critical',
+      remediation:
+        'Stop the app, retain localhost-only permissions and Private exposure, and do not create a tunnel, provider fallback, or public route automatically.',
+    });
+  }
+
+  if (app.envLeak > 0) {
+    findings.push({
+      code: 'app-environment-leak',
+      title: 'A possible deployment secret leak was detected',
+      detail: `${app.envLeak} environment leak indicator${app.envLeak === 1 ? ' was' : 's were'} recorded.`,
+      resource: 'deployments/logs',
+      severity: 'critical',
+      remediation:
+        'Stop the deployment, rotate the affected scoped secret, and inspect only redacted bounded logs and the local node.',
+    });
+  }
+
+  if (app.revokedActivity > 0) {
+    findings.push({
+      code: 'app-revoked-node-activity',
+      title: 'A revoked node attempted App Runtime activity',
+      detail: `${app.revokedActivity} revoked-node event${app.revokedActivity === 1 ? ' was' : 's were'} blocked or recorded.`,
+      resource: 'deployments/nodes',
+      severity: 'high',
+      remediation:
+        'Confirm the old agent and its managed app processes stopped locally. Keep its erased credential revoked.',
+    });
+  }
+
+  const operational =
+    app.crashLoops + app.staleNodes + app.resourceExhaustion + app.suspiciousVolume;
+  if (operational > 0) {
+    findings.push({
+      code: 'app-operational-anomaly',
+      title: 'App Runtime workload anomalies need review',
+      detail: `${app.crashLoops} crash loop · ${app.staleNodes} stale/revoked node · ${app.resourceExhaustion} resource event · ${app.suspiciousVolume} suspicious deploy volume.`,
+      resource: 'deployments/operations',
+      severity:
+        app.crashLoops > 0 || app.resourceExhaustion > 0 || app.suspiciousVolume > 0
+          ? 'high'
+          : 'medium',
+      remediation:
+        'Inspect the selected node, capacity, lease history, and bounded restart policy before issuing another deployment action.',
+    });
+  }
+
+  return {
+    check: {
+      id: 'app-runtime',
+      name: 'YSD App Runtime',
+      detail: 'Pinned GitHub sources · fixed Node.js contract · private user-owned compute · $0 platform runtime',
+      state: findings.some(
+        (finding) => finding.severity === 'critical' || finding.severity === 'high',
+      )
+        ? 'failed'
+        : findings.length > 0
+          ? 'review'
+          : 'passed',
+    },
+    findings,
+  };
+}
+
 /** Runs every rule against a snapshot and scores the result. */
 export function runShieldRules(snapshot: ShieldSnapshot): ShieldReport {
   const results = [
@@ -1127,6 +1258,7 @@ export function runShieldRules(snapshot: ShieldSnapshot): ShieldReport {
     checkNodes(snapshot),
     checkAiCompute(snapshot),
     checkGameServers(snapshot),
+    checkAppRuntime(snapshot),
     checkSurface(snapshot),
     checkHardening(snapshot),
   ];

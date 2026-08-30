@@ -36,7 +36,8 @@ import {
   type TableSummary,
 } from '@/lib/domain';
 import { formatBytes, formatUsage, type UsageReading } from '@/lib/free-tier';
-import { duration, money, relativeTime } from '@/lib/format';
+import { money, relativeTime } from '@/lib/format';
+import { DeploymentActions } from '@/components/deployment-actions';
 
 /**
  * Section surfaces that only render data.
@@ -151,11 +152,11 @@ export function DeploymentsList({
               'Deployment',
               'Repository',
               'Commit',
-              'Target',
+              'Node',
               'State',
-              'Estimate',
-              'Took',
+              'Private address',
               'Created',
+              'Actions',
             ].map((column) => (
               <TableHead
                 key={column}
@@ -182,16 +183,16 @@ export function DeploymentsList({
                 {deployment.repository}
               </TableCell>
               <TableCell className="px-4 py-3 font-mono text-[10px] text-white/35">
-                {deployment.commitSha}
+                {deployment.commitSha.slice(0, 12)}
               </TableCell>
               <TableCell className="px-4 py-3 text-white/42">
-                {deployment.target}
+                {deployment.nodeName ?? 'control-plane plan'}
               </TableCell>
               <TableCell className="px-4 py-3">
                 <Badge
                   variant="outline"
                   className={
-                    deployment.state === 'planned'
+                    ['planned', 'queued', 'building', 'starting', 'healthy', 'stopped'].includes(deployment.state)
                       ? 'border-[#b7ff3c]/12 bg-[#b7ff3c]/5 text-[#c8ff69]'
                       : 'border-amber-400/20 bg-amber-400/5 text-amber-300'
                   }
@@ -199,14 +200,14 @@ export function DeploymentsList({
                   {deployment.state}
                 </Badge>
               </TableCell>
-              <TableCell className="px-4 py-3 font-mono text-white/42">
-                {money(deployment.estimatedMonthlyCost)}
-              </TableCell>
-              <TableCell className="px-4 py-3 text-white/42">
-                {duration(deployment.durationMs)}
+              <TableCell className="px-4 py-3 font-mono text-[10px] text-white/42">
+                {deployment.localAddress ?? '—'}
               </TableCell>
               <TableCell className="px-4 py-3 text-white/42">
                 {relativeTime(deployment.createdAt, now)}
+              </TableCell>
+              <TableCell className="px-4 py-3">
+                <DeploymentActions deployment={deployment} />
               </TableCell>
             </TableRow>
           ))}

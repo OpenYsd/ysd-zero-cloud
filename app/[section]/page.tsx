@@ -110,16 +110,21 @@ async function SectionBody({
         <ProjectsView projects={await listProjects(workspaceId)} now={now} />
       );
 
-    case 'deployments':
+    case 'deployments': {
+      const [deployments, nodes] = await Promise.all([
+        listDeployments(workspaceId),
+        readNodesState(workspaceId, now),
+      ]);
       return (
         <>
-          <SmartDeployPanel />
+          <SmartDeployPanel nodes={nodes.nodes} />
           <DeploymentsList
-            deployments={await listDeployments(workspaceId)}
+            deployments={deployments}
             now={now}
           />
         </>
       );
+    }
 
     case 'databases': {
       const [tables, bytes] = await Promise.all([
@@ -143,7 +148,7 @@ async function SectionBody({
       return <StorageView state={await listStorage(workspaceId)} now={now} />;
 
     case 'networking':
-      return <NetworkingView state={readNetworkState()} />;
+      return <NetworkingView state={await readNetworkState(workspaceId)} />;
 
     case 'nodes':
       return (

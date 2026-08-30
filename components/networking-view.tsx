@@ -56,6 +56,12 @@ export function NetworkingView({ state }: { state: NetworkState }) {
             value: String(state.publicStorageEndpoints),
             detail: 'private binding only',
           },
+          {
+            icon: Network,
+            label: 'Private app services',
+            value: String(state.privateAppServices),
+            detail: 'localhost on user nodes',
+          },
         ]}
       />
 

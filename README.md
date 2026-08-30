@@ -1,9 +1,9 @@
 # YSD Zero Cloud
 
-YSD Zero Cloud is a zero-cost-first cloud operating system. Version `0.6.0` runs authentication,
+YSD Zero Cloud is a zero-cost-first cloud operating system. Version `0.7.0` runs authentication,
 persistence, security scanning, the cost guard, private-object storage policy, network inventory,
-an outbound-only user-owned compute control plane, local AI scheduling, and private Minecraft Java
-server orchestration against Cloudflare Workers and D1.
+an outbound-only user-owned compute control plane, a private Node.js App Runtime, local AI
+scheduling, and private Minecraft Java server orchestration against Cloudflare Workers and D1.
 
 **Live:** <https://ysd-zero-cloud.ysd-zero-cloud.workers.dev>
 
@@ -20,7 +20,7 @@ deployed Worker's explicit zero-cost configuration.
 | Sign in / sign up | Better Auth on D1, email + password, optional GitHub OAuth                    |
 | Home              | Live project, deployment, table, and usage counts                             |
 | Projects          | `project` table, with create and delete                                       |
-| Deployments       | Smart Deploy plans recorded in `deployment`, accepted and blocked alike       |
+| Deployments       | Safe Node.js builds and lifecycle actions on paired user-owned Compute Nodes  |
 | Databases         | Live schema introspection of the D1 database                                  |
 | Database Studio   | Real rows, paginated and filtered, with credential columns redacted           |
 | SQL Editor        | Real statements, classified by the SQL guard; limited to the instance owner   |
@@ -33,9 +33,10 @@ deployed Worker's explicit zero-cost configuration.
 | Networking        | Deployed workers.dev origin, TLS, route exposure, and binding inventory       |
 | Nodes             | Paired user-owned agents, signed job leases, heartbeats, metrics, and audit   |
 | YSD AI Compute    | Approved local models, safe scheduling, cancellation, results, and metrics   |
+| App Runtime       | Private Node.js deploy, health, logs, metrics, rollback, and artifact guards  |
 | Game Servers      | Private Minecraft Java lifecycle, players, backups, logs, and resource guards|
 
-Storage, Networking, Nodes, YSD AI Compute, and Game Servers are live surfaces.
+Storage, Networking, Nodes, App Runtime, YSD AI Compute, and Game Servers are live surfaces.
 The current Cloudflare account returns `10042: Please enable R2`, so Storage honestly renders the
 implemented adapter as unavailable and refuses uploads; no bucket, public endpoint, or billable
 resource is created while that account-level gate remains.
@@ -159,8 +160,9 @@ completion. Cloudflare never performs the workload compute.
   leases return to the queue up to three attempts, then become timed out. An idempotency key stops a
   browser retry from creating a duplicate job.
 - The agent has no `eval`, generic script, command, or shell handler. It runs diagnostics, reviewed
-  local AI handlers, and a fixed Minecraft Java invocation with `shell=false`. Ollama and llama.cpp
-  use fixed loopback APIs; model acquisition uses an approved catalog and explicit operator consent.
+  local AI handlers, fixed App Runtime executable/argument contracts, and a fixed Minecraft Java
+  invocation with `shell=false`. Ollama and llama.cpp use fixed loopback APIs; model acquisition
+  uses an approved catalog and explicit operator consent.
 - The local credential file is AES-256-GCM encrypted with a passphrase that never leaves the node.
   See `agent/README.md` for pairing and service-run instructions.
 
@@ -168,6 +170,29 @@ YSD Shield inspects stale and offline nodes, minimum agent version, revoked-node
 jobs, stale leases, forged or replayed AI claims, model integrity, forbidden providers, payload
 abuse, resource pressure, anomalous volume, private Game Server exposure, backup integrity, crash
 loops, unsafe properties, and lifecycle activity after revocation.
+
+## YSD App Runtime / Smart Deploy
+
+Smart Deploy now turns a public GitHub repository into a pinned, tenant-scoped Node.js deployment
+on a paired machine owned by the operator. The Worker inspects repository metadata and creates a
+structured safe-build contract; the user-owned Node downloads the pinned GitHub archive, installs
+from exactly one lockfile with lifecycle scripts disabled, starts `node` with a fixed argument
+array, and performs a localhost-only health check. Cloudflare stores control-plane metadata only and
+does not perform application builds or runtime compute.
+
+App Runtime v1 accepts npm, pnpm, or Yarn only when the matching lockfile is present. It detects
+Node HTTP, Express, and Fastify contracts with an exact `node relative/file.js` entrypoint. Next.js,
+Vite, NestJS, user build scripts, lifecycle hooks, repository package-manager configuration,
+submodules, LFS pointers, arbitrary Git URLs, shell fields, executable paths, provider overrides,
+and paid tunnels fail closed. Private repositories are rejected in v1 rather than proxying source
+or credentials through the control plane.
+
+Each deployment receives a collision-checked loopback port and stays `private`; YSD never opens a
+router port, UPnP mapping, public bind, domain, or tunnel. Start, stop, restart, redeploy, rollback,
+delete, and status actions reuse the signed Phase 3 job queue. Artifacts carry checksums and a
+Node-signed manifest, retention is bounded, logs are bounded and redacted twice, environment values
+are encrypted/write-only, and health failure, crash loops, cancellation, resource pressure, stale
+leases, replay, revocation, symlink escape, and cross-workspace access are all fail-closed states.
 
 ## YSD AI Compute
 
@@ -330,12 +355,12 @@ development; every other entry unlocks an optional integration and is reported a
 | Cloudflare Turnstile | Bot protection for sign-in and sign-up                            | `TURNSTILE_SITE_KEY`, `TURNSTILE_SECRET_KEY`                                 |
 | Verification email   | Configuration-gated off until an owned sending domain exists      | `YSD_EMAIL_VERIFICATION_MODE`, then `RESEND_API_KEY`, `YSD_EMAIL_FROM`       |
 | GitHub sign-in       | OAuth sign-in                                                     | `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`                                   |
-| GitHub repositories  | Real framework detection in Smart Deploy                          | `GITHUB_TOKEN`                                                               |
+| GitHub repositories  | Safe public-repository inspection for Node.js App Runtime          | `GITHUB_TOKEN`                                                               |
 | Cloudflare account   | Reports D1 storage size                                           | `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_D1_DATABASE_ID` |
 
-Without a `GITHUB_TOKEN`, Smart Deploy still inspects public repositories anonymously and marks the
-plan `inspected`; when it cannot read the repository it falls back to name-based inference and says
-so rather than presenting a guess as a fact.
+Without a `GITHUB_TOKEN`, Smart Deploy still inspects public repositories anonymously, subject to
+GitHub's public rate limit. It never falls back to repository-name guesses and never accepts a
+private source it could not inspect.
 
 ## Acceptance run
 

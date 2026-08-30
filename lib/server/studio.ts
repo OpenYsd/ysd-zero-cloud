@@ -33,6 +33,7 @@ const MASKED_COLUMNS: Record<string, string[]> = {
   // AI prompts and bounded model output live in these JSON columns. They are
   // visible only through the purpose-built, workspace-scoped AI surface.
   node_job: ['payload', 'payloadHash', 'claimSignature', 'result'],
+  app_artifact: ['manifest'],
   node_security_event: ['networkFingerprint'],
 };
 

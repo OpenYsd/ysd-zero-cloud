@@ -1,4 +1,4 @@
-import type { DeployTarget, Framework } from './smart-deploy.ts';
+import type { Framework } from './smart-deploy.ts';
 import type { AiModelState, AiRuntime } from './ai.ts';
 import type {
   NodeCapabilities,
@@ -378,21 +378,97 @@ export type GameServersState = {
   projectedMonthlyCost: 0;
 };
 
-export type DeploymentState = 'planned' | 'blocked';
+export type DeploymentState =
+  | 'planned'
+  | 'blocked'
+  | 'queued'
+  | 'building'
+  | 'starting'
+  | 'healthy'
+  | 'stopping'
+  | 'stopped'
+  | 'restarting'
+  | 'rolling_back'
+  | 'deleting'
+  | 'cancelling'
+  | 'deleted'
+  | 'failed'
+  | 'cancelled'
+  | 'timed_out'
+  | 'crash_loop'
+  | 'node_offline'
+  | 'node_revoked';
 
 export type Deployment = {
   id: string;
   projectId: string | null;
   repository: string;
-  target: DeployTarget;
+  target: string;
   framework: string;
   commitSha: string;
+  branch: string;
+  environment: 'Production' | 'Preview' | 'Development';
+  nodeId: string | null;
+  nodeName: string | null;
+  jobId: string | null;
+  currentArtifactId: string | null;
+  localPort: number | null;
+  localAddress: string | null;
+  exposure: 'private';
+  observedBind: '127.0.0.1' | '0.0.0.0' | 'unknown';
+  healthPath: string;
   state: DeploymentState;
   durationMs: number | null;
+  buildDurationMs: number | null;
   estimatedMonthlyCost: number;
   zeroModeEnabled: boolean;
+  restartCount: number;
+  crashLoop: boolean;
+  lastError: string | null;
   createdAt: number;
+  startedAt: number | null;
+  updatedAt: number;
   finishedAt: number | null;
+  deletedAt: number | null;
+};
+
+export type AppDeploymentAction = {
+  id: string;
+  deploymentId: string;
+  projectId: string;
+  nodeId: string;
+  jobId: string;
+  kind: string;
+  state: NodeJobState;
+  error: string | null;
+  createdAt: number;
+  updatedAt: number;
+  completedAt: number | null;
+};
+
+export type AppArtifact = {
+  id: string;
+  deploymentId: string;
+  projectId: string;
+  nodeId: string;
+  commitSha: string;
+  version: number;
+  state: 'building' | 'verified' | 'failed' | 'corrupted' | 'deleted';
+  checksum: string | null;
+  sizeBytes: number;
+  createdAt: number;
+  verifiedAt: number | null;
+  activatedAt: number | null;
+};
+
+export type AppDeploymentLog = {
+  id: string;
+  deploymentId: string;
+  nodeId: string;
+  level: 'INFO' | 'WARN' | 'ERROR';
+  phase: string;
+  message: string;
+  createdAt: number;
 };
 
 export type Workspace = {

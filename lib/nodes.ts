@@ -18,9 +18,15 @@ import {
   validateGameServerJobPayload,
   type GameServerCapabilities,
 } from './game-servers.ts';
+import {
+  APP_RUNTIME_JOB_TYPE,
+  parseAppRuntimeCapabilities,
+  validateAppRuntimeJobPayload,
+  type AppRuntimeCapabilities,
+} from './app-runtime.ts';
 
 export const NODE_PROTOCOL_VERSION = 1;
-export const CURRENT_AGENT_VERSION = '0.3.0';
+export const CURRENT_AGENT_VERSION = '0.4.0';
 export const MINIMUM_AGENT_VERSION = '0.3.0';
 
 export const NODE_TIMING = {
@@ -40,6 +46,7 @@ export const EXECUTABLE_NODE_JOB_TYPES = [
   'ai.inference',
   'ai.model.acquire',
   ...GAME_SERVER_JOB_TYPES,
+  APP_RUNTIME_JOB_TYPE,
 ] as const;
 
 export const NODE_JOB_TYPES = [...EXECUTABLE_NODE_JOB_TYPES] as const;
@@ -55,7 +62,8 @@ export type NodeCapabilities = {
   docker: { available: boolean };
   ai: AiCapabilities;
   gameServers: GameServerCapabilities;
-  contracts: { ai: boolean; gameServers: boolean };
+  appRuntime?: AppRuntimeCapabilities;
+  contracts: { ai: boolean; gameServers: boolean; appRuntime?: boolean };
 };
 
 export type NodeMetrics = {
@@ -212,6 +220,19 @@ export function parseCapabilities(value: unknown): NodeCapabilities | null {
           maxConcurrentServers: 1,
         }
       : parseGameServerCapabilities(value.gameServers);
+  const appRuntime =
+    value.appRuntime === undefined
+      ? {
+          available: false,
+          nodeVersion: '',
+          nodeMajor: 0,
+          permissionModel: false,
+          networkGuard: false,
+          packageManagers: [],
+          activeDeployments: 0,
+          maxDeployments: 1,
+        }
+      : parseAppRuntimeCapabilities(value.appRuntime);
   if (
     cores === null ||
     totalBytes === null ||
@@ -222,7 +243,8 @@ export function parseCapabilities(value: unknown): NodeCapabilities | null {
       gpu.vramBytes !== null &&
       gpu.vramBytes !== undefined) ||
     !ai ||
-    !gameServers
+    !gameServers ||
+    !appRuntime
   ) {
     return null;
   }
@@ -230,7 +252,8 @@ export function parseCapabilities(value: unknown): NodeCapabilities | null {
     typeof gpu.available !== 'boolean' ||
     typeof docker.available !== 'boolean' ||
     typeof contracts.ai !== 'boolean' ||
-    typeof contracts.gameServers !== 'boolean'
+    typeof contracts.gameServers !== 'boolean' ||
+    (contracts.appRuntime !== undefined && typeof contracts.appRuntime !== 'boolean')
   ) {
     return null;
   }
@@ -248,10 +271,12 @@ export function parseCapabilities(value: unknown): NodeCapabilities | null {
     docker: { available: docker.available },
     ai,
     gameServers,
+    appRuntime,
     contracts: {
       ai: contracts.ai && ai.runtimes.some((runtime) => runtime.available),
       gameServers:
         contracts.gameServers && gameServers.minecraftJavaAvailable,
+      appRuntime: contracts.appRuntime === true && appRuntime.available,
     },
   };
 }
@@ -365,6 +390,21 @@ export function validateJob(
     }
     return { ok: true, type: typeValue, payload: game.payload };
   }
+  if (typeValue === APP_RUNTIME_JOB_TYPE) {
+    const app = validateAppRuntimeJobPayload(payloadValue);
+    if (!app.ok) {
+      return { ok: false, status: 400, code: 'payload', error: app.error };
+    }
+    if (stableJson(app.payload).length > 96 * 1024) {
+      return {
+        ok: false,
+        status: 400,
+        code: 'payload',
+        error: 'The App Runtime payload is too large.',
+      };
+    }
+    return { ok: true, type: typeValue, payload: app.payload };
+  }
   if (typeValue === 'diagnostic.ping') {
     if (!onlyKeys(payloadValue, ['message'])) {
       return {
@@ -428,6 +468,87 @@ function toBase64Url(bytes: Uint8Array): string {
     .replace(/\+/g, '-')
     .replace(/\//g, '_')
     .replace(/=+$/g, '');
+}
+
+async function nodeEnvelopeKey(
+  token: string,
+  salt: Uint8Array,
+  usage: 'encrypt' | 'decrypt',
+): Promise<CryptoKey> {
+  const material = await crypto.subtle.importKey(
+    'raw',
+    encoder.encode(token),
+    'HKDF',
+    false,
+    ['deriveKey'],
+  );
+  return crypto.subtle.deriveKey(
+    {
+      name: 'HKDF',
+      hash: 'SHA-256',
+      salt: salt as BufferSource,
+      info: encoder.encode('ysd-zero-cloud/app-runtime-env-v1'),
+    },
+    material,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    [usage],
+  );
+}
+
+/** Seals write-only deployment values for one paired node credential. */
+export async function sealNodeEnvironment(
+  token: string,
+  values: Record<string, string>,
+): Promise<string> {
+  const entries = Object.entries(values);
+  if (
+    entries.length > 100 ||
+    entries.some(
+      ([name, value]) =>
+        !/^[A-Z][A-Z0-9_]{1,63}$/.test(name) || value.length > 8192,
+    )
+  ) {
+    throw new Error('The deployment environment is invalid.');
+  }
+  const plaintext = stableJson(Object.fromEntries(entries.sort(([a], [b]) => a.localeCompare(b))));
+  if (encoder.encode(plaintext).byteLength > 48 * 1024) {
+    throw new Error('The deployment environment is too large.');
+  }
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const encrypted = await crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv: iv as BufferSource },
+    await nodeEnvelopeKey(token, salt, 'encrypt'),
+    encoder.encode(plaintext),
+  );
+  return `v1.${toBase64Url(salt)}.${toBase64Url(iv)}.${toBase64Url(new Uint8Array(encrypted))}`;
+}
+
+/** Opens a node-bound environment only inside the signed local handler. */
+export async function openNodeEnvironment(
+  token: string,
+  envelope: string | null,
+): Promise<Record<string, string>> {
+  if (!envelope) return {};
+  const [version, saltPart, ivPart, cipherPart] = envelope.split('.');
+  const salt = saltPart ? fromBase64Url(saltPart) : null;
+  const iv = ivPart ? fromBase64Url(ivPart) : null;
+  const cipher = cipherPart ? fromBase64Url(cipherPart) : null;
+  if (version !== 'v1' || !salt || salt.length !== 16 || !iv || iv.length !== 12 || !cipher) {
+    throw new Error('The deployment environment envelope is invalid.');
+  }
+  const plaintext = await crypto.subtle.decrypt(
+    { name: 'AES-GCM', iv: iv as BufferSource },
+    await nodeEnvelopeKey(token, salt, 'decrypt'),
+    cipher as BufferSource,
+  );
+  const parsed: unknown = JSON.parse(new TextDecoder().decode(plaintext));
+  if (!isRecord(parsed) || Object.keys(parsed).length > 100 ||
+      Object.entries(parsed).some(([name, value]) => !/^[A-Z][A-Z0-9_]{1,63}$/.test(name) || typeof value !== 'string' || value.length > 8192)) {
+    throw new Error('The decrypted deployment environment is invalid.');
+  }
+  return parsed as Record<string, string>;
 }
 
 function fromBase64Url(value: string): Uint8Array | null {

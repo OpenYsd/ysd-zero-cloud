@@ -121,4 +121,12 @@ export const ZERO_COST_RESOURCES = {
     freeTierEligible: true,
     note: 'Inference runs on hardware the workspace operator already owns; Cloudflare is only the D1-backed control plane',
   },
+  userOwnedAppCompute: {
+    name: 'User-owned Node.js App Runtime',
+    provider: 'User-owned Compute Node',
+    kind: 'compute',
+    estimatedMonthlyCost: 0,
+    freeTierEligible: true,
+    note: 'Build and runtime execute only on a paired machine; Cloudflare Worker and D1 remain the control plane',
+  },
 } as const satisfies Record<string, PlannedResource>;

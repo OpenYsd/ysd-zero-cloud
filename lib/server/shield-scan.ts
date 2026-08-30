@@ -33,6 +33,7 @@ import { storageShieldState } from './storage';
 import { nodesForShield } from './nodes';
 import { aiForShield } from './ai';
 import { gameServersForShield } from './game-servers';
+import { appRuntimeForShield } from './app-runtime-control';
 
 /**
  * YSD Shield: gathering the snapshot and persisting the result.
@@ -90,6 +91,7 @@ async function collectSnapshot(
     nodes,
     ai,
     gameServers,
+    appRuntime,
   ] = await Promise.all([
     secretsForShield(workspaceId),
     listTables({ workspaceId, userId }),
@@ -126,9 +128,10 @@ async function collectSnapshot(
     nodesForShield(workspaceId, now),
     aiForShield(workspaceId, now),
     gameServersForShield(workspaceId, now),
+    appRuntimeForShield(workspaceId, now),
   ]);
 
-  const network = readNetworkState();
+  const network = await readNetworkState(workspaceId);
 
   return {
     zeroModeEnabled: workspace?.zeroMode ?? true,
@@ -207,6 +210,7 @@ async function collectSnapshot(
     nodes,
     ai,
     gameServers,
+    appRuntime,
     now,
   };
 }

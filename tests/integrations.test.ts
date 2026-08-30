@@ -90,10 +90,11 @@ void test('repository references are parsed from the shapes an operator types', 
     parseRepository('https://github.com/OpenYsd/ysd-zero-cloud.git'),
     expected,
   );
-  // A pasted deep link keeps the owner and repo and drops the rest.
-  assert.deepEqual(
+  // Branches and commits travel in separate validated fields; deep links are
+  // never silently truncated into a different source identity.
+  assert.equal(
     parseRepository('https://github.com/OpenYsd/ysd-zero-cloud/tree/main'),
-    expected,
+    null,
   );
 });
 

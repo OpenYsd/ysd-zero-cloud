@@ -9,6 +9,7 @@ import storageSchema from '../../db/migrations/0005_storage.sql?raw';
 import computeNodesSchema from '../../db/migrations/0006_compute_nodes.sql?raw';
 import aiComputeSchema from '../../db/migrations/0007_ai_compute.sql?raw';
 import gameServersSchema from '../../db/migrations/0008_game_servers.sql?raw';
+import appRuntimeSchema from '../../db/migrations/0009_app_runtime.sql?raw';
 
 /**
  * D1 access and schema management.
@@ -28,6 +29,7 @@ const MIGRATIONS: { name: string; sql: string }[] = [
   { name: '0006_compute_nodes', sql: computeNodesSchema },
   { name: '0007_ai_compute', sql: aiComputeSchema },
   { name: '0008_game_servers', sql: gameServersSchema },
+  { name: '0009_app_runtime', sql: appRuntimeSchema },
 ];
 
 const LEDGER = `CREATE TABLE IF NOT EXISTS ysd_migration (
@@ -70,6 +72,10 @@ export const WORKSPACE_TABLES = [
   'game_server_action',
   'game_server_backup',
   'game_server_log',
+  'app_deployment_action',
+  'app_artifact',
+  'app_deployment_log',
+  'app_deployment_metric',
 ] as const;
 
 export function getDatabase(): D1Database {
@@ -83,13 +89,13 @@ export function getDatabase(): D1Database {
 }
 
 /**
- * A replayed migration re-runs `CREATE TABLE` against tables that already
- * exist. SQLite reports that as an ordinary error, and it is the one error
- * that means the migration already succeeded.
+ * A replayed migration can meet an existing table/index or an existing column
+ * when Wrangler's D1 ledger applied the same SQL before the app-local ledger.
+ * Those two SQLite errors mean the exact additive statement already landed.
  */
 function isAlreadyExists(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
-  return /already exists/i.test(message);
+  return /already exists|duplicate column name/i.test(message);
 }
 
 async function applyMigration(

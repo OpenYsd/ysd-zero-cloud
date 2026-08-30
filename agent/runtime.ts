@@ -12,6 +12,10 @@ import {
   discoverGameServerCapabilities,
   executeGameServerJob,
 } from './game-runtime.ts';
+import {
+  discoverAppRuntimeCapabilities,
+  executeAppRuntimeJob,
+} from './app-runtime.ts';
 
 import {
   CURRENT_AGENT_VERSION,
@@ -46,9 +50,10 @@ export async function collectCapabilities(
   const gpuModel = process.env.YSD_NODE_GPU?.trim().slice(0, 128) || null;
   const gpuVramBytes = nonNegativeEnvironmentBytes('YSD_NODE_GPU_VRAM_BYTES');
   const docker = process.env.YSD_NODE_DOCKER?.trim().toLowerCase() === 'true';
-  const [ai, gameServers] = await Promise.all([
+  const [ai, gameServers, appRuntime] = await Promise.all([
     discoverAiCapabilities(fetcher),
     discoverGameServerCapabilities(),
+    discoverAppRuntimeCapabilities(),
   ]);
   let disk = { totalBytes: 0, freeBytes: 0 };
   try {
@@ -75,9 +80,11 @@ export async function collectCapabilities(
     docker: { available: docker },
     ai,
     gameServers,
+    appRuntime,
     contracts: {
       ai: ai.runtimes.some((runtime) => runtime.available),
       gameServers: gameServers.minecraftJavaAvailable,
+      appRuntime: appRuntime.available,
     },
   };
 }
@@ -108,6 +115,7 @@ export async function executeSignedJob(input: {
   signal?: AbortSignal;
   fetcher?: LocalFetch;
   gameRootDirectory?: string;
+  appRootDirectory?: string;
   now?: number;
 }): Promise<AgentJobResult> {
   const now = input.now ?? Date.now();
@@ -189,6 +197,26 @@ export async function executeSignedJob(input: {
         rootDirectory:
           input.gameRootDirectory ?? path.resolve('.ysd-game-servers'),
         capabilities: input.capabilities.gameServers,
+        signal: input.signal,
+        fetcher: input.fetcher,
+      });
+    case 'app-runtime.action':
+      return executeAppRuntimeJob({
+        payload: input.claim.payload,
+        workspaceId: input.claim.workspaceId,
+        token: input.token,
+        capabilities: input.capabilities.appRuntime ?? {
+          available: false,
+          nodeVersion: process.versions.node,
+          nodeMajor: Number.parseInt(process.versions.node.split('.')[0] ?? '0', 10),
+          permissionModel: false,
+          networkGuard: false,
+          packageManagers: [],
+          activeDeployments: 0,
+          maxDeployments: 1,
+        },
+        rootDirectory:
+          input.appRootDirectory ?? path.resolve('.ysd-app-runtime'),
         signal: input.signal,
         fetcher: input.fetcher,
       });

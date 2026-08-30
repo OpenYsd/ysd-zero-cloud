@@ -80,7 +80,17 @@ void test('capabilities and metrics accept bounded hardware facts', () => {
         activeServers: 1,
         maxConcurrentServers: 4,
       },
-      contracts: { ai: true, gameServers: true },
+      appRuntime: {
+        available: false,
+        nodeVersion: '',
+        nodeMajor: 0,
+        permissionModel: false,
+        networkGuard: false,
+        packageManagers: [],
+        activeDeployments: 0,
+        maxDeployments: 1,
+      },
+      contracts: { ai: true, gameServers: true, appRuntime: false },
     },
   );
   assert.equal(

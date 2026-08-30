@@ -15,6 +15,7 @@ export type NetworkState = {
   customDomains: number;
   tunnels: number;
   publicStorageEndpoints: number;
+  privateAppServices: number;
   routes: NetworkRoute[];
 };
 
@@ -22,6 +23,7 @@ export function buildNetworkState(input: {
   origin: string;
   mode?: string;
   storageAvailable: boolean;
+  localServices?: { id: string; repository: string; address: string; nodeName: string }[];
 }): NetworkState {
   let url: URL;
   try {
@@ -34,6 +36,7 @@ export function buildNetworkState(input: {
   const mode =
     input.mode === 'workers-dev-only' ? 'workers-dev-only' : 'custom';
 
+  const localServices = input.localServices ?? [];
   return {
     mode,
     origin: url.origin,
@@ -45,6 +48,7 @@ export function buildNetworkState(input: {
     // R2 is intentionally reachable only through the session-scoped Worker
     // route. Neither r2.dev nor a bucket custom domain is enabled.
     publicStorageEndpoints: 0,
+    privateAppServices: localServices.length,
     routes: [
       {
         id: 'app',
@@ -81,6 +85,13 @@ export function buildNetworkState(input: {
         exposure: 'internal',
         protection: 'Worker binding · tenant predicates',
       },
+      ...localServices.map((service) => ({
+        id: `app-runtime:${service.id}`,
+        label: `${service.repository} · ${service.nodeName}`,
+        address: service.address,
+        exposure: 'internal' as const,
+        protection: 'Private localhost · no public URL or TLS route',
+      })),
     ],
   };
 }
