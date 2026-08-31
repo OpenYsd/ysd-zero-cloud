@@ -69,6 +69,12 @@ export const PERMISSIONS = [
   'session.revoke-member',
   'audit.read',
   'audit.export',
+  'workflow.read',
+  'workflow.create',
+  'workflow.manage',
+  'workflow.execute',
+  'workflow.retry',
+  'notification.read',
   'usage.read',
   'shield.read',
   'shield.scan',
@@ -89,6 +95,7 @@ const VIEWER: readonly Permission[] = [
   'session.read-own', 'session.revoke-own', 'usage.read', 'shield.read',
   'storage.read',
   'exposure.read',
+  'workflow.read', 'notification.read',
 ];
 
 const DEVELOPER: readonly Permission[] = [
@@ -98,6 +105,7 @@ const DEVELOPER: readonly Permission[] = [
   'game-server.manage', 'game-server.lifecycle', 'ai.jobs.run', 'shield.scan',
   'storage.write',
   'exposure.preview',
+  'workflow.create', 'workflow.execute',
 ];
 
 const ADMIN: readonly Permission[] = [
@@ -108,6 +116,7 @@ const ADMIN: readonly Permission[] = [
   'service-account.read', 'service-account.manage', 'session.revoke-member',
   'audit.read', 'audit.export',
   'exposure.manage', 'domain.manage',
+  'workflow.manage', 'workflow.retry',
 ];
 
 const OWNER: readonly Permission[] = [
@@ -174,6 +183,7 @@ const PROJECT_BOUND_PERMISSIONS = new Set<Permission>([
   'deployment.lifecycle',
   'exposure.read',
   'exposure.preview',
+  'workflow.read', 'workflow.create', 'workflow.execute',
   'secret.metadata.read',
   'secret.write',
   'member.read',
@@ -279,6 +289,8 @@ export function permissionForRequest(method: string, pathname: string): Permissi
   if (pathname.startsWith('/api/shield/scan')) return 'shield.scan';
   if (pathname.startsWith('/api/shield')) return 'shield.read';
   if (pathname.startsWith('/api/settings')) return read ? 'workspace.read' : 'workspace.update';
+  if (pathname.startsWith('/api/workflows')) return read ? 'workflow.read' : 'workflow.create';
+  if (pathname.startsWith('/api/notifications')) return 'notification.read';
   if (pathname.startsWith('/api/admin/users')) return read ? 'admin.users.read' : 'admin.users.write';
   return null;
 }

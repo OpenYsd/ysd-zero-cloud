@@ -16,6 +16,7 @@ import {
 import { recordAudit } from './audit';
 import { count, db, execute, query, queryOne } from './db';
 import { assertMemberCapacity } from './organization-limits';
+import { emitWorkflowEvent } from './workflow-events';
 
 type OrganizationRow = Omit<Organization, 'adminCanRevokeSessions'> & {
   adminCanRevokeSessions: number;
@@ -45,6 +46,30 @@ export type OrganizationAccess = {
 };
 
 const MAX_ORGANIZATIONS_PER_USER = 8;
+
+async function emitMemberWorkflowEvents(input: {
+  organizationId: string;
+  type: 'organization.member.invited' | 'organization.member.removed' | 'organization.member.role_changed';
+  resourceId: string;
+  payload: Record<string, string>;
+  dedupeKey: string;
+}): Promise<void> {
+  const workspaces = await query<{ id: string }>(
+    'SELECT id FROM workspace WHERE organizationId = ? AND archivedAt IS NULL',
+    input.organizationId,
+  );
+  await Promise.all(workspaces.map(async (workspace) => {
+    const result = await emitWorkflowEvent({
+      workspaceId: workspace.id,
+      type: input.type,
+      resourceType: input.type === 'organization.member.invited' ? 'invitation' : 'member',
+      resourceId: input.resourceId,
+      payload: input.payload,
+      dedupeKey: `${input.dedupeKey}:${workspace.id}`,
+    });
+    if (!result.ok) console.error('workflow.organization_event_rejected', result.error);
+  }));
+}
 
 function toOrganization(row: OrganizationRow): Organization {
   return { ...row, adminCanRevokeSessions: row.adminCanRevokeSessions === 1 };
@@ -566,6 +591,13 @@ export async function changeMemberRole(input: {
     action: 'member.role.change', resourceType: 'member', resourceId: input.targetUserId,
     outcome: 'success', metadata: { from: target.role, to: input.role },
   });
+  await emitMemberWorkflowEvents({
+    organizationId: input.organizationId,
+    type: 'organization.member.role_changed',
+    resourceId: input.targetUserId,
+    payload: { previousRole: target.role, role: input.role },
+    dedupeKey: `member-role:${input.targetUserId}:${input.role}:${Date.now()}`,
+  });
   return { ok: true };
 }
 
@@ -603,6 +635,15 @@ export async function setMemberStatus(input: {
     action: `member.${input.action}`, resourceType: 'member', resourceId: input.targetUserId,
     outcome: 'success',
   });
+  if (input.action === 'remove') {
+    await emitMemberWorkflowEvents({
+      organizationId: input.organizationId,
+      type: 'organization.member.removed',
+      resourceId: input.targetUserId,
+      payload: { previousRole: target.role, status: 'removed' },
+      dedupeKey: `member-removed:${input.targetUserId}:${now}`,
+    });
+  }
   return { ok: true };
 }
 
@@ -794,6 +835,13 @@ export async function createInvitation(input: {
     actorType: 'user', actorId: input.actorId, action: 'invitation.create',
     resourceType: 'invitation', resourceId: invitation.id, outcome: 'success',
     metadata: { email, role: input.role, expiresAt },
+  });
+  await emitMemberWorkflowEvents({
+    organizationId: input.organizationId,
+    type: 'organization.member.invited',
+    resourceId: invitation.id,
+    payload: { role: input.role, status: 'pending' },
+    dedupeKey: `member-invited:${invitation.id}`,
   });
   return { invitation, token };
 }

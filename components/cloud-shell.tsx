@@ -29,6 +29,7 @@ import {
   ScrollText,
   MonitorSmartphone,
   Plus,
+  Workflow,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Switch } from '@/components/ui/switch';
@@ -74,6 +75,7 @@ const navigation = [
   { label: 'Logs', href: '/logs', icon: TerminalSquare, permission: 'workspace.read' },
   { label: 'Networking', href: '/networking', icon: Network, permission: 'workspace.read' },
   { label: 'Secrets', href: '/secrets', icon: KeyRound, permission: 'secret.metadata.read' },
+  { label: 'Workflows', href: '/workflows', icon: Workflow, permission: 'workflow.read' },
   { label: 'Usage', href: '/usage', icon: Gauge, permission: 'usage.read' },
   { label: 'YSD Shield', href: '/shield', icon: ShieldCheck, permission: 'shield.read' },
   { label: 'Members', href: '/members', icon: Users, permission: 'member.read' },
@@ -288,7 +290,7 @@ function CloudShellFrame({
               YSD Zero Cloud
             </p>
             <p className="mt-1 text-[10px] font-medium uppercase tracking-[0.16em] text-white/35">
-              Cloud OS · v0.7
+              Cloud Automation OS · v0.9
             </p>
           </div>
         </div>

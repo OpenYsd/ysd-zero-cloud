@@ -8,12 +8,17 @@ import { createId } from '@/lib/crypto';
 import { type NodeJobState } from '@/lib/nodes';
 import { db, execute, queryOne } from './db';
 import { writeLog } from './logs';
+import { emitWorkflowEvent } from './workflow-events';
 
 type AppJob = {
   id: string;
   workspaceId: string;
   payload: string;
   assignedNodeId: string | null;
+  workflowId: string | null;
+  workflowExecutionId: string | null;
+  workflowCorrelationId: string | null;
+  workflowChainDepth: number | null;
 };
 
 function integer(value: unknown, maximum = Number.MAX_SAFE_INTEGER): number | null {
@@ -361,6 +366,36 @@ export async function recordAppRuntimeJobOutcome(input: {
     actor: input.job.assignedNodeId ? `agent:${input.job.assignedNodeId}` : 'node-agent',
     resource: payload.deploymentId,
   });
+  const workflowEvent = deploymentState === 'failed' || deploymentState === 'timed_out' ||
+      deploymentState === 'crash_loop'
+    ? 'deployment.failed'
+    : effectiveSuccess && payload.operation === 'rollback'
+      ? 'deployment.rolled_back'
+      : effectiveSuccess && deploymentState === 'healthy'
+        ? 'deployment.deployed'
+        : null;
+  if (workflowEvent) {
+    await emitWorkflowEvent({
+      workspaceId: input.job.workspaceId,
+      type: workflowEvent,
+      resourceType: 'deployment',
+      resourceId: payload.deploymentId,
+      projectId: payload.projectId,
+      payload: {
+        status: deploymentState,
+        projectId: payload.projectId,
+        deploymentId: payload.deploymentId,
+        nodeId: input.job.assignedNodeId,
+        environment: payload.environment,
+      },
+      dedupeKey: `${workflowEvent}:${payload.deploymentId}:${input.job.id}`,
+      correlationId: input.job.workflowCorrelationId ?? undefined,
+      causationId: input.job.workflowExecutionId,
+      sourceWorkflowId: input.job.workflowId,
+      chainDepth: input.job.workflowChainDepth ?? 0,
+      createdAt: input.now,
+    }).catch(() => undefined);
+  }
 }
 
 export async function syncAppRuntimeSnapshots(input: {

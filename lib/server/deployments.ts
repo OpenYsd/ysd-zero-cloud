@@ -27,7 +27,7 @@ import { count, db, execute, query, queryOne } from './db';
 import { runtimeEnv } from './env';
 import { inspectRepositoryForDeploy } from './github';
 import { writeLog } from './logs';
-import { enqueueJob } from './nodes';
+import { enqueueJob, type WorkflowJobContext } from './nodes';
 import { recordAppRuntimeSecurityEvent } from './app-runtime-control';
 import { assertResourceCapacity } from './organization-limits';
 import {
@@ -37,6 +37,7 @@ import {
   projectNameFromRepository,
   setProjectStatus,
 } from './projects';
+import { emitWorkflowEvent } from './workflow-events';
 
 export type { Deployment, DeploymentState };
 
@@ -579,6 +580,21 @@ export async function planDeployment(request: PlanRequest): Promise<PlanOutcome>
     actor: request.actor,
     resource: deploymentId,
   });
+  await emitWorkflowEvent({
+    workspaceId: request.workspaceId,
+    type: 'deployment.created',
+    resourceType: 'deployment',
+    resourceId: deploymentId,
+    projectId,
+    payload: {
+      status: 'queued',
+      projectId,
+      deploymentId,
+      nodeId: node.row.id,
+      environment: request.environment,
+    },
+    dedupeKey: `deployment.created:${deploymentId}`,
+  }).catch(() => undefined);
   return {
     ok: true,
     plan,
@@ -659,6 +675,7 @@ export async function createDeploymentAction(input: {
   targetArtifactId?: string | null;
   idempotencyKey: string | null;
   allowedProjectIds?: readonly string[] | null;
+  workflowContext?: WorkflowJobContext;
 }): Promise<{ ok: true; action: AppDeploymentAction; deployment: Deployment; duplicate: boolean } | { ok: false; status: number; error: string }> {
   const detail = await getDeployment(input.workspaceId, input.deploymentId, input.allowedProjectIds);
   if (!detail || !detail.projectId || !detail.nodeId) return { ok: false, status: 404, error: 'Deployment not found.' };
@@ -729,6 +746,7 @@ export async function createDeploymentAction(input: {
     payload,
     targetNodeId: detail.nodeId,
     idempotencyKey: key ? `app:${key}` : `app:${input.operation}:${actionId}`,
+    workflowContext: input.workflowContext,
   });
   if (!queued.ok) return queued;
   if (!queued.created && key) {

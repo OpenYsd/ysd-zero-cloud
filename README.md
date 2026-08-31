@@ -1,10 +1,12 @@
 # YSD Zero Cloud
 
-YSD Zero Cloud is a zero-cost-first cloud operating system. Version `0.8.0` runs authentication,
+YSD Zero Cloud is a zero-cost-first cloud operating system. Version `0.9.0` runs authentication,
 persistence, security scanning, the cost guard, private-object storage policy, network inventory,
 an outbound-only user-owned compute control plane, a private Node.js App Runtime, local AI
 scheduling, private Minecraft Java server orchestration, organization collaboration, and a
-fail-closed Public App Exposure control plane against Cloudflare Workers and D1.
+fail-closed Public App Exposure control plane against Cloudflare Workers and D1. It also includes
+the tenant-isolated YSD Workflows engine: immutable published versions, bounded D1 execution,
+internal notifications, audit history, and one global free-plan scheduler tick.
 
 **Live:** <https://ysd-zero-cloud.ysd-zero-cloud.workers.dev>
 
@@ -36,6 +38,7 @@ deployed Worker's explicit zero-cost configuration.
 | YSD AI Compute    | Approved local models, safe scheduling, cancellation, results, and metrics   |
 | App Runtime       | Private Node.js deploy, health, logs, metrics, rollback, and artifact guards  |
 | Game Servers      | Private Minecraft Java lifecycle, players, backups, logs, and resource guards|
+| Workflows         | D1 triggers, conditions, guarded actions, versions, executions, and notices  |
 
 Storage, Networking, Nodes, App Runtime, YSD AI Compute, and Game Servers are live surfaces.
 The current Cloudflare account returns `10042: Please enable R2`, so Storage honestly renders the

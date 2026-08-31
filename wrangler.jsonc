@@ -13,7 +13,8 @@
   //   4. npm run db:migrate
   //
   // Everything referenced here is on a Cloudflare free plan. There is no
-  // paid binding, no Durable Object, and no scheduled worker.
+  // paid binding, no Durable Object, no Queue, and no Cloudflare Workflow.
+  // Phase 9 uses one Free-plan Cron Trigger to advance the D1 state machine.
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "ysd-zero-cloud",
   "main": "dist/server/index.js",
@@ -21,6 +22,11 @@
   "compatibility_flags": ["nodejs_compat"],
   "observability": {
     "enabled": true,
+  },
+  "triggers": {
+    // One account-level trigger out of the five allowed on Workers Free.
+    // Individual schedules remain D1 rows and share this single tick.
+    "crons": ["* * * * *"],
   },
   "vars": {
     // The deployed origin. Better Auth otherwise derives it from each request

@@ -12,6 +12,7 @@ import gameServersSchema from '../../db/migrations/0008_game_servers.sql?raw';
 import appRuntimeSchema from '../../db/migrations/0009_app_runtime.sql?raw';
 import organizationsSchema from '../../db/migrations/0010_organizations.sql?raw';
 import publicExposureSchema from '../../db/migrations/0011_public_exposure.sql?raw';
+import workflowsSchema from '../../db/migrations/0012_workflows.sql?raw';
 
 /**
  * D1 access and schema management.
@@ -34,6 +35,7 @@ const MIGRATIONS: { name: string; sql: string }[] = [
   { name: '0009_app_runtime', sql: appRuntimeSchema },
   { name: '0010_organizations', sql: organizationsSchema },
   { name: '0011_public_exposure', sql: publicExposureSchema },
+  { name: '0012_workflows', sql: workflowsSchema },
 ];
 
 const LEDGER = `CREATE TABLE IF NOT EXISTS ysd_migration (
@@ -92,6 +94,16 @@ export const WORKSPACE_TABLES = [
   'app_deployment_metric',
   'public_exposure',
   'exposure_domain',
+  'workflow',
+  'workflow_version',
+  'workflow_variable',
+  'workflow_event',
+  'workflow_execution',
+  'workflow_action_execution',
+  'workflow_incident',
+  'workflow_security_event',
+  'internal_notification',
+  'workflow_resource_state',
 ] as const;
 
 export function getDatabase(): D1Database {

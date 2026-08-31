@@ -62,10 +62,12 @@ import {
   type SignedJobClaim,
 } from '@/lib/nodes';
 import { authSecret } from './auth';
+import { MAX_WORKFLOW_CHAIN_DEPTH } from '@/lib/workflows';
 import { db, execute, query, queryOne } from './db';
 import { clientAddress, enforceRateLimit } from './rate-limit';
 import { writeLog } from './logs';
 import { assertResourceCapacity } from './organization-limits';
+import { emitWorkflowEvent, recordWorkflowSecurityEvent } from './workflow-events';
 import {
   recordAppRuntimeJobOutcome,
   syncAppRuntimeSnapshots,
@@ -99,6 +101,8 @@ type NodeRow = {
   lastHeartbeatAt: number | null;
   revokedAt: number | null;
   revokedBy: string | null;
+  assignmentsDisabledAt: number | null;
+  assignmentsDisabledBy: string | null;
   createdAt: number;
   updatedAt: number;
 };
@@ -132,6 +136,17 @@ type JobRow = {
   createdAt: number;
   updatedAt: number;
   completedAt: number | null;
+  workflowId: string | null;
+  workflowExecutionId: string | null;
+  workflowCorrelationId: string | null;
+  workflowChainDepth: number | null;
+};
+
+export type WorkflowJobContext = {
+  workflowId: string;
+  executionId: string;
+  correlationId: string;
+  chainDepth: number;
 };
 
 type PairingRow = {
@@ -247,6 +262,8 @@ function toNode(row: NodeWithMetricRow, now: number): ComputeNode {
     pairedAt: row.pairedAt,
     lastHeartbeatAt: row.lastHeartbeatAt,
     revokedAt: row.revokedAt,
+    assignmentsDisabledAt: row.assignmentsDisabledAt,
+    assignmentsDisabledBy: row.assignmentsDisabledBy,
     metrics: metricsFromRow(row),
   };
 }
@@ -839,15 +856,16 @@ async function syncGameServerSnapshots(input: {
 }): Promise<boolean> {
   const snapshots = parseGameServerSnapshots(input.value);
   if (!snapshots) return false;
-  const rows = await query<{ id: string }>(
-    `SELECT id FROM game_server
+  const rows = await query<{ id: string; status: string; crashLoop: number; crashCount: number }>(
+    `SELECT id, status, crashLoop, crashCount FROM game_server
      WHERE workspaceId = ? AND nodeId = ? AND deletedAt IS NULL`,
     input.workspaceId,
     input.nodeId,
   );
-  const known = new Set(rows.map((row) => row.id));
+  const known = new Map(rows.map((row) => [row.id, row]));
   const database = await db();
   const statements: D1PreparedStatement[] = [];
+  const transitions: { type: 'game_server.started' | 'game_server.stopped' | 'game_server.crashed' | 'game_server.crash_loop'; serverId: string; status: string; crashCount: number; observedAt: number }[] = [];
   for (const snapshot of snapshots) {
     if (
       Math.abs(snapshot.observedAt - input.now) > NODE_TIMING.requestSkewMs
@@ -870,7 +888,8 @@ async function syncGameServerSnapshots(input: {
       );
       continue;
     }
-    if (!known.has(snapshot.serverId)) {
+    const previous = known.get(snapshot.serverId);
+    if (!previous) {
       statements.push(
         database
           .prepare(
@@ -889,6 +908,20 @@ async function syncGameServerSnapshots(input: {
       );
       continue;
     }
+    const transition = snapshot.crashLoop && previous.crashLoop !== 1
+      ? 'game_server.crash_loop' as const
+      : snapshot.status === 'running' && previous.status !== 'running'
+        ? 'game_server.started' as const
+        : snapshot.status === 'stopped' && previous.status !== 'stopped'
+          ? 'game_server.stopped' as const
+          : (snapshot.status === 'error' || snapshot.crashCount > previous.crashCount)
+              && previous.status !== 'error'
+            ? 'game_server.crashed' as const
+            : null;
+    if (transition) transitions.push({
+      type: transition, serverId: snapshot.serverId, status: snapshot.status,
+      crashCount: snapshot.crashCount, observedAt: snapshot.observedAt,
+    });
     statements.push(
       database
         .prepare(
@@ -953,6 +986,18 @@ async function syncGameServerSnapshots(input: {
     }
   }
   if (statements.length > 0) await database.batch(statements);
+  await Promise.all(transitions.map((transition) => emitWorkflowEvent({
+    workspaceId: input.workspaceId,
+    type: transition.type,
+    resourceType: 'game_server',
+    resourceId: transition.serverId,
+    payload: {
+      status: transition.status, serverId: transition.serverId,
+      nodeId: input.nodeId, crashCount: transition.crashCount,
+    },
+    dedupeKey: `${transition.type}:${transition.serverId}:snapshot:${transition.observedAt}`,
+    createdAt: input.now,
+  }).catch(() => undefined)));
   await pruneGameServerLogs(input.workspaceId, input.nodeId, input.now);
   return true;
 }
@@ -1137,6 +1182,13 @@ export async function claimNextJob(
 ): Promise<{ claim: SignedJobClaim; signature: string } | null> {
   const now = Date.now();
   await requeueExpiredJobs(context.node.workspaceId, now);
+  const assignmentPolicy = await queryOne<{ allowed: number }>(
+    `SELECT CASE WHEN revokedAt IS NULL AND assignmentsDisabledAt IS NULL THEN 1 ELSE 0 END AS allowed
+       FROM compute_node WHERE workspaceId = ? AND id = ?`,
+    context.node.workspaceId,
+    context.node.id,
+  );
+  if (assignmentPolicy?.allowed !== 1) return null;
   const capabilities = capabilitiesFromRow(context.node.capabilities);
 
   const candidates = await query<JobRow>(
@@ -1380,6 +1432,27 @@ async function recordAiJobOutcome(input: {
         );
       }
     }
+    if (input.state === 'succeeded' || input.state === 'failed' || input.state === 'timed_out') {
+      const type = input.state === 'succeeded' ? 'ai.job.completed' : 'ai.job.failed';
+      await emitWorkflowEvent({
+        workspaceId: input.job.workspaceId,
+        type,
+        resourceType: 'ai_job',
+        resourceId: input.job.id,
+        payload: {
+          status: input.state,
+          jobId: input.job.id,
+          nodeId: input.job.assignedNodeId,
+          failureCount: input.state === 'succeeded' ? 0 : input.job.attempts,
+        },
+        dedupeKey: `${type}:${input.job.id}:${input.job.attempts}`,
+        correlationId: input.job.workflowCorrelationId ?? undefined,
+        causationId: input.job.workflowExecutionId,
+        sourceWorkflowId: input.job.workflowId,
+        chainDepth: input.job.workflowChainDepth ?? 0,
+        createdAt: input.now,
+      }).catch(() => undefined);
+    }
     return;
   }
 
@@ -1494,6 +1567,26 @@ async function recordGameServerJobOutcome(input: {
         payload.backupId,
         serverId,
       );
+    }
+    if (input.state === 'failed' || input.state === 'timed_out') {
+      await emitWorkflowEvent({
+        workspaceId: input.job.workspaceId,
+        type: 'game_server.crashed',
+        resourceType: 'game_server',
+        resourceId: serverId,
+        payload: {
+          status: input.state,
+          serverId,
+          nodeId: input.job.assignedNodeId,
+          crashCount: input.job.attempts,
+        },
+        dedupeKey: `game_server.crashed:${serverId}:${input.job.id}`,
+        correlationId: input.job.workflowCorrelationId ?? undefined,
+        causationId: input.job.workflowExecutionId,
+        sourceWorkflowId: input.job.workflowId,
+        chainDepth: input.job.workflowChainDepth ?? 0,
+        createdAt: input.now,
+      }).catch(() => undefined);
     }
     return;
   }
@@ -1673,6 +1766,34 @@ async function recordGameServerJobOutcome(input: {
       input.job.assignedNodeId,
       input.now,
     );
+  }
+  const workflowEvent = input.result?.crashLoop === true
+    ? 'game_server.crash_loop'
+    : input.job.type === 'game-server.lifecycle' &&
+        (payload?.operation === 'start' || payload?.operation === 'restart')
+      ? 'game_server.started'
+      : input.job.type === 'game-server.lifecycle' && payload?.operation === 'stop'
+        ? 'game_server.stopped'
+        : null;
+  if (workflowEvent) {
+    await emitWorkflowEvent({
+      workspaceId: input.job.workspaceId,
+      type: workflowEvent,
+      resourceType: 'game_server',
+      resourceId: serverId,
+      payload: {
+        status: persistedStatus ?? 'unknown',
+        serverId,
+        nodeId: input.job.assignedNodeId,
+        crashCount: boundedResultInteger(input.result?.crashCount, 1_000_000) ?? 0,
+      },
+      dedupeKey: `${workflowEvent}:${serverId}:${input.job.id}`,
+      correlationId: input.job.workflowCorrelationId ?? undefined,
+      causationId: input.job.workflowExecutionId,
+      sourceWorkflowId: input.job.workflowId,
+      chainDepth: input.job.workflowChainDepth ?? 0,
+      createdAt: input.now,
+    }).catch(() => undefined);
   }
 }
 
@@ -1893,6 +2014,7 @@ export async function enqueueJob(input: {
   payload: unknown;
   targetNodeId: unknown;
   idempotencyKey: string | null;
+  workflowContext?: WorkflowJobContext;
 }): Promise<
   | { ok: true; job: NodeJob; created: boolean }
   | { ok: false; status: number; error: string }
@@ -1909,6 +2031,27 @@ export async function enqueueJob(input: {
     typeof input.targetNodeId === 'string' && input.targetNodeId
       ? input.targetNodeId
       : null;
+  if (input.workflowContext) {
+    const context = input.workflowContext;
+    if (!Number.isSafeInteger(context.chainDepth) || context.chainDepth < 1 ||
+        context.chainDepth > MAX_WORKFLOW_CHAIN_DEPTH) {
+      return { ok: false, status: 400, error: 'Workflow job chain depth is invalid.' };
+    }
+    const trusted = await queryOne<{ id: string }>(
+      `SELECT e.id FROM workflow_execution e JOIN workflow w ON w.id = e.workflowId
+        WHERE e.workspaceId = ? AND e.id = ? AND e.workflowId = ?
+          AND e.correlationId = ? AND w.deletedAt IS NULL`,
+      input.workspaceId, context.executionId, context.workflowId, context.correlationId,
+    );
+    if (!trusted) {
+      await recordWorkflowSecurityEvent({
+        workspaceId: input.workspaceId, workflowId: context.workflowId,
+        executionId: context.executionId, type: 'workflow-job-context-rejected',
+        severity: 'critical', detail: 'A node job attempted to forge workflow causation metadata.',
+      }).catch(() => undefined);
+      return { ok: false, status: 400, error: 'Workflow job context is invalid.' };
+    }
+  }
   if (targetNodeId) {
     const node = await queryOne<{ id: string }>(
       `SELECT id FROM compute_node
@@ -1951,9 +2094,10 @@ export async function enqueueJob(input: {
      (id, workspaceId, type, payload, payloadHash, state, priority,
       idempotencyKey, targetNodeId, assignedNodeId, leaseId, leaseExpiresAt,
       attempts, maxAttempts, claimSignature, result, lastError, createdBy,
-      createdAt, updatedAt, completedAt)
+      createdAt, updatedAt, completedAt, workflowId, workflowExecutionId,
+      workflowCorrelationId, workflowChainDepth)
      VALUES (?, ?, ?, ?, ?, 'queued', 0, ?, ?, NULL, NULL, NULL, 0, ?, NULL,
-             NULL, NULL, ?, ?, ?, NULL)`,
+             NULL, NULL, ?, ?, ?, NULL, ?, ?, ?, ?)`,
     id,
     input.workspaceId,
     validated.type,
@@ -1965,6 +2109,10 @@ export async function enqueueJob(input: {
     input.actor,
     now,
     now,
+    input.workflowContext?.workflowId ?? null,
+    input.workflowContext?.executionId ?? null,
+    input.workflowContext?.correlationId ?? null,
+    input.workflowContext?.chainDepth ?? null,
   );
   const created = await queryOne<JobRow>(
     idempotencyKey
@@ -2000,6 +2148,7 @@ export async function revokeNode(input: {
   workspaceId: string;
   nodeId: string;
   actor: string;
+  workflowContext?: WorkflowJobContext;
 }): Promise<boolean> {
   const node = await queryOne<Pick<NodeRow, 'id' | 'name'>>(
     'SELECT id, name FROM compute_node WHERE workspaceId = ? AND id = ?',
@@ -2154,6 +2303,18 @@ export async function revokeNode(input: {
     actor: input.actor,
     resource: input.nodeId,
   });
+  await emitWorkflowEvent({
+    workspaceId: input.workspaceId,
+    type: 'node.revoked',
+    resourceType: 'node',
+    resourceId: input.nodeId,
+    payload: { status: 'revoked', nodeId: input.nodeId },
+    dedupeKey: `node.revoked:${input.nodeId}:${now}`,
+    correlationId: input.workflowContext?.correlationId,
+    causationId: input.workflowContext?.executionId ?? null,
+    sourceWorkflowId: input.workflowContext?.workflowId ?? null,
+    chainDepth: input.workflowContext?.chainDepth ?? 0,
+  }).catch(() => undefined);
   return true;
 }
 

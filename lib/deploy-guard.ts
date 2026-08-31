@@ -78,6 +78,18 @@ export function inspectDeploymentConfig(
       reasons.push(`The generated config enables ${key}.`);
   }
 
+  const triggers = isRecord(config.triggers) ? config.triggers : {};
+  const crons = Array.isArray(triggers.crons) ? triggers.crons : [];
+  if (
+    Object.keys(triggers).some((key) => key !== 'crons') ||
+    crons.length !== 1 ||
+    crons[0] !== '* * * * *'
+  ) {
+    reasons.push(
+      'Phase 9 requires exactly one reviewed one-minute Cron Trigger on the existing Worker.',
+    );
+  }
+
   const vars = isRecord(config.vars) ? config.vars : {};
   const attestation = {
     transport: vars.YSD_PUBLIC_TRANSPORT_MODE,

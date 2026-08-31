@@ -11,6 +11,7 @@ import type {
   GameServerStatus,
   MinecraftProperties,
 } from './game-servers.ts';
+import type { WorkflowDefinition, WorkflowExecutionState } from './workflows.ts';
 
 /**
  * The shapes that cross the server/client boundary.
@@ -71,7 +72,8 @@ export type LogSource =
   | 'networking'
   | 'node'
   | 'ai'
-  | 'game-server';
+  | 'game-server'
+  | 'workflow';
 
 export const LOG_LEVELS = ['INFO', 'WARN', 'ERROR'] as const;
 
@@ -88,6 +90,7 @@ export const LOG_SOURCES = [
   'node',
   'ai',
   'game-server',
+  'workflow',
 ] as const;
 
 export type StorageObject = {
@@ -159,6 +162,8 @@ export type ComputeNode = {
   pairedAt: number;
   lastHeartbeatAt: number | null;
   revokedAt: number | null;
+  assignmentsDisabledAt: number | null;
+  assignmentsDisabledBy: string | null;
   metrics: NodeMetrics | null;
 };
 
@@ -471,6 +476,146 @@ export type AppDeploymentLog = {
   createdAt: number;
 };
 
+export type WorkflowVersion = {
+  id: string;
+  workflowId: string;
+  organizationId: string;
+  workspaceId: string;
+  projectId: string | null;
+  version: number;
+  kind: 'draft' | 'published' | 'rollback';
+  triggerType: string;
+  definition: WorkflowDefinition;
+  definitionHash: string;
+  sourceVersionId: string | null;
+  createdBy: string;
+  createdAt: number;
+  publishedAt: number | null;
+};
+
+export type WorkflowActionExecution = {
+  id: string;
+  executionId: string;
+  actionIndex: number;
+  attempt: number;
+  actionType: string;
+  state: 'running' | 'succeeded' | 'failed' | 'skipped';
+  resourceType: string | null;
+  resourceId: string | null;
+  error: string | null;
+  startedAt: number;
+  finishedAt: number | null;
+};
+
+export type WorkflowExecution = {
+  id: string;
+  organizationId: string;
+  workspaceId: string;
+  projectId: string | null;
+  workflowId: string;
+  versionId: string;
+  eventId: string;
+  state: WorkflowExecutionState;
+  idempotencyKey: string;
+  correlationId: string;
+  causationId: string | null;
+  chainDepth: number;
+  actionIndex: number;
+  attempts: number;
+  maxAttempts: number;
+  nextAttemptAt: number | null;
+  timeoutAt: number;
+  leaseExpiresAt: number | null;
+  cancelRequestedAt: number | null;
+  cancelRequestedBy: string | null;
+  lastError: string | null;
+  startedAt: number | null;
+  finishedAt: number | null;
+  deadLetterAt: number | null;
+  manualRetryOf: string | null;
+  createdBy: string;
+  createdAt: number;
+  updatedAt: number;
+  actions: WorkflowActionExecution[];
+};
+
+export type WorkflowVariable = {
+  id: string;
+  name: string;
+  kind: 'text' | 'number' | 'boolean' | 'secret';
+  value: string | null;
+  secretId: string | null;
+  secretName: string | null;
+  secretEnvironment: string | null;
+  secretScope: string | null;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type Workflow = {
+  id: string;
+  organizationId: string;
+  workspaceId: string;
+  projectId: string | null;
+  name: string;
+  description: string;
+  status: 'draft' | 'active' | 'paused';
+  activeVersionId: string | null;
+  latestVersion: number;
+  ownerUserId: string;
+  failureStreak: number;
+  lastTriggeredAt: number | null;
+  lastSucceededAt: number | null;
+  lastFailedAt: number | null;
+  lastScheduledAt: number | null;
+  createdBy: string;
+  createdAt: number;
+  updatedAt: number;
+  activeVersion: WorkflowVersion | null;
+  versions: WorkflowVersion[];
+  executions: WorkflowExecution[];
+  variables: WorkflowVariable[];
+};
+
+export type InternalNotification = {
+  id: string;
+  projectId: string | null;
+  title: string;
+  message: string;
+  severity: 'low' | 'medium' | 'high' | 'critical';
+  resourceType: string;
+  resourceId: string | null;
+  href: string | null;
+  readAt: number | null;
+  createdAt: number;
+};
+
+export type WorkflowsState = {
+  workflows: Workflow[];
+  notifications: InternalNotification[];
+  templates: readonly {
+    id: string;
+    name: string;
+    description: string;
+    projectScoped: boolean;
+    definition: WorkflowDefinition;
+  }[];
+  summary: {
+    total: number;
+    active: number;
+    paused: number;
+    failedExecutions: number;
+    unreadNotifications: number;
+  };
+  schedule: {
+    available: true;
+    mode: 'single-free-cron-trigger';
+    tickMinutes: 1;
+  };
+  zeroModeEnforced: true;
+  projectedMonthlyCost: 0;
+};
+
 export type Workspace = {
   id: string;
   organizationId: string;
@@ -614,6 +759,7 @@ export const SECTIONS = [
   'nodes',
   'logs',
   'networking',
+  'workflows',
   'secrets',
   'usage',
   'shield',
@@ -650,6 +796,7 @@ export const LIVE_SECTIONS: readonly Section[] = [
   'settings',
   'storage',
   'networking',
+  'workflows',
   'nodes',
   'ai',
   'game-servers',

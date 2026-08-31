@@ -20,6 +20,7 @@ import { SecretsView } from '@/components/secrets-view';
 import { SettingsView } from '@/components/settings-view';
 import { ShieldView } from '@/components/shield-view';
 import { SmartDeployPanel } from '@/components/smart-deploy-panel';
+import { WorkflowsView } from '@/components/workflows-view';
 import {
   AuditView,
   InvitationsView,
@@ -53,6 +54,7 @@ import { listServiceAccounts } from '@/lib/server/service-accounts';
 import { listAuditEvents } from '@/lib/server/audit';
 import { listOwnSessions } from '@/lib/server/devices';
 import { readCollaborationLimits } from '@/lib/server/organization-limits';
+import { listWorkflowsState } from '@/lib/server/workflows';
 
 export const dynamic = 'force-dynamic';
 
@@ -85,7 +87,7 @@ export default async function SectionPage({
     projects: 'project.read', deployments: 'deployment.read', databases: 'database.read',
     storage: 'storage.read', ai: 'ai.read', 'game-servers': 'game-server.read',
     nodes: 'node.read', logs: 'workspace.read', networking: 'workspace.read',
-    secrets: 'secret.metadata.read', usage: 'usage.read', shield: 'shield.read',
+    secrets: 'secret.metadata.read', workflows: 'workflow.read', usage: 'usage.read', shield: 'shield.read',
     members: 'member.read', invitations: 'invitation.read',
     'service-accounts': 'service-account.read', audit: 'audit.read',
     sessions: 'session.read-own', settings: 'workspace.update', admin: 'member.read',
@@ -208,6 +210,28 @@ async function SectionBody({
 
     case 'secrets':
       return <SecretsView secrets={await listSecrets(workspaceId, actor.projectIds)} now={now} />;
+
+    case 'workflows': {
+      const [state, projects, secrets] = await Promise.all([
+        listWorkflowsState({
+          organizationId: organization.id,
+          workspaceId,
+          actor,
+          userId,
+        }),
+        listProjects(workspaceId, actor.projectIds),
+        listSecrets(workspaceId, actor.projectIds),
+      ]);
+      return (
+        <WorkflowsView
+          state={state}
+          actor={{ userId, role: actor.role }}
+          projects={projects}
+          secrets={secrets}
+          now={now}
+        />
+      );
+    }
 
     case 'usage': {
       const [usage, collaboration] = await Promise.all([

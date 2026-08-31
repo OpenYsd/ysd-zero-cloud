@@ -25,14 +25,32 @@ function config() {
     queues: { producers: [], consumers: [] },
     durable_objects: { bindings: [] },
     r2_buckets: [],
+    triggers: { crons: ['* * * * *'] },
   };
 }
 
-void test('the expected Worker and D1-only deployment is allowed', () => {
+void test('the expected Worker, D1, and single free scheduler deployment is allowed', () => {
   assert.deepEqual(inspectDeploymentConfig(config(), input()), {
     allowed: true,
     reasons: [],
   });
+});
+
+void test('the scheduler is pinned to one reviewed global tick', () => {
+  for (const triggers of [
+    undefined,
+    { crons: [] },
+    { crons: ['*/5 * * * *'] },
+    { crons: ['* * * * *', '*/5 * * * *'] },
+    { crons: ['* * * * *'], extra: true },
+  ]) {
+    const decision = inspectDeploymentConfig(
+      { ...config(), triggers },
+      input(),
+    );
+    assert.equal(decision.allowed, false);
+    assert.match(decision.reasons.join(' '), /exactly one reviewed/i);
+  }
 });
 
 void test('an unverified plan is blocked even when its estimate says zero', () => {

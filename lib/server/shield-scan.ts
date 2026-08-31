@@ -34,6 +34,8 @@ import { aiForShield } from './ai';
 import { gameServersForShield } from './game-servers';
 import { appRuntimeForShield } from './app-runtime-control';
 import { publicExposureForShield } from './public-exposure';
+import { workflowsForShield } from './workflows';
+import { emitWorkflowEvent } from './workflow-events';
 
 /**
  * YSD Shield: gathering the snapshot and persisting the result.
@@ -95,6 +97,7 @@ async function collectSnapshot(
     gameServers,
     appRuntime,
     publicExposure,
+    workflows,
     ownerInvariant,
     staleAdmins,
     expiredInvitations,
@@ -172,6 +175,7 @@ async function collectSnapshot(
     gameServersForShield(workspaceId, now),
     appRuntimeForShield(workspaceId, now),
     publicExposureForShield(workspaceId, now),
+    workflowsForShield(organizationId, workspaceId, now),
     queryOne<{ valid: number }>(
       `SELECT CASE WHEN
           EXISTS (
@@ -260,7 +264,14 @@ async function collectSnapshot(
           'audit_event_tenant_guard',
           'workspace_limit_tenant_guard', 'workspace_limit_tenant_update_guard',
           'public_exposure_tenant_guard', 'public_exposure_tenant_update_guard',
-          'exposure_domain_tenant_guard', 'exposure_domain_tenant_update_guard'
+          'exposure_domain_tenant_guard', 'exposure_domain_tenant_update_guard',
+          'workflow_tenant_guard', 'workflow_tenant_update_guard',
+          'workflow_version_tenant_guard', 'workflow_variable_tenant_guard',
+          'workflow_variable_tenant_update_guard',
+          'workflow_event_tenant_guard', 'workflow_execution_tenant_guard',
+          'workflow_action_tenant_guard', 'workflow_incident_tenant_guard',
+          'workflow_security_event_tenant_guard', 'notification_tenant_guard',
+          'workflow_resource_state_tenant_guard'
         )`,
     ),
     count(
@@ -349,7 +360,7 @@ async function collectSnapshot(
     collaboration: {
       ownerInvariant: ownerInvariant?.valid === 1,
       tenantIsolationViolations,
-      tenantIsolationGuarded: tenantTriggerCount === 17,
+      tenantIsolationGuarded: tenantTriggerCount === 29,
       auditAppendOnly: auditTriggerCount === 2,
       staleAdmins,
       expiredInvitations,
@@ -377,6 +388,7 @@ async function collectSnapshot(
     gameServers,
     appRuntime,
     publicExposure,
+    workflows,
     now,
   };
 }
@@ -416,8 +428,8 @@ async function reconcileFindings(
   const codes = new Set(findings.map((finding) => finding.code));
 
   for (const finding of findings) {
-    const existing = await queryOne<{ id: string; firstSeenAt: number }>(
-      'SELECT id, firstSeenAt FROM shield_finding WHERE workspaceId = ? AND code = ?',
+    const existing = await queryOne<{ id: string; firstSeenAt: number; status: string; severity: string }>(
+      'SELECT id, firstSeenAt, status, severity FROM shield_finding WHERE workspaceId = ? AND code = ?',
       workspaceId,
       finding.code,
     );
@@ -435,13 +447,29 @@ async function reconcileFindings(
         now,
         existing.id,
       );
+      if (existing.status !== 'open') {
+        await emitWorkflowEvent({
+          workspaceId, type: 'shield.finding.opened', resourceType: 'shield_finding',
+          resourceId: existing.id, payload: { findingId: existing.id, status: 'open', severity: finding.severity },
+          dedupeKey: `shield-opened:${existing.id}:${now}`,
+        });
+      }
+      if (existing.severity !== finding.severity) {
+        await emitWorkflowEvent({
+          workspaceId, type: 'shield.finding.severity_changed', resourceType: 'shield_finding',
+          resourceId: existing.id,
+          payload: { findingId: existing.id, previousSeverity: existing.severity, severity: finding.severity },
+          dedupeKey: `shield-severity:${existing.id}:${existing.severity}:${finding.severity}:${now}`,
+        });
+      }
       continue;
     }
 
+    const findingId = createId('fnd');
     await execute(
       `INSERT INTO shield_finding (id, workspaceId, code, title, detail, resource, severity, remediation, status, firstSeenAt, lastSeenAt)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)`,
-      createId('fnd'),
+      findingId,
       workspaceId,
       finding.code,
       finding.title,
@@ -452,6 +480,11 @@ async function reconcileFindings(
       now,
       now,
     );
+    await emitWorkflowEvent({
+      workspaceId, type: 'shield.finding.opened', resourceType: 'shield_finding',
+      resourceId: findingId, payload: { findingId, status: 'open', severity: finding.severity },
+      dedupeKey: `shield-opened:${findingId}:${now}`,
+    });
   }
 
   // Anything the rules no longer report has been fixed. It stays in the table
@@ -467,6 +500,11 @@ async function reconcileFindings(
       now,
       row.id,
     );
+    await emitWorkflowEvent({
+      workspaceId, type: 'shield.finding.resolved', resourceType: 'shield_finding',
+      resourceId: row.id, payload: { findingId: row.id, status: 'resolved' },
+      dedupeKey: `shield-resolved:${row.id}:${now}`,
+    });
   }
 }
 

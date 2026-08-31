@@ -105,6 +105,11 @@ export const SECTION_META: Record<
     eyebrow: 'Security',
     description: 'Encrypted configuration shared safely with workloads.',
   },
+  workflows: {
+    title: 'Workflows',
+    eyebrow: 'Automation',
+    description: 'Safe event-driven automation with versioned execution history.',
+  },
   usage: {
     title: 'Usage',
     eyebrow: 'Limits',

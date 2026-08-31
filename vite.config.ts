@@ -21,7 +21,7 @@ const isCodexSeatbeltSandbox = process.env.CODEX_SANDBOX === 'seatbelt';
  * silently disagree.
  */
 const localBindingConfig = {
-  main: 'vinext/server/fetch-handler',
+  main: './worker.ts',
 };
 
 if (hostingConfig.d1 && hostingConfig.d1 !== 'DB') {

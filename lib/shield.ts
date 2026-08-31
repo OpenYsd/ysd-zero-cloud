@@ -199,6 +199,20 @@ export type ShieldSnapshot = {
     crossOrgDomainConflict: number;
     zeroModeBypass: number;
   };
+  workflows?: {
+    privilegedLowOwner: number;
+    excessiveRetry: number;
+    potentialCycles: number;
+    noTimeout: number;
+    highConcurrency: number;
+    stale: number;
+    repeatedFailures: number;
+    suspiciousVolume: number;
+    orphanReferences: number;
+    crossOrgAttempts: number;
+    secretExposure: number;
+    zeroModeBypass: number;
+  };
   now: number;
 };
 
@@ -1494,6 +1508,56 @@ function checkPublicExposure(snapshot: ShieldSnapshot): {
   };
 }
 
+function checkWorkflows(snapshot: ShieldSnapshot): {
+  check: ShieldCheck;
+  findings: ShieldFinding[];
+} {
+  const state = snapshot.workflows;
+  const findings: ShieldFinding[] = [];
+  if (!state) {
+    return {
+      check: {
+        id: 'workflows', name: 'YSD Workflows',
+        detail: 'No workflow security state was present in this snapshot', state: 'passed',
+      },
+      findings,
+    };
+  }
+  const add = (
+    count: number,
+    code: string,
+    title: string,
+    detail: string,
+    severity: Severity,
+    remediation: string,
+  ) => {
+    if (count <= 0) return;
+    findings.push({ code, title, detail, resource: 'workflows/security', severity, remediation });
+  };
+  add(state.privilegedLowOwner, 'workflow-privileged-low-owner', 'Privileged workflow has a low-privilege owner', `${state.privilegedLowOwner} workflow configuration${state.privilegedLowOwner === 1 ? '' : 's'} require an owner/admin review.`, 'critical', 'Pause the workflow and republish it through an owner or admin after reviewing every privileged action.');
+  add(state.excessiveRetry, 'workflow-excessive-retry', 'Workflow retry policy is excessive', `${state.excessiveRetry} workflow${state.excessiveRetry === 1 ? '' : 's'} exceed the bounded retry policy.`, 'high', 'Lower attempts and backoff to the Zero Mode limits before publishing.');
+  add(state.potentialCycles, 'workflow-potential-cycle', 'A workflow event cycle is possible', `${state.potentialCycles} workflow${state.potentialCycles === 1 ? '' : 's'} may re-trigger their own event chain.`, 'critical', 'Remove the cyclic action or keep the workflow paused; causation and chain-depth guards are a final safety net, not a design tool.');
+  add(state.noTimeout, 'workflow-timeout-policy', 'Workflow timeout policy is missing or unsafe', `${state.noTimeout} workflow${state.noTimeout === 1 ? '' : 's'} have an invalid timeout.`, 'high', 'Set a bounded timeout between 5 and 300 seconds.');
+  add(state.highConcurrency, 'workflow-concurrency-policy', 'Workflow concurrency is too high', `${state.highConcurrency} workflow${state.highConcurrency === 1 ? '' : 's'} exceed the Worker/D1 concurrency ceiling.`, 'high', 'Reduce workflow and workspace concurrency before resuming automation.');
+  add(state.stale, 'workflow-stale', 'Stale workflows need review', `${state.stale} workflow${state.stale === 1 ? '' : 's'} have not been maintained for 90 days.`, 'low', 'Pause or archive abandoned workflows and confirm resource references for the rest.');
+  add(state.repeatedFailures, 'workflow-repeated-failures', 'Workflows are failing repeatedly', `${state.repeatedFailures} workflow${state.repeatedFailures === 1 ? '' : 's'} reached the repeated-failure threshold.`, 'high', 'Review the dead-letter execution, fix the bounded action, and retry manually only after the cause is resolved.');
+  add(state.suspiciousVolume, 'workflow-suspicious-volume', 'Suspicious workflow trigger volume was recorded', `${state.suspiciousVolume} event${state.suspiciousVolume === 1 ? '' : 's'} exceeded the hourly safety threshold.`, 'high', 'Pause noisy workflows and inspect their correlation and causation identifiers.');
+  add(state.orphanReferences, 'workflow-orphan-reference', 'A workflow resource reference is orphaned', `${state.orphanReferences} active workflow${state.orphanReferences === 1 ? '' : 's'} reference a missing immutable version or resource.`, 'critical', 'Pause the workflow and restore a same-tenant immutable version or archive it.');
+  add(state.crossOrgAttempts, 'workflow-cross-org-attempt', 'A cross-tenant workflow reference was blocked', `${state.crossOrgAttempts} forged or cross-scope event attempt${state.crossOrgAttempts === 1 ? ' was' : 's were'} recorded.`, 'critical', 'Inspect the actor and correlation chain; keep all workflow and resource identifiers server-derived.');
+  add(state.secretExposure, 'workflow-secret-exposure', 'Workflow configuration attempted to expose a secret', `${state.secretExposure} secret or sensitive-payload attempt${state.secretExposure === 1 ? ' was' : 's were'} rejected.`, 'critical', 'Keep secret values in the existing write-only store and expose only non-sensitive metadata to workflows.');
+  add(state.zeroModeBypass, 'workflow-zero-mode-bypass', 'A workflow attempted to bypass Zero Mode', `${state.zeroModeBypass} paid-provider or Zero Mode override attempt${state.zeroModeBypass === 1 ? ' was' : 's were'} rejected.`, 'critical', 'Keep the workflow on the existing Worker and D1; remove every provider, billing, URL, or zeroMode override field.');
+  return {
+    check: {
+      id: 'workflows', name: 'YSD Workflows',
+      detail: 'Immutable versions · D1 leases · bounded retries · trusted events · Zero Mode actions',
+      state: findings.some((finding) => finding.severity === 'critical' || finding.severity === 'high')
+        ? 'failed'
+        : findings.length > 0 ? 'review' : 'passed',
+    },
+    findings,
+  };
+}
+
 /** Runs every rule against a snapshot and scores the result. */
 export function runShieldRules(snapshot: ShieldSnapshot): ShieldReport {
   const results = [
@@ -1508,6 +1572,7 @@ export function runShieldRules(snapshot: ShieldSnapshot): ShieldReport {
     checkGameServers(snapshot),
     checkAppRuntime(snapshot),
     checkPublicExposure(snapshot),
+    checkWorkflows(snapshot),
     checkSurface(snapshot),
     checkHardening(snapshot),
   ];

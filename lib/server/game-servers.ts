@@ -24,7 +24,7 @@ import { agentVersionSupported, stableJson } from '@/lib/nodes';
 import { execute, query, queryOne } from './db';
 import { writeLog } from './logs';
 import { assertResourceCapacity } from './organization-limits';
-import { enqueueJob, readNodesState } from './nodes';
+import { enqueueJob, readNodesState, type WorkflowJobContext } from './nodes';
 import { getWorkspace } from './workspace';
 
 type ServerRow = {
@@ -652,6 +652,7 @@ export async function queueGameServerRequest(input: {
   serverId?: string | null;
   body: unknown;
   idempotencyKey: string | null;
+  workflowContext?: WorkflowJobContext;
 }): Promise<QueueGameServerResult> {
   if (!isRecord(input.body)) {
     return { ok: false, status: 400, error: 'Game Server request must be an object.' };
@@ -768,6 +769,7 @@ export async function queueGameServerRequest(input: {
     payload: contract.payload,
     targetNodeId: server.nodeId,
     idempotencyKey: key,
+    workflowContext: input.workflowContext,
   });
   if (!queued.ok) return queued;
   if (!queued.created) {
