@@ -8,7 +8,8 @@ import {
   type LogLevel,
   type LogSource,
 } from '@/lib/domain';
-import { execute, query } from './db';
+import { execute, query, queryOne } from './db';
+import { recordAudit } from './audit';
 
 /**
  * The workspace event log.
@@ -44,6 +45,26 @@ export async function writeLog(input: LogInput): Promise<void> {
       input.resource ?? null,
       Date.now(),
     );
+    const workspace = await queryOne<{ organizationId: string }>(
+      'SELECT organizationId FROM workspace WHERE id = ?',
+      input.workspaceId,
+    );
+    if (workspace?.organizationId) {
+      const serviceAccount = input.actor?.endsWith('.service.ysd.invalid')
+        ? input.actor.slice(0, -'.service.ysd.invalid'.length)
+        : null;
+      await recordAudit({
+        organizationId: workspace.organizationId,
+        workspaceId: input.workspaceId,
+        actorType: serviceAccount ? 'service_account' : input.actor ? 'user' : 'system',
+        actorId: serviceAccount ?? input.actor ?? 'system',
+        action: `activity.${input.source}`,
+        resourceType: input.source,
+        resourceId: input.resource ?? null,
+        outcome: input.level === 'ERROR' ? 'failed' : 'success',
+        metadata: { level: input.level ?? 'INFO' },
+      });
+    }
   } catch {
     // An unwritable audit line is not worth failing a deployment over. The
     // gap shows up as a hole in the log rather than a broken request.
@@ -57,9 +78,24 @@ export type LogFilter = {
   limit?: number;
 };
 
-export async function listLogs(workspaceId: string, filter: LogFilter = {}): Promise<LogEvent[]> {
+export async function listLogs(
+  workspaceId: string,
+  filter: LogFilter = {},
+  projectIds?: readonly string[] | null,
+): Promise<LogEvent[]> {
   const conditions = ['workspaceId = ?'];
   const params: unknown[] = [workspaceId];
+
+  if (projectIds !== null && projectIds !== undefined) {
+    if (projectIds.length === 0) return [];
+    const placeholders = projectIds.map(() => '?').join(', ');
+    conditions.push(
+      `(resource IN (${placeholders}) OR resource IN (
+        SELECT id FROM deployment WHERE workspaceId = ? AND projectId IN (${placeholders})
+      ))`,
+    );
+    params.push(...projectIds, workspaceId, ...projectIds);
+  }
 
   if (filter.source) {
     conditions.push('source = ?');

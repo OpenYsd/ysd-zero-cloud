@@ -30,6 +30,8 @@ const MASKED_COLUMNS: Record<string, string[]> = {
   node_pairing: ['codeHash'],
   compute_node: ['tokenCiphertext', 'tokenHash'],
   node_request_nonce: ['nonce'],
+  organization_invitation: ['tokenHash'],
+  service_account_token: ['tokenHash'],
   // AI prompts and bounded model output live in these JSON columns. They are
   // visible only through the purpose-built, workspace-scoped AI surface.
   node_job: ['payload', 'payloadHash', 'claimSignature', 'result'],

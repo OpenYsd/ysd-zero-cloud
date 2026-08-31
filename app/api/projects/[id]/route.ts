@@ -9,7 +9,12 @@ export async function DELETE(
   if (!auth.ok) return auth.response;
 
   const { id } = await params;
-  const removed = await deleteProject(auth.session.workspace.id, id, auth.session.user.email);
+  const removed = await deleteProject(
+    auth.session.workspace.id,
+    id,
+    auth.session.user.email,
+    auth.session.actor.projectIds,
+  );
   if (!removed) return Response.json({ error: 'Project not found.' }, { status: 404 });
   return Response.json({ deleted: id });
 }

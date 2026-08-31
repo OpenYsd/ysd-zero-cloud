@@ -9,6 +9,7 @@ import {
 import { db, execute, query, queryOne } from './db';
 import { runtimeEnv } from './env';
 import { writeLog } from './logs';
+import { assertResourceCapacity } from './organization-limits';
 
 type MeterRow = StorageUsage & { scope: string; workspaceId: string | null };
 
@@ -193,6 +194,9 @@ export async function uploadObject(input: {
   const validation = validateObject(input.file.name, input.file.size);
   if (!validation.ok)
     return { ok: false, status: 400, error: validation.error };
+
+  const capacity = await assertResourceCapacity(input.workspaceId, 'storageMetadata');
+  if (!capacity.ok) return { ok: false, status: 409, error: capacity.error };
 
   const refusal = await reserveUpload(input.workspaceId, input.file.size);
   if (refusal) return { ok: false, status: 409, error: refusal };

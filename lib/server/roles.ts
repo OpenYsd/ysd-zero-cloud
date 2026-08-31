@@ -1,4 +1,4 @@
-import { isRole, type Actor, type Role } from '@/lib/roles';
+import { normalizeRole, type Actor, type Role } from '@/lib/roles';
 import { count, execute, query, queryOne } from './db';
 import { runtimeEnv } from './env';
 
@@ -18,10 +18,6 @@ export type UserRoleRow = {
   updatedAt: number;
   updatedBy: string | null;
 };
-
-function normalizeRole(value: string | null | undefined): Role {
-  return value && isRole(value) ? value : 'member';
-}
 
 /**
  * Resolves the actor for a session.
@@ -179,7 +175,7 @@ export async function setSuspended(
   const now = Date.now();
   await execute(
     `INSERT INTO user_role (userId, role, suspendedAt, suspendedReason, updatedAt, updatedBy)
-     VALUES (?, 'member', ?, ?, ?, ?)
+     VALUES (?, 'viewer', ?, ?, ?, ?)
      ON CONFLICT(userId) DO UPDATE SET
        suspendedAt = excluded.suspendedAt,
        suspendedReason = excluded.suspendedReason,

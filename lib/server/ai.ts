@@ -25,6 +25,7 @@ import {
 } from '@/lib/nodes';
 import { db, execute, query, queryOne } from './db';
 import { writeLog } from './logs';
+import { assertResourceCapacity } from './organization-limits';
 import {
   enqueueJob,
   ensureAiCatalog,
@@ -349,6 +350,8 @@ export async function queueAiInference(input: {
   | { ok: true; run: AiRun; created: boolean }
   | { ok: false; status: number; error: string }
 > {
+  const capacity = await assertResourceCapacity(input.workspaceId, 'aiJobs');
+  if (!capacity.ok) return { ok: false, status: 409, error: capacity.error };
   if (!isRecord(input.body)) {
     return { ok: false, status: 400, error: 'Inference request must be an object.' };
   }

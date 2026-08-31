@@ -12,7 +12,6 @@ import { emailVerificationRequired } from './auth';
 import { countBillableResources } from './deployments';
 import { emailVerificationStatus, isEmailConfigured } from './email';
 import { pruneRateLimits } from './rate-limit';
-import { countByRole, countOwners, countSuspended } from './roles';
 import {
   countFailingNetworks,
   countRecentBlocks,
@@ -66,6 +65,8 @@ async function collectSnapshot(
   userId: string,
 ): Promise<ShieldSnapshot> {
   const workspace = await getWorkspace(workspaceId);
+  if (!workspace) throw new Error('Workspace not found.');
+  const organizationId = workspace.organizationId;
   const now = Date.now();
   const emailStatus = emailVerificationStatus();
 
@@ -92,36 +93,75 @@ async function collectSnapshot(
     ai,
     gameServers,
     appRuntime,
+    ownerInvariant,
+    staleAdmins,
+    expiredInvitations,
+    unboundedServiceTokens,
+    tenantIsolationViolations,
+    tenantTriggerCount,
+    auditTriggerCount,
   ] = await Promise.all([
     secretsForShield(workspaceId),
-    listTables({ workspaceId, userId }),
+    listTables({ workspaceId, organizationId, userId }),
     countBillableResources(workspaceId),
-    count('SELECT COUNT(*) AS total FROM "user"'),
-    count('SELECT COUNT(*) AS total FROM "user" WHERE emailVerified = 0'),
-    count('SELECT COUNT(*) AS total FROM "session"'),
-    countExpiredSessions(now),
+    count(
+      `SELECT COUNT(*) AS total FROM organization_member m
+         JOIN "user" u ON u.id = m.userId
+        WHERE m.organizationId = ? AND m.status <> 'removed'`,
+      organizationId,
+    ),
+    count(
+      `SELECT COUNT(*) AS total FROM organization_member m
+         JOIN "user" u ON u.id = m.userId
+        WHERE m.organizationId = ? AND m.status = 'active' AND u.emailVerified = 0`,
+      organizationId,
+    ),
+    count(
+      `SELECT COUNT(*) AS total FROM "session" s
+         JOIN organization_member m ON m.userId = s.userId
+        WHERE m.organizationId = ? AND m.status <> 'removed'`,
+      organizationId,
+    ),
+    countExpiredSessions(now, organizationId),
     query<{ name: string }>(
       "SELECT name FROM project WHERE workspaceId = ? AND visibility = 'public'",
       workspaceId,
     ),
-    countOwners(),
-    countByRole('admin'),
-    countSuspended(),
     count(
-      `SELECT COUNT(*) AS total FROM user_role r
-         JOIN "user" u ON u.id = r.userId
-         WHERE r.role IN ('owner', 'admin') AND u.emailVerified = 0`,
+      `SELECT COUNT(*) AS total FROM organization_member
+        WHERE organizationId = ? AND role = 'owner' AND status = 'active' AND suspendedAt IS NULL`,
+      organizationId,
+    ),
+    count(
+      `SELECT COUNT(*) AS total FROM organization_member
+        WHERE organizationId = ? AND role = 'admin' AND status = 'active' AND suspendedAt IS NULL`,
+      organizationId,
+    ),
+    count(
+      `SELECT COUNT(*) AS total FROM organization_member
+        WHERE organizationId = ? AND (status = 'suspended' OR suspendedAt IS NOT NULL)`,
+      organizationId,
+    ),
+    count(
+      `SELECT COUNT(*) AS total FROM organization_member m
+         JOIN "user" u ON u.id = m.userId
+        WHERE m.organizationId = ? AND m.role IN ('owner', 'admin')
+          AND m.status = 'active' AND m.suspendedAt IS NULL AND u.emailVerified = 0`,
+      organizationId,
     ),
     countRecentBlocks(),
     countFailingNetworks(),
     count(
-      `SELECT COUNT(*) AS total FROM user_role r
+      `SELECT COUNT(*) AS total FROM organization_member r
          LEFT JOIN "user" u ON u.id = r.userId
-         WHERE u.id IS NULL`,
+         WHERE r.organizationId = ? AND u.id IS NULL`,
+      organizationId,
     ),
     count(
-      `SELECT COUNT(*) AS total FROM user_role
-         WHERE role IN ('owner','admin') AND suspendedAt IS NOT NULL`,
+      `SELECT COUNT(*) AS total FROM organization_member
+        WHERE organizationId = ? AND role IN ('owner','admin')
+          AND (status = 'suspended' OR suspendedAt IS NOT NULL)`,
+      organizationId,
     ),
     listTableColumns(),
     storageShieldState(workspaceId),
@@ -129,6 +169,99 @@ async function collectSnapshot(
     aiForShield(workspaceId, now),
     gameServersForShield(workspaceId, now),
     appRuntimeForShield(workspaceId, now),
+    queryOne<{ valid: number }>(
+      `SELECT CASE WHEN
+          EXISTS (
+            SELECT 1 FROM organization_member m
+             WHERE m.organizationId = o.id AND m.userId = o.ownerUserId
+               AND m.role = 'owner' AND m.status = 'active' AND m.suspendedAt IS NULL
+          ) AND (
+            SELECT COUNT(*) FROM organization_member m
+             WHERE m.organizationId = o.id AND m.role = 'owner'
+               AND m.status = 'active' AND m.suspendedAt IS NULL
+          ) = 1 THEN 1 ELSE 0 END AS valid
+         FROM organization o WHERE o.id = ?`,
+      organizationId,
+    ),
+    count(
+      `SELECT COUNT(*) AS total FROM organization_member
+        WHERE organizationId = ? AND role = 'admin' AND status = 'active'
+          AND suspendedAt IS NULL AND (lastActiveAt IS NULL OR lastActiveAt <= ?)`,
+      organizationId,
+      now - 90 * 24 * 60 * 60 * 1000,
+    ),
+    count(
+      `SELECT COUNT(*) AS total FROM organization_invitation
+        WHERE organizationId = ? AND status = 'pending' AND expiresAt <= ?`,
+      organizationId,
+      now,
+    ),
+    count(
+      `SELECT COUNT(*) AS total FROM service_account_token t
+         JOIN service_account a ON a.id = t.serviceAccountId
+        WHERE a.organizationId = ? AND a.status = 'active' AND t.revokedAt IS NULL
+          AND (t.expiresAt IS NULL OR t.expiresAt > ?)`,
+      organizationId,
+      now + 180 * 24 * 60 * 60 * 1000,
+    ),
+    count(
+      `SELECT (
+          (SELECT COUNT(*) FROM workspace_member wm
+            LEFT JOIN workspace w ON w.id = wm.workspaceId
+            LEFT JOIN organization_member m
+              ON m.organizationId = wm.organizationId AND m.userId = wm.userId
+           WHERE wm.organizationId = ?
+             AND (w.organizationId IS NULL OR w.organizationId <> wm.organizationId OR m.id IS NULL))
+          + (SELECT COUNT(*) FROM member_project_access a
+              LEFT JOIN workspace w ON w.id = a.workspaceId
+              LEFT JOIN project p ON p.id = a.projectId
+              LEFT JOIN organization_member m
+                ON m.organizationId = a.organizationId AND m.userId = a.userId
+             WHERE a.organizationId = ? AND (
+               w.organizationId IS NULL OR w.organizationId <> a.organizationId
+               OR p.workspaceId IS NULL OR p.workspaceId <> a.workspaceId OR m.id IS NULL))
+          + (SELECT COUNT(*) FROM organization_invitation i
+              LEFT JOIN workspace w ON w.id = i.workspaceId
+             WHERE i.organizationId = ?
+               AND (w.organizationId IS NULL OR w.organizationId <> i.organizationId))
+          + (SELECT COUNT(*) FROM service_account a
+              LEFT JOIN workspace w ON w.id = a.workspaceId
+              LEFT JOIN project p ON p.id = a.projectId
+             WHERE a.organizationId = ? AND (
+               w.organizationId IS NULL OR w.organizationId <> a.organizationId
+               OR (a.projectId IS NOT NULL AND (p.workspaceId IS NULL OR p.workspaceId <> a.workspaceId))))
+          + (SELECT COUNT(*) FROM audit_event e
+              LEFT JOIN workspace w ON w.id = e.workspaceId
+             WHERE e.organizationId = ? AND e.workspaceId IS NOT NULL
+               AND (w.organizationId IS NULL OR w.organizationId <> e.organizationId))
+          + (SELECT COUNT(*) FROM workspace_limit l
+              LEFT JOIN workspace w ON w.id = l.workspaceId
+             WHERE l.organizationId = ?
+               AND (w.organizationId IS NULL OR w.organizationId <> l.organizationId))
+        ) AS total`,
+      organizationId,
+      organizationId,
+      organizationId,
+      organizationId,
+      organizationId,
+      organizationId,
+    ),
+    count(
+      `SELECT COUNT(*) AS total FROM sqlite_master
+        WHERE type = 'trigger' AND name IN (
+          'workspace_org_insert_guard', 'workspace_org_update_guard',
+          'workspace_member_tenant_guard', 'workspace_member_tenant_update_guard',
+          'project_access_tenant_guard', 'project_access_tenant_update_guard',
+          'invitation_tenant_guard', 'invitation_tenant_update_guard',
+          'service_account_tenant_guard', 'service_account_tenant_update_guard',
+          'audit_event_tenant_guard',
+          'workspace_limit_tenant_guard', 'workspace_limit_tenant_update_guard'
+        )`,
+    ),
+    count(
+      `SELECT COUNT(*) AS total FROM sqlite_master
+        WHERE type = 'trigger' AND name IN ('audit_event_no_update', 'audit_event_no_delete')`,
+    ),
   ]);
 
   const network = await readNetworkState(workspaceId);
@@ -173,6 +306,9 @@ async function collectSnapshot(
       sqlEditorRestricted: !can(
         { userId: 'probe', role: 'admin', suspended: false },
         'sql-editor.run',
+      ) && !can(
+        { userId: 'probe', role: 'owner', suspended: false },
+        'sql-editor.run',
       ),
     },
     billableResources,
@@ -194,6 +330,19 @@ async function collectSnapshot(
           : 'mock',
     })),
     publicProjects: publicProjects.map((row) => row.name),
+    collaboration: {
+      ownerInvariant: ownerInvariant?.valid === 1,
+      tenantIsolationViolations,
+      tenantIsolationGuarded: tenantTriggerCount === 13,
+      auditAppendOnly: auditTriggerCount === 2,
+      staleAdmins,
+      expiredInvitations,
+      unboundedServiceTokens,
+      privilegeEscalationBlocked:
+        !can({ userId: 'probe', role: 'admin', suspended: false }, 'member.transfer-ownership')
+        && !can({ userId: 'probe', role: 'admin', suspended: false }, 'sql-editor.run')
+        && !can({ userId: 'probe', role: 'owner', suspended: false }, 'sql-editor.run'),
+    },
     storage: {
       available: storage.available,
       private: storage.private,
@@ -224,12 +373,16 @@ async function collectSnapshot(
  * makes every live session look expired. The comparison is therefore chosen by
  * the stored type, so the count stays right if that storage ever changes.
  */
-async function countExpiredSessions(now: number): Promise<number> {
+async function countExpiredSessions(now: number, organizationId: string): Promise<number> {
   try {
     return await count(
-      `SELECT COUNT(*) AS total FROM "session"
-       WHERE (typeof(expiresAt) = 'text' AND expiresAt < ?)
-          OR (typeof(expiresAt) IN ('integer', 'real') AND expiresAt < ?)`,
+      `SELECT COUNT(*) AS total FROM "session" s
+         JOIN organization_member m ON m.userId = s.userId
+        WHERE m.organizationId = ? AND m.status <> 'removed' AND (
+          (typeof(s.expiresAt) = 'text' AND s.expiresAt < ?)
+          OR (typeof(s.expiresAt) IN ('integer', 'real') AND s.expiresAt < ?)
+        )`,
+      organizationId,
       new Date(now).toISOString(),
       now,
     );

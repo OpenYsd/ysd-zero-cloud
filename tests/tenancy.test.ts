@@ -7,7 +7,11 @@ import {
   type TenantScope,
 } from '../lib/tenancy.ts';
 
-const SCOPE: TenantScope = { workspaceId: 'ws_1', userId: 'usr_1' };
+const SCOPE: TenantScope = {
+  organizationId: 'org_1',
+  workspaceId: 'ws_1',
+  userId: 'usr_1',
+};
 
 void test('workspace-owned tables are limited by workspaceId', () => {
   for (const table of [
@@ -52,6 +56,43 @@ void test('the workspace row is matched by its own id', () => {
   );
   assert.equal(predicate.sql, 'id = ?');
   assert.deepEqual(predicate.params, ['ws_1']);
+});
+
+void test('organization-owned tables are limited by organizationId', () => {
+  for (const table of ['organization_member', 'organization_invitation', 'audit_event']) {
+    const predicate = scopeForTable(table, ['id', 'organizationId'], SCOPE);
+    assert.equal(predicate.sql, 'organizationId = ?');
+    assert.deepEqual(predicate.params, ['org_1']);
+  }
+  const organization = scopeForTable('organization', ['id', 'name'], SCOPE);
+  assert.equal(organization.sql, 'id = ?');
+  assert.deepEqual(organization.params, ['org_1']);
+});
+
+void test('project-restricted callers fail closed outside project-attributable tables', () => {
+  const restricted = { ...SCOPE, projectIds: ['project_a', 'project_b'] };
+  assert.deepEqual(
+    scopeForTable('project', ['id', 'workspaceId'], restricted),
+    {
+      sql: 'workspaceId = ? AND id IN (?, ?)',
+      params: ['ws_1', 'project_a', 'project_b'],
+    },
+  );
+  assert.deepEqual(
+    scopeForTable('deployment', ['id', 'workspaceId', 'projectId'], restricted),
+    {
+      sql: 'workspaceId = ? AND projectId IN (?, ?)',
+      params: ['ws_1', 'project_a', 'project_b'],
+    },
+  );
+  assert.deepEqual(
+    scopeForTable('node_job', ['id', 'workspaceId'], restricted),
+    DENY_ALL,
+  );
+  assert.deepEqual(
+    scopeForTable('project', ['id', 'workspaceId'], { ...SCOPE, projectIds: [] }),
+    DENY_ALL,
+  );
 });
 
 void test('a caller sees only their own user row', () => {

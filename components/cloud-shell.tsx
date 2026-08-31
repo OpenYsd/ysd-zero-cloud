@@ -23,13 +23,19 @@ import {
   ShieldCheck,
   ShieldOff,
   TerminalSquare,
-  UserCog,
+  Users,
+  UserPlus,
+  KeySquare,
+  ScrollText,
+  MonitorSmartphone,
+  Plus,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Switch } from '@/components/ui/switch';
+import { NativeSelect } from '@/components/ui/native-select';
 import { authClient, signOut } from '@/lib/auth-client';
 import { isLiveSection, isSection } from '@/lib/domain';
-import type { Role } from '@/lib/roles';
+import { can, type Permission, type Role } from '@/lib/roles';
 import { cn } from '@/lib/utils';
 import { ZeroModeProvider, useZeroMode } from '@/components/zero-mode-provider';
 
@@ -37,7 +43,19 @@ export type ShellUser = {
   name: string;
   email: string;
   role: Role;
-  canAdminister: boolean;
+  canUpdateWorkspace: boolean;
+  projectRestricted: boolean;
+};
+
+export type ShellContext = {
+  organizationId: string;
+  workspaceId: string;
+  organizations: {
+    id: string;
+    name: string;
+    role: Role;
+    workspaces: { id: string; name: string }[];
+  }[];
 };
 
 /**
@@ -45,29 +63,160 @@ export type ShellUser = {
  * restated here, so the "Preview" badge always matches what the page renders.
  */
 const navigation = [
-  { label: 'Home', href: '/', icon: Home },
-  { label: 'Projects', href: '/projects', icon: Layers3 },
-  { label: 'Deployments', href: '/deployments', icon: Rocket },
-  { label: 'Databases', href: '/databases', icon: Database },
-  { label: 'Storage', href: '/storage', icon: HardDrive },
-  { label: 'AI', href: '/ai', icon: Bot },
-  { label: 'Game Servers', href: '/game-servers', icon: Gamepad2 },
-  { label: 'Nodes', href: '/nodes', icon: Boxes },
-  { label: 'Logs', href: '/logs', icon: TerminalSquare },
-  { label: 'Networking', href: '/networking', icon: Network },
-  { label: 'Secrets', href: '/secrets', icon: KeyRound },
-  { label: 'Usage', href: '/usage', icon: Gauge },
-  { label: 'YSD Shield', href: '/shield', icon: ShieldCheck },
-  { label: 'Accounts', href: '/admin', icon: UserCog, adminOnly: true },
-  { label: 'Settings', href: '/settings', icon: Settings },
+  { label: 'Home', href: '/', icon: Home, permission: 'workspace.use' },
+  { label: 'Projects', href: '/projects', icon: Layers3, permission: 'project.read' },
+  { label: 'Deployments', href: '/deployments', icon: Rocket, permission: 'deployment.read' },
+  { label: 'Databases', href: '/databases', icon: Database, permission: 'database.read' },
+  { label: 'Storage', href: '/storage', icon: HardDrive, permission: 'storage.read' },
+  { label: 'AI', href: '/ai', icon: Bot, permission: 'ai.read' },
+  { label: 'Game Servers', href: '/game-servers', icon: Gamepad2, permission: 'game-server.read' },
+  { label: 'Nodes', href: '/nodes', icon: Boxes, permission: 'node.read' },
+  { label: 'Logs', href: '/logs', icon: TerminalSquare, permission: 'workspace.read' },
+  { label: 'Networking', href: '/networking', icon: Network, permission: 'workspace.read' },
+  { label: 'Secrets', href: '/secrets', icon: KeyRound, permission: 'secret.metadata.read' },
+  { label: 'Usage', href: '/usage', icon: Gauge, permission: 'usage.read' },
+  { label: 'YSD Shield', href: '/shield', icon: ShieldCheck, permission: 'shield.read' },
+  { label: 'Members', href: '/members', icon: Users, permission: 'member.read' },
+  { label: 'Invitations', href: '/invitations', icon: UserPlus, permission: 'invitation.read' },
+  { label: 'Service Accounts', href: '/service-accounts', icon: KeySquare, permission: 'service-account.read' },
+  { label: 'Audit', href: '/audit', icon: ScrollText, permission: 'audit.read' },
+  { label: 'Sessions', href: '/sessions', icon: MonitorSmartphone, permission: 'session.read-own' },
+  { label: 'Settings', href: '/settings', icon: Settings, permission: 'workspace.update' },
 ].map((item) => {
   const slug = item.href.slice(1);
   return {
     ...item,
-    adminOnly: 'adminOnly' in item ? Boolean(item.adminOnly) : false,
+    permission: item.permission as Permission,
     live: slug === '' || (isSection(slug) && isLiveSection(slug)),
   };
 });
+
+function OrganizationSwitcher({ context }: { context: ShellContext }) {
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const organization = context.organizations.find(
+    (item) => item.id === context.organizationId,
+  ) ?? context.organizations[0];
+  const actor = organization
+    ? { userId: 'switcher', role: organization.role, suspended: false } as const
+    : null;
+
+  async function select(organizationId: string, workspaceId: string) {
+    setPending(true);
+    setError(null);
+    try {
+      const response = await fetch('/api/context', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ organizationId, workspaceId }),
+      });
+      const payload = (await response.json()) as { error?: string };
+      if (!response.ok) throw new Error(payload.error ?? 'Context could not be changed.');
+      window.location.reload();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Context could not be changed.');
+      setPending(false);
+    }
+  }
+
+  async function createOrganization() {
+    const name = window.prompt('Organization name');
+    if (!name?.trim()) return;
+    setPending(true);
+    setError(null);
+    try {
+      const response = await fetch('/api/organizations', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+      });
+      const payload = (await response.json()) as {
+        error?: string;
+        organization?: { id: string };
+        workspace?: { id: string };
+      };
+      if (!response.ok || !payload.organization || !payload.workspace) {
+        throw new Error(payload.error ?? 'Organization could not be created.');
+      }
+      await select(payload.organization.id, payload.workspace.id);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Organization could not be created.');
+      setPending(false);
+    }
+  }
+
+  async function createWorkspace() {
+    const name = window.prompt('Workspace name');
+    if (!name?.trim()) return;
+    setPending(true);
+    setError(null);
+    try {
+      const response = await fetch('/api/workspaces', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+      });
+      const payload = (await response.json()) as { error?: string; workspace?: { id: string } };
+      if (!response.ok || !payload.workspace) {
+        throw new Error(payload.error ?? 'Workspace could not be created.');
+      }
+      await select(organization!.id, payload.workspace.id);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Workspace could not be created.');
+      setPending(false);
+    }
+  }
+
+  if (!organization) return null;
+  return (
+    <div className="border-b border-white/[0.065] p-3">
+      <p className="px-1 pb-2 text-[9px] font-semibold uppercase tracking-[0.14em] text-white/25">
+        Organization
+      </p>
+      <NativeSelect
+        value={organization.id}
+        disabled={pending}
+        aria-label="Organization"
+        onChange={(event) => {
+          const next = context.organizations.find((item) => item.id === event.target.value);
+          const workspace = next?.workspaces[0];
+          if (next && workspace) void select(next.id, workspace.id);
+        }}
+        className="h-8 w-full border-white/[0.08] bg-black/20 text-[10px]"
+      >
+        {context.organizations.map((item) => (
+          <option key={item.id} value={item.id}>{item.name} · {item.role}</option>
+        ))}
+      </NativeSelect>
+      <NativeSelect
+        value={context.workspaceId}
+        disabled={pending}
+        aria-label="Workspace"
+        onChange={(event) => void select(organization.id, event.target.value)}
+        className="mt-2 h-8 w-full border-white/[0.08] bg-black/20 text-[10px]"
+      >
+        {organization.workspaces.map((workspace) => (
+          <option key={workspace.id} value={workspace.id}>{workspace.name}</option>
+        ))}
+      </NativeSelect>
+      {actor && (can(actor, 'organization.create') || can(actor, 'workspace.create')) && (
+        <div className="mt-2 grid grid-cols-2 gap-1.5">
+          {can(actor, 'organization.create') && (
+            <Button variant="ghost" size="sm" disabled={pending} onClick={() => void createOrganization()} className="h-7 text-[9px] text-white/40">
+              <Plus /> Organization
+            </Button>
+          )}
+          {can(actor, 'workspace.create') && (
+            <Button variant="ghost" size="sm" disabled={pending} onClick={() => void createWorkspace()} className="h-7 text-[9px] text-white/40">
+              <Plus /> Workspace
+            </Button>
+          )}
+        </div>
+      )}
+      {error && <p className="mt-2 text-[9px] leading-4 text-red-300">{error}</p>}
+    </div>
+  );
+}
 
 function BrandMark() {
   return (
@@ -86,10 +235,12 @@ function BrandMark() {
 export function CloudShell({
   children,
   user,
+  context,
   zeroMode,
 }: {
   children: React.ReactNode;
   user: ShellUser | null;
+  context: ShellContext | null;
   zeroMode: boolean;
 }) {
   if (!user) {
@@ -104,7 +255,7 @@ export function CloudShell({
 
   return (
     <ZeroModeProvider initialEnabled={zeroMode}>
-      <CloudShellFrame user={user}>{children}</CloudShellFrame>
+      <CloudShellFrame user={user} context={context}>{children}</CloudShellFrame>
     </ZeroModeProvider>
   );
 }
@@ -112,12 +263,20 @@ export function CloudShell({
 function CloudShellFrame({
   children,
   user,
+  context,
 }: {
   children: React.ReactNode;
   user: ShellUser;
+  context: ShellContext | null;
 }) {
   const pathname = usePathname();
   const zeroMode = useZeroMode();
+  const actor = {
+    userId: 'navigation',
+    role: user.role,
+    suspended: false,
+    projectIds: user.projectRestricted ? [] : null,
+  } as const;
 
   return (
     <div className="min-h-screen bg-background text-foreground">
@@ -129,10 +288,12 @@ function CloudShellFrame({
               YSD Zero Cloud
             </p>
             <p className="mt-1 text-[10px] font-medium uppercase tracking-[0.16em] text-white/35">
-              Cloud OS · v0.5
+              Cloud OS · v0.7
             </p>
           </div>
         </div>
+
+        {context && <OrganizationSwitcher context={context} />}
 
         <nav
           aria-label="Primary navigation"
@@ -143,7 +304,7 @@ function CloudShellFrame({
           </p>
           <div className="space-y-0.5">
             {navigation
-              .filter((item) => !item.adminOnly || user.canAdminister)
+              .filter((item) => can(actor, item.permission))
               .map((item) => {
                 const active =
                   item.href === '/'
@@ -192,13 +353,15 @@ function CloudShellFrame({
             <Switch
               checked={zeroMode.enabled}
               onCheckedChange={zeroMode.setEnabled}
-              disabled={zeroMode.pending}
+              disabled={zeroMode.pending || !user.canUpdateWorkspace}
               aria-label="Toggle Zero Mode"
               className="data-checked:bg-[#b7ff3c]"
             />
           </div>
           <p className="mt-2 text-[10px] leading-4 text-white/34">
-            {zeroMode.error ??
+            {!user.canUpdateWorkspace
+              ? 'Your organization role can view this guard but cannot change it.'
+              : zeroMode.error ??
               (zeroMode.enabled
                 ? 'Paid resources are blocked before a plan runs.'
                 : 'Cost guard is paused. Plans with a charge will be accepted.')}
@@ -237,13 +400,14 @@ function CloudShellFrame({
           </div>
         </header>
 
-        <div className="border-b border-white/[0.065] bg-[#0b100e] px-4 py-2 md:hidden">
+        <div className="border-b border-white/[0.065] bg-[#0b100e] md:hidden">
+          {context && <OrganizationSwitcher context={context} />}
           <nav
-            className="flex gap-1 overflow-x-auto"
+            className="flex gap-1 overflow-x-auto px-4 py-2"
             aria-label="Mobile navigation"
           >
             {navigation
-              .filter((item) => !item.adminOnly || user.canAdminister)
+              .filter((item) => can(actor, item.permission))
               .map((item) => {
                 const active =
                   item.href === '/'

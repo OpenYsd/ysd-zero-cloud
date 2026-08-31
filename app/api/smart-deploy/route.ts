@@ -74,6 +74,7 @@ export async function POST(request: Request): Promise<Response> {
     memoryMb,
     diskQuotaBytes,
     idempotencyKey: request.headers.get('idempotency-key'),
+    allowedProjectIds: auth.session.actor.projectIds,
   });
   if (!result.ok) {
     return Response.json(

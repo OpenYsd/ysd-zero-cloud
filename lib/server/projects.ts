@@ -3,6 +3,7 @@ import type { Project } from '@/lib/domain';
 import { detectFramework, type Framework } from '@/lib/smart-deploy';
 import { count, execute, query, queryOne } from './db';
 import { writeLog } from './logs';
+import { assertResourceCapacity } from './organization-limits';
 
 /**
  * Projects are the unit Smart Deploy targets. A deployment can create one
@@ -28,15 +29,27 @@ export function projectNameFromRepository(repository: string): string {
   return normalizeProjectName(tail) || 'project';
 }
 
-export async function listProjects(workspaceId: string): Promise<Project[]> {
+export async function listProjects(
+  workspaceId: string,
+  projectIds?: readonly string[] | null,
+): Promise<Project[]> {
+  if (projectIds !== null && projectIds !== undefined && projectIds.length === 0) return [];
+  const restricted = projectIds !== null && projectIds !== undefined;
   return query<Project>(
     `SELECT id, name, repository, framework, environment, region, status, visibility, createdAt, updatedAt
-     FROM project WHERE workspaceId = ? ORDER BY updatedAt DESC`,
+     FROM project WHERE workspaceId = ?${restricted ? ` AND id IN (${projectIds.map(() => '?').join(', ')})` : ''}
+     ORDER BY updatedAt DESC`,
     workspaceId,
+    ...(projectIds ?? []),
   );
 }
 
-export async function getProject(workspaceId: string, id: string): Promise<Project | null> {
+export async function getProject(
+  workspaceId: string,
+  id: string,
+  projectIds?: readonly string[] | null,
+): Promise<Project | null> {
+  if (projectIds !== null && projectIds !== undefined && !projectIds.includes(id)) return null;
   return queryOne<Project>(
     `SELECT id, name, repository, framework, environment, region, status, visibility, createdAt, updatedAt
      FROM project WHERE workspaceId = ? AND id = ?`,
@@ -57,7 +70,11 @@ export async function findProjectByName(
   );
 }
 
-export async function countProjects(workspaceId: string): Promise<number> {
+export async function countProjects(
+  workspaceId: string,
+  projectIds?: readonly string[] | null,
+): Promise<number> {
+  if (projectIds !== null && projectIds !== undefined) return projectIds.length;
   return count('SELECT COUNT(*) AS total FROM project WHERE workspaceId = ?', workspaceId);
 }
 
@@ -96,6 +113,8 @@ export async function createProject(input: CreateProjectInput): Promise<CreatePr
       status: 409,
     };
   }
+  const capacity = await assertResourceCapacity(input.workspaceId, 'projects');
+  if (!capacity.ok) return { ok: false, error: capacity.error, status: 409 };
 
   const now = Date.now();
   const project: Project = {
@@ -156,8 +175,9 @@ export async function deleteProject(
   workspaceId: string,
   projectId: string,
   actor: string,
+  projectIds?: readonly string[] | null,
 ): Promise<boolean> {
-  const project = await getProject(workspaceId, projectId);
+  const project = await getProject(workspaceId, projectId, projectIds);
   if (!project) return false;
   await execute('DELETE FROM project WHERE workspaceId = ? AND id = ?', workspaceId, projectId);
   await writeLog({

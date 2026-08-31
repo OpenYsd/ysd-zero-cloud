@@ -46,6 +46,16 @@ function snapshot(overrides: Partial<ShieldSnapshot> = {}): ShieldSnapshot {
     tables: [{ name: 'project', hasPrimaryKey: true, rows: 4 }],
     integrations: [{ id: 'cloudflare-d1', status: 'configured' }],
     publicProjects: [],
+    collaboration: {
+      ownerInvariant: true,
+      tenantIsolationViolations: 0,
+      tenantIsolationGuarded: true,
+      auditAppendOnly: true,
+      staleAdmins: 0,
+      expiredInvitations: 0,
+      unboundedServiceTokens: 0,
+      privilegeEscalationBlocked: true,
+    },
     now: NOW,
     ...overrides,
   };
@@ -579,6 +589,58 @@ void test('a fully hardened instance still scores 100', () => {
   const report = runShieldRules(snapshot());
   assert.equal(report.score, 100);
   assert.deepEqual(report.findings, []);
+});
+
+void test('organization isolation failures are critical Shield findings', () => {
+  const report = runShieldRules(
+    snapshot({
+      collaboration: {
+        ownerInvariant: false,
+        tenantIsolationViolations: 2,
+        tenantIsolationGuarded: false,
+        auditAppendOnly: false,
+        staleAdmins: 0,
+        expiredInvitations: 0,
+        unboundedServiceTokens: 0,
+        privilegeEscalationBlocked: false,
+      },
+    }),
+  );
+  const codes = new Set(report.findings.map((finding) => finding.code));
+  assert.equal(codes.has('organization-owner-invariant'), true);
+  assert.equal(codes.has('organization-tenant-key-mismatch'), true);
+  assert.equal(codes.has('organization-tenant-guards-missing'), true);
+  assert.equal(codes.has('audit-not-append-only'), true);
+  assert.equal(codes.has('organization-privilege-escalation'), true);
+  assert.equal(
+    report.checks.find((check) => check.id === 'organization-isolation')?.state,
+    'failed',
+  );
+});
+
+void test('stale collaboration credentials are review findings', () => {
+  const report = runShieldRules(
+    snapshot({
+      collaboration: {
+        ownerInvariant: true,
+        tenantIsolationViolations: 0,
+        tenantIsolationGuarded: true,
+        auditAppendOnly: true,
+        staleAdmins: 1,
+        expiredInvitations: 2,
+        unboundedServiceTokens: 3,
+        privilegeEscalationBlocked: true,
+      },
+    }),
+  );
+  const codes = new Set(report.findings.map((finding) => finding.code));
+  assert.equal(codes.has('stale-organization-admins'), true);
+  assert.equal(codes.has('expired-organization-invitations'), true);
+  assert.equal(codes.has('unbounded-service-tokens'), true);
+  assert.equal(
+    report.checks.find((check) => check.id === 'organization-isolation')?.state,
+    'review',
+  );
 });
 
 void test('an unobservable header probe is not reported as a failure', () => {

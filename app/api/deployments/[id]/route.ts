@@ -9,7 +9,11 @@ export async function GET(
   if (!auth.ok) return auth.response;
   const { id } = await params;
   if (!/^dpl_[a-f0-9]{24}$/.test(id)) return Response.json({ error: 'Deployment not found.' }, { status: 404 });
-  const deployment = await getDeployment(auth.session.workspace.id, id);
+  const deployment = await getDeployment(
+    auth.session.workspace.id,
+    id,
+    auth.session.actor.projectIds,
+  );
   return deployment
     ? Response.json({ deployment })
     : Response.json({ error: 'Deployment not found.' }, { status: 404 });

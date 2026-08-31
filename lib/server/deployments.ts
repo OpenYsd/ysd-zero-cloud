@@ -29,9 +29,11 @@ import { inspectRepositoryForDeploy } from './github';
 import { writeLog } from './logs';
 import { enqueueJob } from './nodes';
 import { recordAppRuntimeSecurityEvent } from './app-runtime-control';
+import { assertResourceCapacity } from './organization-limits';
 import {
   createProject,
   findProjectByName,
+  getProject,
   projectNameFromRepository,
   setProjectStatus,
 } from './projects';
@@ -160,22 +162,37 @@ async function nextPort(nodeId: string): Promise<number | null> {
   return null;
 }
 
-export async function listDeployments(workspaceId: string, limit = 50): Promise<Deployment[]> {
+export async function listDeployments(
+  workspaceId: string,
+  limit = 50,
+  projectIds?: readonly string[] | null,
+): Promise<Deployment[]> {
+  if (projectIds !== null && projectIds !== undefined && projectIds.length === 0) return [];
+  const restricted = projectIds !== null && projectIds !== undefined;
   const rows = await query<DeploymentRow>(
     `SELECT ${SELECT} FROM deployment d LEFT JOIN compute_node n ON n.id = d.nodeId
-     WHERE d.workspaceId = ? ORDER BY d.createdAt DESC LIMIT ?`,
+     WHERE d.workspaceId = ?${restricted ? ` AND d.projectId IN (${(projectIds ?? []).map(() => '?').join(', ')})` : ''}
+     ORDER BY d.createdAt DESC LIMIT ?`,
     workspaceId,
+    ...(projectIds ?? []),
     Math.min(200, Math.max(1, limit)),
   );
   return rows.map(toDeployment);
 }
 
-export async function getDeployment(workspaceId: string, id: string): Promise<DeploymentDetail | null> {
+export async function getDeployment(
+  workspaceId: string,
+  id: string,
+  projectIds?: readonly string[] | null,
+): Promise<DeploymentDetail | null> {
+  if (projectIds !== null && projectIds !== undefined && projectIds.length === 0) return null;
+  const restricted = projectIds !== null && projectIds !== undefined;
   const row = await queryOne<DeploymentRow>(
     `SELECT ${SELECT}, d.plan FROM deployment d LEFT JOIN compute_node n ON n.id = d.nodeId
-     WHERE d.workspaceId = ? AND d.id = ?`,
+     WHERE d.workspaceId = ? AND d.id = ?${restricted ? ` AND d.projectId IN (${(projectIds ?? []).map(() => '?').join(', ')})` : ''}`,
     workspaceId,
     id,
+    ...(projectIds ?? []),
   );
   if (!row) return null;
   let plan: SmartDeployPlan;
@@ -212,7 +229,19 @@ export async function getDeployment(workspaceId: string, id: string): Promise<De
   return { ...toDeployment(row), plan, actions, artifacts, logs };
 }
 
-export async function countDeployments(workspaceId: string): Promise<number> {
+export async function countDeployments(
+  workspaceId: string,
+  projectIds?: readonly string[] | null,
+): Promise<number> {
+  if (projectIds !== null && projectIds !== undefined) {
+    if (projectIds.length === 0) return 0;
+    return count(
+      `SELECT COUNT(*) AS total FROM deployment
+        WHERE workspaceId = ? AND projectId IN (${projectIds.map(() => '?').join(', ')})`,
+      workspaceId,
+      ...projectIds,
+    );
+  }
   return count('SELECT COUNT(*) AS total FROM deployment WHERE workspaceId = ?', workspaceId);
 }
 
@@ -232,6 +261,7 @@ export type PlanRequest = {
   memoryMb: number;
   diskQuotaBytes: number;
   idempotencyKey: string | null;
+  allowedProjectIds?: readonly string[] | null;
 };
 
 export type PlanOutcome =
@@ -239,6 +269,17 @@ export type PlanOutcome =
   | { ok: false; status: number; error: string; plan?: SmartDeployPlan; deployment?: Deployment };
 
 export async function planDeployment(request: PlanRequest): Promise<PlanOutcome> {
+  let scopedProjectId: string | null = null;
+  if (request.allowedProjectIds !== null && request.allowedProjectIds !== undefined) {
+    const project = await findProjectByName(
+      request.workspaceId,
+      projectNameFromRepository(request.repository),
+    );
+    if (!project || !request.allowedProjectIds.includes(project.id)) {
+      return { ok: false, status: 404, error: 'Project not found in this token or member scope.' };
+    }
+    scopedProjectId = project.id;
+  }
   const idempotencyKey = request.idempotencyKey?.trim().slice(0, 128) || null;
   if (idempotencyKey) {
     const duplicate = await queryOne<{ deploymentId: string }>(
@@ -247,10 +288,17 @@ export async function planDeployment(request: PlanRequest): Promise<PlanOutcome>
       idempotencyKey,
     );
     if (duplicate) {
-      const deployment = await getDeployment(request.workspaceId, duplicate.deploymentId);
+      const deployment = await getDeployment(
+        request.workspaceId,
+        duplicate.deploymentId,
+        request.allowedProjectIds,
+      );
       if (deployment) return { ok: true, plan: deployment.plan, deployment, duplicate: true };
     }
   }
+
+  const capacity = await assertResourceCapacity(request.workspaceId, 'deployments');
+  if (!capacity.ok) return { ok: false, status: 409, error: capacity.error };
 
   const node = await deploymentNode(request.workspaceId, request.nodeId);
   if (!node.ok) return node;
@@ -321,10 +369,11 @@ export async function planDeployment(request: PlanRequest): Promise<PlanOutcome>
         finishedAt, branch, environment, nodeId, localPort, localAddress,
         exposure, observedBind, healthPath, buildDurationMs, startedAt, updatedAt,
         lastError, restartCount, crashLoop, deletedAt)
-       VALUES (?, ?, NULL, ?, 'user-node', ?, ?, 'blocked', ?, 0, 1, ?, ?, ?,
+       VALUES (?, ?, ?, ?, 'user-node', ?, ?, 'blocked', ?, 0, 1, ?, ?, ?,
                ?, ?, ?, ?, ?, 'private', 'unknown', ?, NULL, NULL, ?, ?, 0, 0, NULL)`,
       deploymentId,
       request.workspaceId,
+      scopedProjectId,
       plan.repository,
       plan.framework,
       plan.source.commit,
@@ -349,14 +398,20 @@ export async function planDeployment(request: PlanRequest): Promise<PlanOutcome>
       actor: request.actor,
       resource: deploymentId,
     });
-    const deployment = (await getDeployment(request.workspaceId, deploymentId))!;
+    const deployment = (await getDeployment(
+      request.workspaceId,
+      deploymentId,
+      request.allowedProjectIds,
+    ))!;
     return { ok: false, status: 409, error: plan.protection.reason, plan, deployment };
   }
 
   const name = projectNameFromRepository(plan.repository);
-  const existing = await findProjectByName(request.workspaceId, name);
+  const existing = scopedProjectId
+    ? await getProject(request.workspaceId, scopedProjectId)
+    : await findProjectByName(request.workspaceId, name);
   let projectId = existing?.id ?? null;
-  if (!projectId) {
+  if (!projectId && (request.allowedProjectIds === null || request.allowedProjectIds === undefined)) {
     const created = await createProject({
       workspaceId: request.workspaceId,
       actor: request.actor,
@@ -452,7 +507,11 @@ export async function planDeployment(request: PlanRequest): Promise<PlanOutcome>
         )
       : null;
     const duplicate = duplicateAction
-      ? await getDeployment(request.workspaceId, duplicateAction.deploymentId)
+      ? await getDeployment(
+        request.workspaceId,
+        duplicateAction.deploymentId,
+        request.allowedProjectIds,
+      )
       : null;
     return duplicate
       ? { ok: true, plan: duplicate.plan, deployment: duplicate, duplicate: true }
@@ -484,7 +543,7 @@ export async function planDeployment(request: PlanRequest): Promise<PlanOutcome>
   return {
     ok: true,
     plan,
-    deployment: (await getDeployment(request.workspaceId, deploymentId))!,
+    deployment: (await getDeployment(request.workspaceId, deploymentId, request.allowedProjectIds))!,
     duplicate: false,
   };
 }
@@ -493,13 +552,22 @@ export async function cancelDeployment(input: {
   workspaceId: string;
   deploymentId: string;
   actor: string;
+  allowedProjectIds?: readonly string[] | null;
 }): Promise<{ ok: true; state: DeploymentState } | { ok: false; status: number; error: string }> {
+  if (input.allowedProjectIds !== null && input.allowedProjectIds !== undefined &&
+      input.allowedProjectIds.length === 0) {
+    return { ok: false, status: 404, error: 'Deployment not found.' };
+  }
+  const restricted = input.allowedProjectIds !== null && input.allowedProjectIds !== undefined;
   const row = await queryOne<{ jobId: string | null; state: string; jobState: string | null }>(
     `SELECT d.jobId, d.state, j.state AS jobState FROM deployment d
      LEFT JOIN node_job j ON j.id = d.jobId AND j.workspaceId = d.workspaceId
-     WHERE d.workspaceId = ? AND d.id = ?`,
+     WHERE d.workspaceId = ? AND d.id = ?${restricted
+       ? ` AND d.projectId IN (${(input.allowedProjectIds ?? []).map(() => '?').join(', ')})`
+       : ''}`,
     input.workspaceId,
     input.deploymentId,
+    ...(input.allowedProjectIds ?? []),
   );
   if (!row) return { ok: false, status: 404, error: 'Deployment not found.' };
   if (!row.jobId || !['queued', 'building', 'starting', 'restarting', 'rolling_back'].includes(row.state)) {
@@ -542,8 +610,9 @@ export async function createDeploymentAction(input: {
   operation: Exclude<AppRuntimeOperation, 'deploy'>;
   targetArtifactId?: string | null;
   idempotencyKey: string | null;
+  allowedProjectIds?: readonly string[] | null;
 }): Promise<{ ok: true; action: AppDeploymentAction; deployment: Deployment; duplicate: boolean } | { ok: false; status: number; error: string }> {
-  const detail = await getDeployment(input.workspaceId, input.deploymentId);
+  const detail = await getDeployment(input.workspaceId, input.deploymentId, input.allowedProjectIds);
   if (!detail || !detail.projectId || !detail.nodeId) return { ok: false, status: 404, error: 'Deployment not found.' };
   if (detail.deletedAt !== null || detail.state === 'blocked') return { ok: false, status: 409, error: 'This deployment cannot accept actions.' };
   if (['queued', 'building', 'starting', 'stopping', 'restarting', 'rolling_back', 'deleting', 'cancelling'].includes(detail.state)) {
@@ -663,5 +732,10 @@ export async function createDeploymentAction(input: {
     input.workspaceId, actionId,
   ))!;
   await writeLog({ workspaceId: input.workspaceId, source: 'deployment', message: `Queued App Runtime ${input.operation}`, actor: input.actor, resource: detail.id });
-  return { ok: true, action, deployment: (await getDeployment(input.workspaceId, detail.id))!, duplicate: false };
+  return {
+    ok: true,
+    action,
+    deployment: (await getDeployment(input.workspaceId, detail.id, input.allowedProjectIds))!,
+    duplicate: false,
+  };
 }

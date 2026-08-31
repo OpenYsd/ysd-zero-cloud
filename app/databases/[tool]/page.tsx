@@ -28,8 +28,14 @@ export default async function DatabaseToolPage({ params }: { params: Promise<{ t
   const { tool } = await params;
   if (!isTool(tool)) notFound();
 
-  const { user, workspace, actor } = await requireSession();
-  const tables = await listTables({ workspaceId: workspace.id, userId: user.id });
+  const { user, organization, workspace, actor } = await requireSession();
+  if (!can(actor, 'database.read')) notFound();
+  const tables = await listTables({
+    organizationId: organization.id,
+    workspaceId: workspace.id,
+    userId: user.id,
+    projectIds: actor.projectIds,
+  });
   const owner = can(actor, 'sql-editor.run');
 
   // Opening on a workspace table rather than an auth table keeps the first

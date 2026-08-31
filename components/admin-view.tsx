@@ -25,7 +25,8 @@ export type AdminUser = {
 const ROLE_TONE: Record<Role, string> = {
   owner: 'border-[#b7ff3c]/20 bg-[#b7ff3c]/[0.06] text-[#c8ff69]',
   admin: 'border-[#7569ff]/25 bg-[#7569ff]/[0.06] text-[#b0aaff]',
-  member: 'border-white/[0.09] text-white/45',
+  developer: 'border-white/[0.09] text-white/55',
+  viewer: 'border-white/[0.06] text-white/35',
 };
 
 /**
@@ -108,7 +109,7 @@ export function AdminView({
           <TableBody>
             {rows.map((row) => {
               const target = { userId: row.id, role: row.role };
-              const roleChange = canChangeRole(actor, target, 'member', ownerCount);
+              const roleChange = canChangeRole(actor, target, 'viewer', ownerCount);
               const suspendDecision = canSuspend(actor, target);
               const busy = pending === row.id;
               const suspended = row.suspendedAt !== null;

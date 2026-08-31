@@ -95,3 +95,22 @@ export function createId(prefix: string): string {
   for (const byte of bytes) out += byte.toString(16).padStart(2, '0');
   return `${prefix}_${out}`;
 }
+
+/** Full SHA-256 digest for opaque credentials stored only as hashes. */
+export async function sha256Hex(value: string): Promise<string> {
+  const digest = await crypto.subtle.digest(
+    'SHA-256',
+    new TextEncoder().encode(value),
+  );
+  return [...new Uint8Array(digest)]
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+/** A cryptographically random URL-safe token. */
+export function createOpaqueToken(prefix: string): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(32));
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return `${prefix}_${btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '')}`;
+}

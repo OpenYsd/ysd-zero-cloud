@@ -38,6 +38,7 @@ import {
 import { formatBytes, formatUsage, type UsageReading } from '@/lib/free-tier';
 import { money, relativeTime } from '@/lib/format';
 import { DeploymentActions } from '@/components/deployment-actions';
+import type { CollaborationLimits } from '@/lib/server/organization-limits';
 
 /**
  * Section surfaces that only render data.
@@ -113,6 +114,31 @@ export const SECTION_META: Record<
     title: 'YSD Shield',
     eyebrow: 'Security Center',
     description: 'One security posture across identity, data, and cost.',
+  },
+  members: {
+    title: 'Members',
+    eyebrow: 'Organization',
+    description: 'Roles, project access, suspension, and ownership for this organization.',
+  },
+  invitations: {
+    title: 'Invitations',
+    eyebrow: 'Organization',
+    description: 'Create expiring, single-use collaboration links bound to a signed-in email address.',
+  },
+  'service-accounts': {
+    title: 'Service Accounts',
+    eyebrow: 'Automation',
+    description: 'Issue revocable tokens with explicit workspace or project scopes.',
+  },
+  audit: {
+    title: 'Audit Log',
+    eyebrow: 'Organization',
+    description: 'Immutable security and change history for this tenant.',
+  },
+  sessions: {
+    title: 'Sessions',
+    eyebrow: 'Identity',
+    description: 'Review devices and revoke access immediately.',
   },
   admin: {
     title: 'Accounts',
@@ -379,12 +405,14 @@ export function UsageView({
   zeroMode,
   measuredAt,
   now,
+  collaboration,
 }: {
   readings: UsageReading[];
   projectedCost: number;
   zeroMode: boolean;
   measuredAt: number;
   now: number;
+  collaboration: CollaborationLimits;
 }) {
   return (
     <div className="grid gap-4 lg:grid-cols-[1.2fr_.8fr]">
@@ -465,6 +493,26 @@ export function UsageView({
           nothing to upgrade and no plan to exceed — the guard simply stops at
           the free ceiling.
         </p>
+      </article>
+
+      <article className="cloud-card p-5 lg:col-span-2">
+        <div className="flex items-end justify-between gap-3">
+          <div>
+            <h2 className="text-sm font-semibold text-white/80">Organization & workspace limits</h2>
+            <p className="mt-1 text-[10px] text-white/27">Hard ceilings with no paid overflow path.</p>
+          </div>
+          <span className="text-[9px] text-white/22">measured live</span>
+        </div>
+        <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          {collaboration.workspace.map((item) => {
+            const organization = collaboration.organization.find((entry) => entry.key === item.key);
+            return <div key={item.key} className="rounded-lg border border-white/[0.06] bg-black/10 p-3">
+              <p className="text-[9px] uppercase tracking-[0.12em] text-white/25">{item.key}</p>
+              <p className="mt-2 font-mono text-sm text-white/70">{item.used} / {item.limit}</p>
+              <p className="mt-1 text-[9px] text-white/25">organization {organization?.used ?? 0} / {organization?.limit ?? 0}</p>
+            </div>;
+          })}
+        </div>
       </article>
     </div>
   );

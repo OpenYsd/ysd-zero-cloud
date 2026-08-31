@@ -10,11 +10,10 @@ import { runEditorQuery } from '@/lib/server/studio';
  * A blocked statement is answered with 422 and the reason the guard gave, so
  * the editor can explain the refusal instead of showing a generic failure.
  *
- * Unlike Database Studio, results here cannot be limited to one workspace: an
- * arbitrary statement would have to be rewritten to carry a tenant predicate,
- * which needs a real SQL planner. Every workspace shares one D1 database, so
- * until that exists the editor stays closed to everyone but the instance
- * owner.
+ * Unlike Database Studio, arbitrary SQL cannot be proven organization-scoped
+ * without a real SQL planner. Phase 7 therefore keeps this route closed to
+ * every organization role; retaining the guarded implementation preserves a
+ * future migration path without weakening tenant isolation today.
  */
 export async function POST(request: Request): Promise<Response> {
   const auth = await requireApiSession(request);
@@ -30,13 +29,13 @@ export async function POST(request: Request): Promise<Response> {
       workspaceId: workspace.id,
       level: 'WARN',
       source: 'database',
-      message: 'SQL Editor refused: not the instance owner',
+      message: 'SQL Editor refused: organization isolation requires Database Studio',
       actor: user.email,
     });
     return Response.json(
       {
         error:
-          'The SQL Editor is limited to the instance owner, because a raw statement cannot be scoped to one workspace. Use Database Studio, which shows your own rows.',
+          'Raw SQL is disabled in multi-organization mode because it cannot be scoped safely. Use Database Studio, which applies organization and workspace predicates.',
       },
       { status: 403 },
     );

@@ -10,6 +10,7 @@ import computeNodesSchema from '../../db/migrations/0006_compute_nodes.sql?raw';
 import aiComputeSchema from '../../db/migrations/0007_ai_compute.sql?raw';
 import gameServersSchema from '../../db/migrations/0008_game_servers.sql?raw';
 import appRuntimeSchema from '../../db/migrations/0009_app_runtime.sql?raw';
+import organizationsSchema from '../../db/migrations/0010_organizations.sql?raw';
 
 /**
  * D1 access and schema management.
@@ -30,6 +31,7 @@ const MIGRATIONS: { name: string; sql: string }[] = [
   { name: '0007_ai_compute', sql: aiComputeSchema },
   { name: '0008_game_servers', sql: gameServersSchema },
   { name: '0009_app_runtime', sql: appRuntimeSchema },
+  { name: '0010_organizations', sql: organizationsSchema },
 ];
 
 const LEDGER = `CREATE TABLE IF NOT EXISTS ysd_migration (
@@ -49,6 +51,16 @@ export const AUTH_TABLES = [
   'rate_limit',
 ] as const;
 export const WORKSPACE_TABLES = [
+  'organization',
+  'organization_member',
+  'workspace_member',
+  'member_project_access',
+  'organization_invitation',
+  'service_account',
+  'service_account_token',
+  'audit_event',
+  'organization_limit',
+  'workspace_limit',
   'workspace',
   'project',
   'deployment',

@@ -1,71 +1,197 @@
-/**
- * Instance roles.
- *
- * Every operator still owns exactly one workspace; roles govern what someone
- * may do to the *instance* — manage other accounts, reach the raw SQL Editor —
- * never what they may see inside another workspace. Tenant isolation is
- * enforced separately in `lib/tenancy.ts` and is not weakened by any role:
- * an admin administers accounts, they do not read other people's data.
- */
+/** Organization-scoped roles and the server-authoritative permission matrix. */
 
-export const ROLES = ['owner', 'admin', 'member'] as const;
-
+export const ROLES = ['owner', 'admin', 'developer', 'viewer'] as const;
 export type Role = (typeof ROLES)[number];
+
+/** `member` was the pre-Phase-7 role and maps to developer during migration. */
+export function normalizeRole(value: string | null | undefined): Role {
+  if (value === 'member') return 'developer';
+  return value && isRole(value) ? value : 'viewer';
+}
 
 export function isRole(value: string): value is Role {
   return (ROLES as readonly string[]).includes(value);
 }
 
-/** Higher rank wins. Used for comparisons, never persisted. */
-const RANK: Record<Role, number> = { owner: 3, admin: 2, member: 1 };
+const RANK: Record<Role, number> = { owner: 4, admin: 3, developer: 2, viewer: 1 };
 
 export function rankOf(role: Role): number {
   return RANK[role];
 }
 
 export function atLeast(role: Role, minimum: Role): boolean {
-  return RANK[role] >= RANK[minimum];
+  return rankOf(role) >= rankOf(minimum);
+}
+
+export const PERMISSIONS = [
+  'workspace.use',
+  'organization.read',
+  'organization.create',
+  'organization.update',
+  'organization.archive',
+  'workspace.read',
+  'workspace.create',
+  'workspace.update',
+  'workspace.archive',
+  'project.read',
+  'project.create',
+  'project.update',
+  'project.delete',
+  'deployment.read',
+  'deployment.deploy',
+  'deployment.lifecycle',
+  'secret.metadata.read',
+  'secret.write',
+  'node.read',
+  'node.manage',
+  'game-server.read',
+  'game-server.manage',
+  'game-server.lifecycle',
+  'ai.read',
+  'ai.jobs.run',
+  'database.read',
+  'sql-editor.run',
+  'billing.read',
+  'billing.cost.configure',
+  'member.read',
+  'member.manage',
+  'member.transfer-ownership',
+  'invitation.read',
+  'invitation.manage',
+  'service-account.read',
+  'service-account.manage',
+  'session.read-own',
+  'session.revoke-own',
+  'session.revoke-member',
+  'audit.read',
+  'audit.export',
+  'usage.read',
+  'shield.read',
+  'shield.scan',
+  'storage.read',
+  'storage.write',
+  // Compatibility names retained for the original admin and page guards.
+  'admin.users.read',
+  'admin.users.write',
+] as const;
+
+export type Permission = (typeof PERMISSIONS)[number];
+export type Capability = Permission;
+
+const VIEWER: readonly Permission[] = [
+  'workspace.use', 'organization.read', 'workspace.read', 'project.read',
+  'deployment.read', 'secret.metadata.read', 'node.read', 'game-server.read',
+  'ai.read', 'database.read', 'billing.read', 'member.read',
+  'session.read-own', 'session.revoke-own', 'usage.read', 'shield.read',
+  'storage.read',
+];
+
+const DEVELOPER: readonly Permission[] = [
+  ...VIEWER,
+  'project.create', 'project.update', 'project.delete',
+  'deployment.deploy', 'deployment.lifecycle', 'secret.write', 'node.manage',
+  'game-server.manage', 'game-server.lifecycle', 'ai.jobs.run', 'shield.scan',
+  'storage.write',
+];
+
+const ADMIN: readonly Permission[] = [
+  ...DEVELOPER,
+  'organization.update', 'workspace.create', 'workspace.update',
+  'workspace.archive', 'member.manage', 'invitation.manage',
+  'invitation.read',
+  'service-account.read', 'service-account.manage', 'session.revoke-member',
+  'audit.read', 'audit.export',
+];
+
+const OWNER: readonly Permission[] = [
+  ...ADMIN,
+  'organization.create', 'organization.archive', 'member.transfer-ownership',
+  'billing.cost.configure',
+];
+
+export const PERMISSION_MATRIX: Readonly<Record<Role, ReadonlySet<Permission>>> = {
+  owner: new Set(OWNER),
+  admin: new Set(ADMIN),
+  developer: new Set(DEVELOPER),
+  viewer: new Set(VIEWER),
+};
+
+export const SERVICE_TOKEN_SCOPES = [
+  'project.read', 'deployment.read', 'deployment.deploy',
+  'deployment.lifecycle', 'secret.metadata.read', 'node.read',
+  'secret.write',
+  'game-server.read', 'game-server.lifecycle', 'ai.read', 'ai.jobs.run',
+  'usage.read', 'storage.read', 'storage.write',
+] as const satisfies readonly Permission[];
+
+export const PROJECT_SERVICE_TOKEN_SCOPES = [
+  'project.read',
+  'deployment.read',
+  'deployment.deploy',
+  'deployment.lifecycle',
+  'secret.metadata.read',
+  'secret.write',
+] as const satisfies readonly Permission[];
+
+export type ServiceTokenScope = (typeof SERVICE_TOKEN_SCOPES)[number];
+
+export function isServiceTokenScope(value: string): value is ServiceTokenScope {
+  return (SERVICE_TOKEN_SCOPES as readonly string[]).includes(value);
 }
 
 export type Actor = {
   userId: string;
   role: Role;
   suspended: boolean;
-};
-
-export type Target = {
-  userId: string;
-  role: Role;
+  organizationId?: string;
+  workspaceId?: string;
+  projectIds?: readonly string[] | null;
+  serviceAccountId?: string;
+  tokenScopes?: readonly Permission[];
 };
 
 /**
- * What a role may do.
- *
- * A suspended account keeps its role but loses every capability, so a
- * suspension cannot be sat out by an admin who still holds a session.
+ * Permissions that still make sense when a workspace membership or service
+ * token is restricted to an explicit project allowlist. Workspace-level
+ * infrastructure (nodes, AI, game servers, storage and raw database access)
+ * deliberately drops out because it cannot be attributed to one project.
  */
-export type Capability =
-  | 'admin.users.read'
-  | 'admin.users.write'
-  | 'sql-editor.run'
-  | 'workspace.use';
+const PROJECT_BOUND_PERMISSIONS = new Set<Permission>([
+  'workspace.use',
+  'organization.read',
+  'workspace.read',
+  'project.read',
+  'project.update',
+  'deployment.read',
+  'deployment.deploy',
+  'deployment.lifecycle',
+  'secret.metadata.read',
+  'secret.write',
+  'member.read',
+  'session.read-own',
+  'session.revoke-own',
+]);
 
-export function can(actor: Actor, capability: Capability): boolean {
-  if (actor.suspended) return false;
-  switch (capability) {
-    case 'workspace.use':
-      return true;
-    case 'admin.users.read':
-    case 'admin.users.write':
-      return atLeast(actor.role, 'admin');
-    case 'sql-editor.run':
-      // Unchanged from before roles existed: a raw statement cannot be scoped
-      // to one workspace, so only the instance owner may run one. Admins
-      // deliberately do not inherit this.
-      return actor.role === 'owner';
-    default:
-      return false;
+export type Target = { userId: string; role: Role };
+
+export function can(actor: Actor, permission: Permission): boolean {
+  const matrix = PERMISSION_MATRIX[actor.role];
+  if (actor.suspended || !matrix?.has(permission)) return false;
+  if (actor.projectIds !== null && actor.projectIds !== undefined &&
+      !PROJECT_BOUND_PERMISSIONS.has(permission)) {
+    return false;
   }
+  if (actor.serviceAccountId) {
+    // Service tokens are the intersection of the developer matrix and their
+    // explicit allowlisted scopes. They never inherit management privileges.
+    return Boolean(actor.tokenScopes?.includes(permission));
+  }
+  return true;
+}
+
+export function canAccessProject(actor: Actor, projectId: string | null | undefined): boolean {
+  if (!projectId || actor.projectIds === null || actor.projectIds === undefined) return true;
+  return actor.projectIds.includes(projectId);
 }
 
 export type RoleChangeRefusal =
@@ -79,68 +205,69 @@ export type RoleChangeDecision =
   | { allowed: true }
   | { allowed: false; reason: RoleChangeRefusal; message: string };
 
-/**
- * Whether `actor` may change `target` to `nextRole`.
- *
- * The rules exist to stop an instance from being taken over or locked out:
- *
- * - Nobody edits their own role, so an admin cannot promote themselves.
- * - Nobody may act on an account that outranks them, or on an equal, so one
- *   admin cannot demote another.
- * - Only an owner may hand out `owner`, and doing so is an explicit transfer.
- * - The last remaining owner cannot be demoted, or the instance would have no
- *   one able to administer it.
- */
 export function canChangeRole(
   actor: Actor,
   target: Target,
   nextRole: Role,
   ownerCount: number,
 ): RoleChangeDecision {
-  if (!can(actor, 'admin.users.write')) {
-    return { allowed: false, reason: 'not-permitted', message: 'You cannot manage accounts.' };
+  if (!can(actor, 'member.manage')) {
+    return { allowed: false, reason: 'not-permitted', message: 'You cannot manage members.' };
   }
   if (actor.userId === target.userId) {
     return { allowed: false, reason: 'self', message: 'You cannot change your own role.' };
   }
-  if (rankOf(target.role) >= rankOf(actor.role)) {
-    return {
-      allowed: false,
-      reason: 'outranked',
-      message: 'You cannot change an account at or above your own role.',
-    };
+  if (target.role === 'owner' && ownerCount <= 1) {
+    return { allowed: false, reason: 'last-owner', message: 'The organization must keep an owner.' };
   }
-  if (nextRole === 'owner' && actor.role !== 'owner') {
+  if (rankOf(target.role) >= rankOf(actor.role)) {
+    return { allowed: false, reason: 'outranked', message: 'You cannot change a member at or above your role.' };
+  }
+  if (nextRole === 'owner') {
     return {
       allowed: false,
       reason: 'cannot-grant-owner',
-      message: 'Only the owner can grant ownership.',
-    };
-  }
-  if (target.role === 'owner' && nextRole !== 'owner' && ownerCount <= 1) {
-    return {
-      allowed: false,
-      reason: 'last-owner',
-      message: 'The instance must keep at least one owner.',
+      message: 'Use the confirmed ownership transfer flow to grant ownership.',
     };
   }
   return { allowed: true };
 }
 
-/** Whether `actor` may suspend or restore `target`. */
 export function canSuspend(actor: Actor, target: Target): RoleChangeDecision {
-  if (!can(actor, 'admin.users.write')) {
-    return { allowed: false, reason: 'not-permitted', message: 'You cannot manage accounts.' };
+  if (!can(actor, 'member.manage')) {
+    return { allowed: false, reason: 'not-permitted', message: 'You cannot manage members.' };
   }
   if (actor.userId === target.userId) {
     return { allowed: false, reason: 'self', message: 'You cannot suspend your own account.' };
   }
   if (rankOf(target.role) >= rankOf(actor.role)) {
-    return {
-      allowed: false,
-      reason: 'outranked',
-      message: 'You cannot suspend an account at or above your own role.',
-    };
+    return { allowed: false, reason: 'outranked', message: 'You cannot suspend a member at or above your role.' };
   }
   return { allowed: true };
+}
+
+/** Central route policy. Unknown API routes fail closed for service tokens. */
+export function permissionForRequest(method: string, pathname: string): Permission | null {
+  const verb = method.toUpperCase();
+  const read = verb === 'GET' || verb === 'HEAD';
+  if (pathname.startsWith('/api/projects')) return read ? 'project.read' : verb === 'DELETE' ? 'project.delete' : 'project.create';
+  if (pathname === '/api/smart-deploy') return 'deployment.deploy';
+  if (pathname.startsWith('/api/deployments')) return read ? 'deployment.read' : 'deployment.lifecycle';
+  if (pathname.startsWith('/api/secrets')) return read ? 'secret.metadata.read' : 'secret.write';
+  if (pathname.startsWith('/api/nodes/agent/')) return null;
+  if (pathname.startsWith('/api/nodes')) return read ? 'node.read' : 'node.manage';
+  if (pathname.startsWith('/api/game-servers')) return read ? 'game-server.read' : pathname.includes('/actions') ? 'game-server.lifecycle' : 'game-server.manage';
+  if (pathname.startsWith('/api/ai/jobs')) return read ? 'ai.read' : 'ai.jobs.run';
+  if (pathname.startsWith('/api/ai/models')) return read ? 'ai.read' : 'ai.jobs.run';
+  if (pathname === '/api/ai') return 'ai.read';
+  if (pathname.startsWith('/api/database/query')) return 'sql-editor.run';
+  if (pathname.startsWith('/api/database')) return 'database.read';
+  if (pathname.startsWith('/api/storage')) return read ? 'storage.read' : 'storage.write';
+  if (pathname.startsWith('/api/logs')) return 'workspace.read';
+  if (pathname.startsWith('/api/usage')) return 'usage.read';
+  if (pathname.startsWith('/api/shield/scan')) return 'shield.scan';
+  if (pathname.startsWith('/api/shield')) return 'shield.read';
+  if (pathname.startsWith('/api/settings')) return read ? 'workspace.read' : 'workspace.update';
+  if (pathname.startsWith('/api/admin/users')) return read ? 'admin.users.read' : 'admin.users.write';
+  return null;
 }

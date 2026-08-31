@@ -473,6 +473,7 @@ export type AppDeploymentLog = {
 
 export type Workspace = {
   id: string;
+  organizationId: string;
   name: string;
   ownerUserId: string;
   zeroMode: boolean;
@@ -481,6 +482,81 @@ export type Workspace = {
   previewDeployments: boolean;
   createdAt: number;
   updatedAt: number;
+  archivedAt: number | null;
+};
+
+export type Organization = {
+  id: string;
+  name: string;
+  slug: string;
+  ownerUserId: string;
+  status: 'active' | 'archived';
+  adminCanRevokeSessions: boolean;
+  createdAt: number;
+  updatedAt: number;
+  archivedAt: number | null;
+};
+
+export type OrganizationSummary = Organization & {
+  role: import('./roles.ts').Role;
+  workspaces: Workspace[];
+};
+
+export type OrganizationMember = {
+  id: string;
+  userId: string;
+  name: string;
+  email: string;
+  role: import('./roles.ts').Role;
+  status: 'active' | 'suspended' | 'removed';
+  suspendedAt: number | null;
+  suspendedReason: string | null;
+  acceptedAt: number;
+  lastActiveAt: number | null;
+  activeSessions: number;
+  /** `null` means every project in the selected workspace. */
+  projectIds: string[] | null;
+};
+
+export type OrganizationInvitation = {
+  id: string;
+  email: string;
+  role: Exclude<import('./roles.ts').Role, 'owner'>;
+  workspaceId: string;
+  workspaceName: string;
+  tokenPrefix: string;
+  status: 'pending' | 'accepted' | 'revoked' | 'expired';
+  expiresAt: number;
+  createdAt: number;
+};
+
+export type ServiceAccount = {
+  id: string;
+  name: string;
+  workspaceId: string;
+  projectId: string | null;
+  projectName: string | null;
+  status: 'active' | 'revoked';
+  scopes: string[];
+  tokenPrefix: string | null;
+  expiresAt: number | null;
+  lastUsedAt: number | null;
+  createdAt: number;
+};
+
+export type AuditEvent = {
+  id: string;
+  workspaceId: string | null;
+  actorType: 'user' | 'service_account' | 'system';
+  actorId: string;
+  action: string;
+  resourceType: string;
+  resourceId: string | null;
+  outcome: 'success' | 'denied' | 'failed';
+  ipAddress: string | null;
+  userAgent: string | null;
+  metadata: Record<string, string | number | boolean | null>;
+  createdAt: number;
 };
 
 export const WORKSPACE_SETTINGS = [
@@ -541,6 +617,11 @@ export const SECTIONS = [
   'secrets',
   'usage',
   'shield',
+  'members',
+  'invitations',
+  'service-accounts',
+  'audit',
+  'sessions',
   'admin',
   'settings',
 ] as const;
@@ -560,6 +641,11 @@ export const LIVE_SECTIONS: readonly Section[] = [
   'secrets',
   'usage',
   'shield',
+  'members',
+  'invitations',
+  'service-accounts',
+  'audit',
+  'sessions',
   'admin',
   'settings',
   'storage',

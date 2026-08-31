@@ -12,8 +12,11 @@
  */
 
 export type TenantScope = {
+  organizationId?: string;
   workspaceId: string;
   userId: string;
+  /** `null`/undefined means every project; an array is an explicit allowlist. */
+  projectIds?: readonly string[] | null;
 };
 
 export type ScopePredicate = {
@@ -49,14 +52,43 @@ export function scopeForTable(
 
   const columns = new Set(columnNames);
 
+  if (table === 'organization') {
+    return scope.organizationId
+      ? { sql: 'id = ?', params: [scope.organizationId] }
+      : DENY_ALL;
+  }
+
   // Workspace-owned rows are the common case across the product tables.
   if (columns.has('workspaceId')) {
+    if (scope.projectIds !== null && scope.projectIds !== undefined) {
+      if (table === 'project') {
+        if (scope.projectIds.length === 0) return DENY_ALL;
+        return {
+          sql: `workspaceId = ? AND id IN (${scope.projectIds.map(() => '?').join(', ')})`,
+          params: [scope.workspaceId, ...scope.projectIds],
+        };
+      }
+      if (columns.has('projectId')) {
+        if (scope.projectIds.length === 0) return DENY_ALL;
+        return {
+          sql: `workspaceId = ? AND projectId IN (${scope.projectIds.map(() => '?').join(', ')})`,
+          params: [scope.workspaceId, ...scope.projectIds],
+        };
+      }
+      return DENY_ALL;
+    }
     return { sql: 'workspaceId = ?', params: [scope.workspaceId] };
   }
 
   // The workspace row itself is identified by its own primary key.
   if (table === 'workspace') {
     return { sql: 'id = ?', params: [scope.workspaceId] };
+  }
+
+  if (columns.has('organizationId')) {
+    return scope.organizationId
+      ? { sql: 'organizationId = ?', params: [scope.organizationId] }
+      : DENY_ALL;
   }
 
   // A caller may see their own account record and nobody else's.

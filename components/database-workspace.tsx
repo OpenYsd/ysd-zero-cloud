@@ -58,7 +58,7 @@ export function DatabaseWorkspace({
   mode: 'studio' | 'sql-editor';
   tables: TableSummary[];
   initialTable: string | null;
-  /** False for anyone but the instance owner; see the query route for why. */
+  /** False in multi-organization mode; see the query route for why. */
   canUseSqlEditor: boolean;
 }) {
   const [activeTable, setActiveTable] = useState(initialTable);
@@ -139,11 +139,11 @@ export function DatabaseWorkspace({
                 <ShieldCheck className="size-4" />
               </span>
               <p className="mt-4 text-xs font-semibold text-white/60">
-                The SQL Editor is limited to the instance owner
+                Raw SQL is disabled in multi-organization mode
               </p>
               <p className="mt-2 text-[11px] leading-5 text-white/30">
-                Every workspace shares one database, and a raw statement cannot be scoped to yours.
-                Database Studio shows the same tables limited to your own rows.
+                Every organization shares one D1 database, and arbitrary SQL cannot be
+                rewritten safely. Database Studio applies tenant predicates to every table.
               </p>
               <NavLink
                 href="/databases/studio"

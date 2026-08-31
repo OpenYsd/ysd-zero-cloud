@@ -23,6 +23,7 @@ import type {
 import { agentVersionSupported, stableJson } from '@/lib/nodes';
 import { execute, query, queryOne } from './db';
 import { writeLog } from './logs';
+import { assertResourceCapacity } from './organization-limits';
 import { enqueueJob, readNodesState } from './nodes';
 import { getWorkspace } from './workspace';
 
@@ -385,6 +386,8 @@ async function createServer(input: {
   if (state.servers.length >= GAME_SERVER_LIMITS.maximumServersPerWorkspace) {
     return { ok: false, status: 409, error: 'The workspace Game Server ceiling is reached.' };
   }
+  const capacity = await assertResourceCapacity(input.workspaceId, 'gameServers');
+  if (!capacity.ok) return { ok: false, status: 409, error: capacity.error };
   const ramMb = typeof input.body.ramMb === 'number' ? input.body.ramMb : 0;
   const diskQuotaBytes =
     typeof input.body.diskQuotaBytes === 'number' ? input.body.diskQuotaBytes : 0;

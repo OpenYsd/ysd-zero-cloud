@@ -5,7 +5,9 @@ import { requireApiSession } from '@/lib/server/session';
 export async function GET(request: Request): Promise<Response> {
   const auth = await requireApiSession(request);
   if (!auth.ok) return auth.response;
-  return Response.json({ projects: await listProjects(auth.session.workspace.id) });
+  return Response.json({
+    projects: await listProjects(auth.session.workspace.id, auth.session.actor.projectIds),
+  });
 }
 
 export async function POST(request: Request): Promise<Response> {

@@ -169,6 +169,21 @@ void test('statement splitting ignores quoted semicolons', () => {
   ]);
 });
 
+void test('statement splitting preserves complete SQLite trigger bodies', () => {
+  const trigger = `CREATE TRIGGER audit_no_update
+BEFORE UPDATE ON audit_event
+BEGIN
+  SELECT RAISE(ABORT, 'append-only');
+END;
+CREATE INDEX audit_idx ON audit_event (createdAt);`;
+  const statements = splitStatements(trigger);
+  assert.equal(statements.length, 2);
+  assert.match(statements[0]!, /^CREATE TRIGGER/);
+  assert.match(statements[0]!, /SELECT RAISE/);
+  assert.match(statements[0]!, /END$/);
+  assert.match(statements[1]!, /^CREATE INDEX/);
+});
+
 void test('a row limit is added only when one is missing', () => {
   assert.equal(withRowLimit('SELECT * FROM project', 25), 'SELECT * FROM project LIMIT 25');
   assert.equal(withRowLimit('SELECT * FROM project LIMIT 5', 25), 'SELECT * FROM project LIMIT 5');

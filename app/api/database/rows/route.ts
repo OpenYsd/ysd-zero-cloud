@@ -11,11 +11,16 @@ export async function GET(request: Request): Promise<Response> {
 
   const limit = Number(params.get('limit') ?? 50);
   const offset = Number(params.get('offset') ?? 0);
-  const { user, workspace } = auth.session;
+  const { user, organization, workspace, actor } = auth.session;
 
   const page = await readTable(
     table,
-    { workspaceId: workspace.id, userId: user.id },
+    {
+      organizationId: organization.id,
+      workspaceId: workspace.id,
+      userId: user.id,
+      projectIds: actor.projectIds,
+    },
     {
       limit: Number.isFinite(limit) ? limit : 50,
       offset: Number.isFinite(offset) ? offset : 0,

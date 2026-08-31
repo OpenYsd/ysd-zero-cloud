@@ -13,6 +13,7 @@ export type { Workspace, WorkspaceSetting };
 
 type WorkspaceRow = {
   id: string;
+  organizationId: string | null;
   name: string;
   ownerUserId: string;
   zeroMode: number;
@@ -21,11 +22,13 @@ type WorkspaceRow = {
   previewDeployments: number;
   createdAt: number;
   updatedAt: number;
+  archivedAt: number | null;
 };
 
 function toWorkspace(row: WorkspaceRow): Workspace {
   return {
     id: row.id,
+    organizationId: row.organizationId ?? `org_legacy_${row.id}`,
     name: row.name,
     ownerUserId: row.ownerUserId,
     zeroMode: row.zeroMode === 1,
@@ -34,6 +37,7 @@ function toWorkspace(row: WorkspaceRow): Workspace {
     previewDeployments: row.previewDeployments === 1,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
+    archivedAt: row.archivedAt,
   };
 }
 

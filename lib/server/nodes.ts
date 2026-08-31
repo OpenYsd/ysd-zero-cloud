@@ -65,6 +65,7 @@ import { authSecret } from './auth';
 import { db, execute, query, queryOne } from './db';
 import { clientAddress, enforceRateLimit } from './rate-limit';
 import { writeLog } from './logs';
+import { assertResourceCapacity } from './organization-limits';
 import {
   recordAppRuntimeJobOutcome,
   syncAppRuntimeSnapshots,
@@ -474,6 +475,8 @@ export async function createPairing(input: {
       error: 'Use a node name between 2 and 64 characters.',
     };
   }
+  const capacity = await assertResourceCapacity(input.workspaceId, 'nodes');
+  if (!capacity.ok) return { ok: false, status: 409, error: capacity.error };
   const existing = await queryOne<{ total: number }>(
     'SELECT COUNT(*) AS total FROM compute_node WHERE workspaceId = ? AND revokedAt IS NULL',
     input.workspaceId,

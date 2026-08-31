@@ -6,7 +6,7 @@ import {
   noteSignIn,
 } from '@/lib/server/security';
 import { verifyTurnstile } from '@/lib/server/turnstile';
-import { ensureWorkspace } from '@/lib/server/workspace';
+import { resolveOrganizationAccess } from '@/lib/server/organizations';
 import type { RateLimitName } from '@/lib/rate-limit';
 
 /**
@@ -200,12 +200,12 @@ async function handler(request: Request): Promise<Response> {
           headers: response.headers,
         });
         if (session?.user) {
-          const workspace = await ensureWorkspace(
-            session.user.id,
-            session.user.name,
-            session.user.email,
-          );
-          workspaceId = workspace.id;
+          const access = await resolveOrganizationAccess({
+            userId: session.user.id,
+            userName: session.user.name,
+            email: session.user.email,
+          });
+          workspaceId = access?.workspace.id;
         }
       } catch {
         // Auditing must not break the sign-in it is describing.

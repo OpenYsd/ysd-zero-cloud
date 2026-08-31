@@ -144,6 +144,7 @@ export function splitStatements(sql: string): string[] {
   const statements: string[] = [];
   let current = '';
   let index = 0;
+  let trigger = false;
   while (index < sql.length) {
     const char = sql[index]!;
     if (QUOTE_CHARS.has(char)) {
@@ -166,8 +167,19 @@ export function splitStatements(sql: string): string[] {
       continue;
     }
     if (char === ';') {
+      // SQLite triggers contain semicolon-delimited statements inside
+      // `BEGIN ... END`. Keep that body together so the lazy migration runner
+      // prepares the complete CREATE TRIGGER statement. The SQL Editor never
+      // accepts CREATE, but migrations use this same splitter.
+      trigger ||= /^\s*CREATE\s+(?:TEMP(?:ORARY)?\s+)?TRIGGER\b/i.test(current);
+      if (trigger && !/\bEND\s*$/i.test(current)) {
+        current += char;
+        index += 1;
+        continue;
+      }
       statements.push(current);
       current = '';
+      trigger = false;
       index += 1;
       continue;
     }

@@ -41,6 +41,7 @@ export async function POST(
       workspaceId: auth.session.workspace.id,
       deploymentId: id,
       actor: auth.session.user.email,
+      allowedProjectIds: auth.session.actor.projectIds,
     });
     return result.ok ? Response.json(result) : Response.json({ error: result.error }, { status: result.status });
   }
@@ -54,6 +55,7 @@ export async function POST(
     operation: parsed.body.operation as Exclude<AppRuntimeOperation, 'deploy'>,
     targetArtifactId: typeof parsed.body.targetArtifactId === 'string' ? parsed.body.targetArtifactId : null,
     idempotencyKey: request.headers.get('idempotency-key'),
+    allowedProjectIds: auth.session.actor.projectIds,
   });
   return result.ok
     ? Response.json(result, { status: result.duplicate ? 200 : 202 })

@@ -82,6 +82,16 @@ export type ShieldSnapshot = {
   integrations: { id: string; status: 'mock' | 'configured' }[];
   /** Projects reachable without authentication. */
   publicProjects: string[];
+  collaboration?: {
+    ownerInvariant: boolean;
+    tenantIsolationViolations: number;
+    tenantIsolationGuarded: boolean;
+    auditAppendOnly: boolean;
+    staleAdmins: number;
+    expiredInvitations: number;
+    unboundedServiceTokens: number;
+    privilegeEscalationBlocked: boolean;
+  };
   storage?: {
     available: boolean;
     private: boolean;
@@ -709,6 +719,100 @@ function checkSurface(snapshot: ShieldSnapshot): {
   };
 }
 
+function checkCollaboration(snapshot: ShieldSnapshot): {
+  check: ShieldCheck;
+  findings: ShieldFinding[];
+} {
+  const state = snapshot.collaboration;
+  const findings: ShieldFinding[] = [];
+  if (!state) {
+    return {
+      check: {
+        id: 'organization-isolation',
+        name: 'Organization isolation',
+        detail: 'Organization controls were not sampled',
+        state: 'review',
+      },
+      findings,
+    };
+  }
+  if (!state.ownerInvariant) findings.push({
+    code: 'organization-owner-invariant',
+    title: 'Organization ownership is inconsistent',
+    detail: 'The designated owner is not the one active owner membership expected by the organization record.',
+    resource: 'organization/members',
+    severity: 'critical',
+    remediation: 'Restore one active designated owner before allowing any further member changes.',
+  });
+  if (state.tenantIsolationViolations > 0) findings.push({
+    code: 'organization-tenant-key-mismatch',
+    title: 'Cross-organization tenant keys disagree',
+    detail: `${state.tenantIsolationViolations} row${state.tenantIsolationViolations === 1 ? '' : 's'} carry an organization, workspace, or project relationship that does not match.`,
+    resource: 'organization/isolation',
+    severity: 'critical',
+    remediation: 'Quarantine the affected rows, restore the tenant consistency triggers, and audit the creating request.',
+  });
+  if (!state.tenantIsolationGuarded) findings.push({
+    code: 'organization-tenant-guards-missing',
+    title: 'Tenant consistency guards are incomplete',
+    detail: 'One or more D1 triggers that prevent cross-organization key changes are missing.',
+    resource: 'organization/isolation',
+    severity: 'critical',
+    remediation: 'Reapply the organization migration before accepting collaboration writes.',
+  });
+  if (!state.auditAppendOnly) findings.push({
+    code: 'audit-not-append-only',
+    title: 'Audit history is not protected from mutation',
+    detail: 'One or both D1 triggers that reject audit updates and deletes are missing.',
+    resource: 'audit_event',
+    severity: 'critical',
+    remediation: 'Reapply the organization migration before trusting the audit trail.',
+  });
+  if (!state.privilegeEscalationBlocked) findings.push({
+    code: 'organization-privilege-escalation',
+    title: 'An administrator can reach owner-only capabilities',
+    detail: 'The server permission matrix no longer separates administration from ownership transfer.',
+    resource: 'organization/permissions',
+    severity: 'critical',
+    remediation: 'Restore the server-authoritative role matrix and confirmed ownership-transfer path.',
+  });
+  if (state.staleAdmins > 0) findings.push({
+    code: 'stale-organization-admins',
+    title: 'Organization administrators are stale',
+    detail: `${state.staleAdmins} administrator${state.staleAdmins === 1 ? ' has' : 's have'} had no activity for at least 90 days.`,
+    resource: 'organization/members',
+    severity: 'medium',
+    remediation: 'Confirm the access is still needed, then downgrade, suspend, or remove stale administrators.',
+  });
+  if (state.expiredInvitations > 0) findings.push({
+    code: 'expired-organization-invitations',
+    title: 'Expired invitations await reconciliation',
+    detail: `${state.expiredInvitations} pending invitation${state.expiredInvitations === 1 ? ' is' : 's are'} past expiry.`,
+    resource: 'organization/invitations',
+    severity: 'low',
+    remediation: 'Open Invitations or run another scan to mark the links expired.',
+  });
+  if (state.unboundedServiceTokens > 0) findings.push({
+    code: 'unbounded-service-tokens',
+    title: 'Service tokens have no bounded expiry',
+    detail: `${state.unboundedServiceTokens} active token${state.unboundedServiceTokens === 1 ? ' has' : 's have'} no expiry or an expiry more than 180 days away.`,
+    resource: 'organization/service-accounts',
+    severity: 'medium',
+    remediation: 'Replace them with short-lived project-scoped tokens and revoke the old credentials.',
+  });
+  return {
+    check: {
+      id: 'organization-isolation',
+      name: 'Organization isolation',
+      detail: 'Owner invariant · tenant-key triggers · append-only audit · scoped automation',
+      state: findings.some((finding) => finding.severity === 'critical' || finding.severity === 'high')
+        ? 'failed'
+        : findings.length > 0 ? 'review' : 'passed',
+    },
+    findings,
+  };
+}
+
 function checkNodes(snapshot: ShieldSnapshot): {
   check: ShieldCheck;
   findings: ShieldFinding[];
@@ -1253,6 +1357,7 @@ export function runShieldRules(snapshot: ShieldSnapshot): ShieldReport {
     checkZeroMode(snapshot),
     checkSecrets(snapshot),
     checkIdentity(snapshot),
+    checkCollaboration(snapshot),
     checkDatabase(snapshot),
     checkStorage(snapshot),
     checkNodes(snapshot),

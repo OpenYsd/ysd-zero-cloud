@@ -33,14 +33,34 @@ export function normalizeSecretName(input: string): string {
 
 const SELECT = `id, name, scope, environment, fingerprint, rotationDays, createdAt, updatedAt`;
 
-export async function listSecrets(workspaceId: string): Promise<Secret[]> {
+export async function listSecrets(
+  workspaceId: string,
+  projectIds?: readonly string[] | null,
+): Promise<Secret[]> {
+  if (projectIds !== null && projectIds !== undefined && projectIds.length === 0) return [];
+  const restricted = projectIds !== null && projectIds !== undefined;
   return query<Secret>(
-    `SELECT ${SELECT} FROM secret WHERE workspaceId = ? ORDER BY name ASC, environment ASC`,
+    `SELECT ${SELECT} FROM secret WHERE workspaceId = ?${restricted
+      ? ` AND scope IN (${(projectIds ?? []).map(() => '?').join(', ')})`
+      : ''} ORDER BY name ASC, environment ASC`,
     workspaceId,
+    ...(projectIds ?? []).map((id) => `Project:${id}`),
   );
 }
 
-export async function countSecrets(workspaceId: string): Promise<number> {
+export async function countSecrets(
+  workspaceId: string,
+  projectIds?: readonly string[] | null,
+): Promise<number> {
+  if (projectIds !== null && projectIds !== undefined) {
+    if (projectIds.length === 0) return 0;
+    return count(
+      `SELECT COUNT(*) AS total FROM secret
+        WHERE workspaceId = ? AND scope IN (${projectIds.map(() => '?').join(', ')})`,
+      workspaceId,
+      ...projectIds.map((id) => `Project:${id}`),
+    );
+  }
   return count('SELECT COUNT(*) AS total FROM secret WHERE workspaceId = ?', workspaceId);
 }
 
@@ -52,6 +72,7 @@ export type PutSecretInput = {
   scope?: string;
   environment?: string;
   rotationDays?: number | null;
+  allowedProjectIds?: readonly string[] | null;
 };
 
 export type PutSecretResult =
@@ -82,13 +103,34 @@ export async function putSecret(input: PutSecretInput): Promise<PutSecretResult>
     typeof input.rotationDays === 'number' && Number.isFinite(input.rotationDays)
       ? Math.max(1, Math.min(3650, Math.floor(input.rotationDays)))
       : null;
+  const scope = input.scope?.trim() || 'Workspace';
+  let allowedScopes: Set<string> | null = null;
+  if (input.allowedProjectIds !== null && input.allowedProjectIds !== undefined) {
+    allowedScopes = new Set(input.allowedProjectIds.map((id) => `Project:${id}`));
+    if (!allowedScopes.has(scope)) {
+      return {
+        ok: false,
+        error: 'Project-restricted access may only write a secret scoped to an allowed project.',
+        status: 403,
+      };
+    }
+  }
 
-  const existing = await queryOne<{ id: string }>(
-    'SELECT id FROM secret WHERE workspaceId = ? AND environment = ? AND name = ?',
+  const existing = await queryOne<{ id: string; scope: string }>(
+    'SELECT id, scope FROM secret WHERE workspaceId = ? AND environment = ? AND name = ?',
     input.workspaceId,
     environment,
     name,
   );
+  // A project-scoped actor cannot take over a same-named workspace or sibling
+  // project secret by changing its scope during an upsert.
+  if (existing && allowedScopes && !allowedScopes.has(existing.scope)) {
+    return {
+      ok: false,
+      error: 'A secret with this name exists outside the allowed project scope.',
+      status: 403,
+    };
+  }
 
   if (!existing && (await countSecrets(input.workspaceId)) >= MAX_SECRETS) {
     return {
@@ -109,7 +151,7 @@ export async function putSecret(input: PutSecretInput): Promise<PutSecretResult>
        WHERE workspaceId = ? AND id = ?`,
       ciphertext,
       print,
-      input.scope?.trim() || 'Workspace',
+      scope,
       rotationDays,
       now,
       input.workspaceId,
@@ -122,7 +164,7 @@ export async function putSecret(input: PutSecretInput): Promise<PutSecretResult>
       createId('sec'),
       input.workspaceId,
       name,
-      input.scope?.trim() || 'Workspace',
+      scope,
       environment,
       ciphertext,
       print,
@@ -155,13 +197,18 @@ export async function deleteSecret(
   workspaceId: string,
   id: string,
   actor: string,
+  projectIds?: readonly string[] | null,
 ): Promise<boolean> {
-  const secret = await queryOne<{ name: string; environment: string }>(
-    'SELECT name, environment FROM secret WHERE workspaceId = ? AND id = ?',
+  const secret = await queryOne<{ name: string; environment: string; scope: string }>(
+    'SELECT name, environment, scope FROM secret WHERE workspaceId = ? AND id = ?',
     workspaceId,
     id,
   );
   if (!secret) return false;
+  if (projectIds !== null && projectIds !== undefined &&
+      !projectIds.map((projectId) => `Project:${projectId}`).includes(secret.scope)) {
+    return false;
+  }
 
   await execute('DELETE FROM secret WHERE workspaceId = ? AND id = ?', workspaceId, id);
   await writeLog({

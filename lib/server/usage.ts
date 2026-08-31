@@ -32,14 +32,15 @@ export type UsageSummary = {
 export async function summarizeUsage(
   workspaceId: string,
   userId: string,
+  scope: { organizationId?: string; projectIds?: readonly string[] | null } = {},
 ): Promise<UsageSummary> {
-  const tables = await listTables({ workspaceId, userId });
+  const tables = await listTables({ workspaceId, userId, ...scope });
 
   const [projects, deployments, secrets, logEvents, bytes, storage] =
     await Promise.all([
-      countProjects(workspaceId),
-      countDeployments(workspaceId),
-      countSecrets(workspaceId),
+      countProjects(workspaceId, scope.projectIds),
+      countDeployments(workspaceId, scope.projectIds),
+      countSecrets(workspaceId, scope.projectIds),
       count(
         'SELECT COUNT(*) AS total FROM log_event WHERE workspaceId = ?',
         workspaceId,

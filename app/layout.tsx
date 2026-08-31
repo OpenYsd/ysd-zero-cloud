@@ -3,6 +3,7 @@ import { Geist, Geist_Mono } from 'next/font/google';
 import { CloudShell } from '@/components/cloud-shell';
 import { can } from '@/lib/roles';
 import { readSession } from '@/lib/server/session';
+import { listOrganizations } from '@/lib/server/organizations';
 import './globals.css';
 
 const geistSans = Geist({ variable: '--font-geist-sans', subsets: ['latin'] });
@@ -30,6 +31,7 @@ export default async function RootLayout({ children }: Readonly<{ children: Reac
   // Reading the session here makes every route dynamic, which is correct: no
   // page in this app is the same for two different operators.
   const session = await readSession();
+  const organizations = session ? await listOrganizations(session.user.id) : [];
 
   return (
     <html lang="en" className="dark">
@@ -41,10 +43,25 @@ export default async function RootLayout({ children }: Readonly<{ children: Reac
                   name: session.user.name,
                   email: session.user.email,
                   role: session.actor.role,
-                  canAdminister: can(session.actor, 'admin.users.read'),
+                  canUpdateWorkspace: can(session.actor, 'workspace.update'),
+                  projectRestricted: session.actor.projectIds !== null &&
+                    session.actor.projectIds !== undefined,
                 }
               : null
           }
+          context={session ? {
+            organizationId: session.organization.id,
+            workspaceId: session.workspace.id,
+            organizations: organizations.map((organization) => ({
+              id: organization.id,
+              name: organization.name,
+              role: organization.role,
+              workspaces: organization.workspaces.map((workspace) => ({
+                id: workspace.id,
+                name: workspace.name,
+              })),
+            })),
+          } : null}
           zeroMode={session?.workspace.zeroMode ?? true}
         >
           {children}

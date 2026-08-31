@@ -5,9 +5,14 @@ export async function GET(request: Request): Promise<Response> {
   const auth = await requireApiSession(request);
   if (!auth.ok) return auth.response;
 
-  const { user, workspace } = auth.session;
+  const { user, organization, workspace, actor } = auth.session;
   return Response.json({
-    tables: await listTables({ workspaceId: workspace.id, userId: user.id }),
+    tables: await listTables({
+      organizationId: organization.id,
+      workspaceId: workspace.id,
+      userId: user.id,
+      projectIds: actor.projectIds,
+    }),
     bytes: await databaseBytes(),
   });
 }
