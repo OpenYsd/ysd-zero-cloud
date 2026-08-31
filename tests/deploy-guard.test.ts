@@ -15,6 +15,13 @@ function input() {
 function config() {
   return {
     d1_databases: [{ binding: 'DB', database_id: DATABASE_ID }],
+    vars: {
+      YSD_PUBLIC_TRANSPORT_MODE: 'unavailable-zero-mode',
+      YSD_CLOUDFLARE_PLAN: 'workers-free',
+      YSD_BILLING_STATE: 'no-payment-method',
+      YSD_OWNED_ZONE_COUNT: '0',
+      YSD_TUNNEL_COUNT: '0',
+    },
     queues: { producers: [], consumers: [] },
     durable_objects: { bindings: [] },
     r2_buckets: [],
@@ -58,12 +65,28 @@ void test('paid or unrequested bindings fail closed', () => {
     { ai: { binding: 'AI' } },
     { limits: { cpu_ms: 30_000 } },
     { send_email: [{ name: 'EMAIL' }] },
+    { routes: [{ pattern: 'app.example.com', custom_domain: true }] },
+    { services: [{ binding: 'ORIGIN', service: 'paid-provider' }] },
   ]) {
     const decision = inspectDeploymentConfig(
       { ...config(), ...extra },
       input(),
     );
     assert.equal(decision.allowed, false, JSON.stringify(extra));
+  }
+});
+
+void test('request flags cannot bypass the attested no-zone and no-tunnel state', () => {
+  for (const vars of [
+    { ...config().vars, YSD_PUBLIC_TRANSPORT_MODE: 'cloudflare-tunnel' },
+    { ...config().vars, YSD_CLOUDFLARE_PLAN: 'paid' },
+    { ...config().vars, YSD_BILLING_STATE: 'active' },
+    { ...config().vars, YSD_OWNED_ZONE_COUNT: '1' },
+    { ...config().vars, YSD_TUNNEL_COUNT: '1' },
+  ]) {
+    const decision = inspectDeploymentConfig({ ...config(), vars }, input());
+    assert.equal(decision.allowed, false);
+    assert.match(decision.reasons.join(' '), /public transport/i);
   }
 });
 

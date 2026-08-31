@@ -50,6 +50,14 @@ declare namespace Cloudflare {
     NEXT_PUBLIC_SITE_URL?: string;
     /** `workers-dev-only` while no custom domain or Tunnel exists. */
     YSD_NETWORK_MODE?: string;
+    /** Phase 8 is fail-closed until a reviewed free connector can be attached. */
+    YSD_PUBLIC_TRANSPORT_MODE?: string;
+    /** Non-secret account attestations captured before the production deploy. */
+    YSD_CLOUDFLARE_PLAN?: string;
+    YSD_BILLING_STATE?: string;
+    YSD_OWNED_ZONE_COUNT?: string;
+    YSD_TUNNEL_COUNT?: string;
+    YSD_ZERO_MODE_ATTESTED_AT?: string;
 
     /** Set by Wrangler on deployed Workers. */
     WORKERS_CI?: string;

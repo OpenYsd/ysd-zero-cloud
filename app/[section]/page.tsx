@@ -180,7 +180,15 @@ async function SectionBody({
       return <StorageView state={await listStorage(workspaceId)} now={now} />;
 
     case 'networking':
-      return <NetworkingView state={await readNetworkState(workspaceId)} />;
+      return (
+        <NetworkingView
+          state={await readNetworkState({
+            organizationId: organization.id,
+            workspaceId,
+            actor,
+          })}
+        />
+      );
 
     case 'nodes':
       return (

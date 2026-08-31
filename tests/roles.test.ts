@@ -42,6 +42,13 @@ void test('the permission matrix separates member administration and ordinary wo
   assert.equal(can(viewer, 'project.read'), true);
   assert.equal(can(viewer, 'project.create'), false);
   assert.equal(can(viewer, 'invitation.read'), false);
+  assert.equal(can(viewer, 'exposure.read'), true);
+  assert.equal(can(viewer, 'exposure.preview'), false);
+  assert.equal(can(developer, 'exposure.preview'), true);
+  assert.equal(can(developer, 'exposure.manage'), false);
+  assert.equal(can(admin, 'exposure.manage'), true);
+  assert.equal(can(admin, 'domain.manage'), true);
+  assert.equal(can(owner, 'domain.manage'), true);
 });
 
 void test('raw SQL and legacy instance-wide user administration are disabled for every role', () => {
@@ -142,4 +149,8 @@ void test('route policy maps collaboration-safe project and database operations'
   assert.equal(permissionForRequest('POST', '/api/projects'), 'project.create');
   assert.equal(permissionForRequest('POST', '/api/deployments/x/actions'), 'deployment.lifecycle');
   assert.equal(permissionForRequest('POST', '/api/database/query'), 'sql-editor.run');
+  assert.equal(permissionForRequest('GET', '/api/exposures'), 'exposure.read');
+  assert.equal(permissionForRequest('POST', '/api/exposures'), 'exposure.preview');
+  assert.equal(permissionForRequest('GET', '/api/domains'), 'exposure.read');
+  assert.equal(permissionForRequest('POST', '/api/domains'), 'domain.manage');
 });

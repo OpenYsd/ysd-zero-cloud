@@ -6,7 +6,7 @@ import {
   type AppEnvironment,
   type AppRuntimeOperation,
 } from '@/lib/app-runtime';
-import { createId, decryptSecret } from '@/lib/crypto';
+import { createId, decryptSecret, sha256Hex } from '@/lib/crypto';
 import type {
   AppArtifact,
   AppDeploymentAction,
@@ -269,6 +269,13 @@ export type PlanOutcome =
   | { ok: false; status: number; error: string; plan?: SmartDeployPlan; deployment?: Deployment };
 
 export async function planDeployment(request: PlanRequest): Promise<PlanOutcome> {
+  const workspaceTenant = await queryOne<{ organizationId: string | null }>(
+    'SELECT organizationId FROM workspace WHERE id = ? AND archivedAt IS NULL',
+    request.workspaceId,
+  );
+  if (!workspaceTenant?.organizationId) {
+    return { ok: false, status: 404, error: 'Organization workspace not found.' };
+  }
   let scopedProjectId: string | null = null;
   if (request.allowedProjectIds !== null && request.allowedProjectIds !== undefined) {
     const project = await findProjectByName(
@@ -426,6 +433,11 @@ export async function planDeployment(request: PlanRequest): Promise<PlanOutcome>
 
   const artifactId = createId('art');
   const actionId = createId('dact');
+  const previewExposure = request.environment === 'Preview';
+  const exposureRouteId = previewExposure
+    ? `pvw_${(await sha256Hex(`preview|${workspaceTenant.organizationId}|${request.workspaceId}|${projectId}|${deploymentId}`)).slice(0, 24)}`
+    : createId('route');
+  const exposureId = createId('exp');
   const version = (await queryOne<{ version: number }>(
     `SELECT COALESCE(MAX(version), 0) + 1 AS version FROM app_artifact WHERE workspaceId = ? AND projectId = ? AND nodeId = ?`,
     request.workspaceId,
@@ -532,6 +544,33 @@ export async function planDeployment(request: PlanRequest): Promise<PlanOutcome>
         state, manifest, checksum, sizeBytes, createdAt, verifiedAt, activatedAt, deletedAt)
        VALUES (?, ?, ?, ?, ?, ?, ?, 'building', ?, NULL, 0, ?, NULL, NULL, NULL)`,
     ).bind(artifactId, request.workspaceId, deploymentId, projectId, node.row.id, plan.source.commit, version, stableJson({ contract: plan.contract, source: plan.source }), startedAt),
+    database.prepare(
+      `INSERT INTO public_exposure
+       (id, organizationId, workspaceId, projectId, deploymentId, routeId,
+        routePath, mode, status, accessPolicy, transport, transportState,
+        assignedHostname, targetNodeId, targetArtifactId, healthState,
+        tlsState, verificationState, fallbackPolicy, rateLimitEnabled,
+        rateLimitPerMinute, ipAllowlist, isPreview, expiresAt, lastRequestAt,
+        lastError, createdBy, createdAt, updatedAt, deletedAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'private', 'disabled', 'authenticated',
+               'none', 'unavailable_zero_mode', NULL, ?, NULL, 'unknown',
+               'unavailable', 'not_required', 'none', 1, 60, '[]', ?, ?, NULL,
+               NULL, ?, ?, ?, NULL)`,
+    ).bind(
+      exposureId,
+      workspaceTenant.organizationId,
+      request.workspaceId,
+      projectId,
+      deploymentId,
+      exposureRouteId,
+      `/apps/${exposureRouteId}`,
+      node.row.id,
+      previewExposure ? 1 : 0,
+      previewExposure ? startedAt + 24 * 60 * 60_000 : null,
+      request.actor,
+      startedAt,
+      startedAt,
+    ),
   ]);
   await writeLog({
     workspaceId: request.workspaceId,
@@ -587,6 +626,15 @@ export async function cancelDeployment(input: {
   if ((update.meta.changes ?? 0) === 0) return { ok: false, status: 409, error: 'The action is no longer cancellable.' };
   const state: DeploymentState = row.jobState === 'queued' ? 'cancelled' : 'cancelling';
   await execute(`UPDATE deployment SET state = ?, lastError = ?, updatedAt = ?, finishedAt = CASE WHEN ? = 'cancelled' THEN ? ELSE finishedAt END WHERE workspaceId = ? AND id = ?`, state, 'Cancellation requested.', now, state, now, input.workspaceId, input.deploymentId);
+  await execute(
+    `UPDATE public_exposure SET healthState = 'stale',
+            status = CASE WHEN mode = 'private' THEN 'disabled' ELSE 'unavailable_zero_mode' END,
+            lastError = 'Deployment cancellation changed lifecycle health; routing is failed closed.', updatedAt = ?
+      WHERE workspaceId = ? AND deploymentId = ? AND deletedAt IS NULL`,
+    now,
+    input.workspaceId,
+    input.deploymentId,
+  );
   await execute(
     `UPDATE app_deployment_action SET state = ?, error = 'Cancellation requested.', updatedAt = ?,
        completedAt = CASE WHEN ? = 'cancelled' THEN ? ELSE completedAt END
@@ -712,6 +760,12 @@ export async function createDeploymentAction(input: {
        VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, NULL, ?, ?, NULL)`,
     ).bind(actionId, input.workspaceId, detail.id, detail.projectId, detail.nodeId, queued.job.id, input.operation, key, input.actor, now, now),
     database.prepare(`UPDATE deployment SET state = ?, jobId = ?, lastError = NULL, updatedAt = ? WHERE workspaceId = ? AND id = ?`).bind(desiredState, queued.job.id, now, input.workspaceId, detail.id),
+    database.prepare(
+      `UPDATE public_exposure SET healthState = 'stale',
+              status = CASE WHEN mode = 'private' THEN 'disabled' ELSE 'unavailable_zero_mode' END,
+              lastError = 'Deployment lifecycle action is in progress; routing is failed closed.', updatedAt = ?
+        WHERE workspaceId = ? AND deploymentId = ? AND deletedAt IS NULL`,
+    ).bind(now, input.workspaceId, detail.id),
   ];
   if (input.operation === 'redeploy' && artifactId) {
     const version = (await queryOne<{ version: number }>(

@@ -1,9 +1,10 @@
 # YSD Zero Cloud
 
-YSD Zero Cloud is a zero-cost-first cloud operating system. Version `0.7.0` runs authentication,
+YSD Zero Cloud is a zero-cost-first cloud operating system. Version `0.8.0` runs authentication,
 persistence, security scanning, the cost guard, private-object storage policy, network inventory,
 an outbound-only user-owned compute control plane, a private Node.js App Runtime, local AI
-scheduling, and private Minecraft Java server orchestration against Cloudflare Workers and D1.
+scheduling, private Minecraft Java server orchestration, organization collaboration, and a
+fail-closed Public App Exposure control plane against Cloudflare Workers and D1.
 
 **Live:** <https://ysd-zero-cloud.ysd-zero-cloud.workers.dev>
 
@@ -30,7 +31,7 @@ deployed Worker's explicit zero-cost configuration.
 | Zero Mode         | A workspace setting the server enforces, not a client preference              |
 | YSD Shield        | Rules scored against a real snapshot of the workspace                         |
 | Storage           | Private R2 adapter, D1 authorization index, and hard account/workspace quotas |
-| Networking        | Deployed workers.dev origin, TLS, route exposure, and binding inventory       |
+| Networking        | YSD Gateway routes, exposure/domain policy, TLS/health state, and inventory   |
 | Nodes             | Paired user-owned agents, signed job leases, heartbeats, metrics, and audit   |
 | YSD AI Compute    | Approved local models, safe scheduling, cancellation, results, and metrics   |
 | App Runtime       | Private Node.js deploy, health, logs, metrics, rollback, and artifact guards  |
@@ -72,21 +73,16 @@ side effect:
 
 ## Roles
 
-Three instance roles: `owner`, `admin`, `member`. They govern the _instance_ —
-who may administer accounts, who may reach the raw SQL Editor — and never what
-anyone may see inside another workspace. Tenant isolation is enforced
-separately and is not widened by any role.
+Organization roles are `owner`, `admin`, `developer`, and `viewer`. Owner/admin
+manage production exposure and owned-domain inventory. A developer can deploy
+and may create an expiring Preview route only when Preview deployments are
+enabled; a viewer is read-only. Project restrictions intersect every role and
+service-account scope. The SQL Editor remains unavailable to organization
+roles because arbitrary SQL cannot be made tenant-safe by a client-side flag.
 
-- **owner** — everything, including the SQL Editor. Bootstrapped from
-  `YSD_OWNER_EMAIL`, or the earliest account when that is unset.
-- **admin** — account management: roles, suspension. Deliberately does _not_
-  inherit the SQL Editor, because a raw statement cannot be scoped to one
-  workspace.
-- **member** — their own workspace, nothing else. Every new sign-up is a member.
-
-The rules in `lib/roles.ts` stop self-promotion, acting on an equal or
-superior, granting ownership without being an owner, and demoting the last
-owner. Suspending an account drops its sessions immediately.
+The rules in `lib/roles.ts` stop self-promotion, acting on an equal or superior,
+granting ownership without being an owner, and demoting the last owner.
+Suspending an account drops its sessions immediately.
 
 ## Abuse protection
 
@@ -135,10 +131,32 @@ create only `ysd-zero-cloud-storage`, bind it as `STORAGE`, and set
 
 ## Networking
 
-Networking is inventory, not a provisioning loophole. It derives the actual HTTPS workers.dev
-origin and shows which routes are public, session-scoped, or internal bindings. The production mode
-is `workers-dev-only`: zero custom domains, zero tunnels, zero public R2 endpoints, and no Argo,
-Spectrum, load balancer, or paid route.
+Phase 8 adds `public_exposure` and `exposure_domain` metadata, the path-based
+`/apps/<route-id>/` YSD Gateway, D1 rate limits, server-side authenticated access,
+health and artifact gates, deterministic expiring Preview identities, custom-domain
+ownership proof, lifecycle cleanup, role enforcement, audit events, and Shield rules.
+The Gateway performs an exact registered-deployment lookup and has no user URL,
+IP, endpoint, command, or provider input; arbitrary upstreams and SSRF-shaped
+fields are rejected and audited.
+
+The current account review found Workers Free active, no payment method, zero
+owned Zones, and zero Tunnels. A Cloudflare Tunnel can be outbound-only, but a
+published application still requires an owned Zone in this architecture. No
+Tunnel, custom hostname, route, domain, paid load balancer, router port, UPnP,
+or firewall rule was created. Public policies therefore persist as
+`unavailable_zero_mode`, no URL is claimed, TLS stays unavailable, and Gateway
+requests return a generic 503. Custom-domain inventory and DNS TXT ownership
+verification remain available for a hostname the user already owns; attachment
+is blocked until a future review proves an owned Cloudflare Zone and a `$0.00`
+path without Billing.
+
+Node origins remain private and are redacted from UI and API responses. The
+deployment guard pins the verified plan/billing/Zone/Tunnel state and refuses
+`routes`, service bindings, paid providers, or a client `zeroMode=false` bypass.
+YSD Shield checks unexpected exposure, unhealthy/revoked routes, missing TLS,
+unverified or conflicting domains, open-proxy/SSRF attempts, origin leaks,
+route volume, disabled rate limits, domain churn, low-privilege changes,
+connector anomalies, orphan routes, and paid-provider bypass attempts.
 
 ## Compute Nodes
 
@@ -334,7 +352,8 @@ npm run deploy
 
 The `predeploy` lifecycle builds, normalises the generated `dist/server/wrangler.json`, and runs
 the Zero Mode deployment guard automatically. The guard refuses an unexpected D1 database, any
-paid-capable binding, or a cost value other than exactly zero. The Vite plugin emits the generated
+paid-capable binding or custom route, a changed Phase 8 account attestation, or a cost value other
+than exactly zero. The Vite plugin emits the generated
 configuration with the Wrangler version it bundles, so normalisation also removes fields a newer
 CLI refuses.
 

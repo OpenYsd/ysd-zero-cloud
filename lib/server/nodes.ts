@@ -2099,6 +2099,16 @@ export async function revokeNode(input: {
            AND state IN ('queued','leased','cancelling')`,
       )
       .bind(now, now, input.workspaceId, input.nodeId),
+    database
+      .prepare(
+        `UPDATE public_exposure
+         SET healthState = 'revoked',
+             status = CASE WHEN mode = 'private' THEN 'disabled' ELSE 'unavailable_zero_mode' END,
+             transport = 'none', transportState = 'revoked', tlsState = 'unavailable',
+             lastError = 'The target node was revoked; routing is failed closed.', updatedAt = ?
+         WHERE workspaceId = ? AND targetNodeId = ? AND deletedAt IS NULL`,
+      )
+      .bind(now, input.workspaceId, input.nodeId),
   ]);
   if ((activeAi?.total ?? 0) > 0) {
     await execute(

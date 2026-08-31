@@ -180,6 +180,25 @@ export type ShieldSnapshot = {
     forbiddenProvider: number;
     suspiciousVolume: number;
   };
+  publicExposure?: {
+    unavailableUnderZeroMode: boolean;
+    unexpectedPublic: number;
+    staleRoutes: number;
+    offlineOrRevokedRoutes: number;
+    unverifiedDomains: number;
+    tlsUnavailable: number;
+    originLeakIndicators: number;
+    openProxyAttempts: number;
+    excessivePublicRoutes: number;
+    rateLimitDisabled: number;
+    suspiciousDomainChurn: number;
+    lowPrivilegeChanges: number;
+    tunnelCredentialAnomaly: number;
+    unexpectedConnectorTarget: number;
+    orphanRoutes: number;
+    crossOrgDomainConflict: number;
+    zeroModeBypass: number;
+  };
   now: number;
 };
 
@@ -1351,6 +1370,130 @@ function checkAppRuntime(snapshot: ShieldSnapshot): {
   };
 }
 
+function checkPublicExposure(snapshot: ShieldSnapshot): {
+  check: ShieldCheck;
+  findings: ShieldFinding[];
+} {
+  const state = snapshot.publicExposure;
+  const findings: ShieldFinding[] = [];
+  if (!state) {
+    return {
+      check: {
+        id: 'public-exposure',
+        name: 'Public App Exposure',
+        detail: 'Public route security state was not sampled',
+        state: 'review',
+      },
+      findings,
+    };
+  }
+  if (state.unexpectedPublic > 0) {
+    findings.push({
+      code: 'exposure-unexpected-public-route',
+      title: 'Unexpected public exposure is active',
+      detail: `${state.unexpectedPublic} active route${state.unexpectedPublic === 1 ? '' : 's'} lack the fixed reviewed connector identity.`,
+      resource: 'networking/routes',
+      severity: 'critical',
+      remediation: 'Disable the route and keep public transport gated until the Cloudflare connector, zone, and cost attestation are reviewed together.',
+    });
+  }
+  if (state.staleRoutes + state.offlineOrRevokedRoutes > 0) {
+    findings.push({
+      code: 'exposure-unhealthy-route',
+      title: 'A public route targets unhealthy compute',
+      detail: `${state.staleRoutes} stale or failed route · ${state.offlineOrRevokedRoutes} offline or revoked node route.`,
+      resource: 'networking/health',
+      severity: 'critical',
+      remediation: 'Fail the route closed, verify the deployment artifact and node heartbeat, and never fall back across projects or organizations.',
+    });
+  }
+  if (state.unverifiedDomains + state.tlsUnavailable > 0) {
+    findings.push({
+      code: 'exposure-domain-or-tls-unverified',
+      title: 'Custom domain ownership or TLS is unavailable',
+      detail: `${state.unverifiedDomains} unverified attached domain · ${state.tlsUnavailable} active route without Cloudflare TLS.`,
+      resource: 'networking/domains',
+      severity: 'critical',
+      remediation: 'Detach the domain until DNS ownership is verified and Cloudflare has issued TLS for an owned zone.',
+    });
+  }
+  if (state.originLeakIndicators + state.openProxyAttempts > 0) {
+    findings.push({
+      code: 'exposure-ssrf-or-origin-leak',
+      title: 'Gateway origin or open-proxy abuse was detected',
+      detail: `${state.originLeakIndicators} origin/IP leak indicator · ${state.openProxyAttempts} upstream or SSRF attempt.`,
+      resource: 'networking/gateway',
+      severity: 'critical',
+      remediation: 'Keep target selection derived only from deployment identity; reject every user URL, IP, localhost, metadata, and internal-network target.',
+    });
+  }
+  if (state.excessivePublicRoutes + state.rateLimitDisabled > 0) {
+    findings.push({
+      code: 'exposure-abuse-controls',
+      title: 'Public route abuse controls need attention',
+      detail: `${state.excessivePublicRoutes} route${state.excessivePublicRoutes === 1 ? '' : 's'} above the workspace ceiling · ${state.rateLimitDisabled} route${state.rateLimitDisabled === 1 ? '' : 's'} without rate limiting.`,
+      resource: 'networking/rate-limits',
+      severity: 'high',
+      remediation: 'Disable excess routes and restore the D1-backed per-route rate limit before public traffic is allowed.',
+    });
+  }
+  if (state.suspiciousDomainChurn + state.lowPrivilegeChanges > 0) {
+    findings.push({
+      code: 'exposure-suspicious-change',
+      title: 'Suspicious domain or low-privilege exposure changes were recorded',
+      detail: `${state.suspiciousDomainChurn} recent domain mutation${state.suspiciousDomainChurn === 1 ? '' : 's'} · ${state.lowPrivilegeChanges} low-privilege exposure change${state.lowPrivilegeChanges === 1 ? '' : 's'}.`,
+      resource: 'audit/exposure',
+      severity: 'high',
+      remediation: 'Review the actor and audit sequence. Owners/admins manage production exposure; developers may bind only enabled Preview deployments.',
+    });
+  }
+  if (state.tunnelCredentialAnomaly + state.unexpectedConnectorTarget > 0) {
+    findings.push({
+      code: 'exposure-connector-anomaly',
+      title: 'Tunnel connector contract anomaly was blocked',
+      detail: `${state.tunnelCredentialAnomaly} credential anomaly · ${state.unexpectedConnectorTarget} unexpected connector target.`,
+      resource: 'networking/connector',
+      severity: 'critical',
+      remediation: 'Revoke the connector credential locally, keep the fixed executable/API contract disabled, and inspect the node without accepting user commands or endpoints.',
+    });
+  }
+  if (state.orphanRoutes + state.crossOrgDomainConflict > 0) {
+    findings.push({
+      code: 'exposure-tenant-integrity',
+      title: 'Exposure tenant integrity failed',
+      detail: `${state.orphanRoutes} orphan route · ${state.crossOrgDomainConflict} cross-organization domain conflict.`,
+      resource: 'networking/tenancy',
+      severity: 'critical',
+      remediation: 'Remove the orphan/conflict and restore the D1 tenant triggers before enabling any route.',
+    });
+  }
+  if (state.zeroModeBypass > 0) {
+    findings.push({
+      code: 'exposure-zero-mode-bypass',
+      title: 'A paid provider or Zero Mode bypass was attempted',
+      detail: `${state.zeroModeBypass} paid-provider, billing, or zeroMode=false attempt${state.zeroModeBypass === 1 ? ' was' : 's were'} blocked.`,
+      resource: 'networking/zero-mode',
+      severity: 'critical',
+      remediation: 'Keep the deployment guard pinned to Workers Free, one D1 database, no zones, no tunnels, and exactly $0.00/month.',
+    });
+  }
+  return {
+    check: {
+      id: 'public-exposure',
+      name: 'Public App Exposure',
+      detail: state.unavailableUnderZeroMode
+        ? 'Unavailable under Zero Mode · path Gateway reserved · no owned zone or Tunnel created'
+        : 'Reviewed outbound connector · exact deployment routes · Cloudflare TLS',
+      state: findings.some((finding) => finding.severity === 'critical' || finding.severity === 'high')
+        ? 'failed'
+        : findings.length > 0
+          ? 'review'
+          : 'passed',
+    },
+    findings,
+  };
+}
+
 /** Runs every rule against a snapshot and scores the result. */
 export function runShieldRules(snapshot: ShieldSnapshot): ShieldReport {
   const results = [
@@ -1364,6 +1507,7 @@ export function runShieldRules(snapshot: ShieldSnapshot): ShieldReport {
     checkAiCompute(snapshot),
     checkGameServers(snapshot),
     checkAppRuntime(snapshot),
+    checkPublicExposure(snapshot),
     checkSurface(snapshot),
     checkHardening(snapshot),
   ];

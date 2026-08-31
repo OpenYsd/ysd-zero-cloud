@@ -34,4 +34,6 @@ void test('workspace routes remain session-scoped', () => {
     state.routes.find((route) => route.id === 'r2')?.address,
     'binding unavailable',
   );
+  assert.equal(state.availability.available, false);
+  assert.equal(state.routes.find((route) => route.id === 'gateway')?.protection.includes('fail closed'), true);
 });

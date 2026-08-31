@@ -34,6 +34,16 @@
     "YSD_EMAIL_VERIFICATION_MODE": "disabled-no-domain",
     // No custom domain, Tunnel, paid route, or public object endpoint exists.
     "YSD_NETWORK_MODE": "workers-dev-only",
+    // Phase 8 account attestation (2026-08-31): Workers Free is active, no
+    // payment method is stored, and the account has zero zones and tunnels.
+    // A route can be reserved in D1, but the Gateway must return 503 until a
+    // future reviewed deployment deliberately changes this gate.
+    "YSD_PUBLIC_TRANSPORT_MODE": "unavailable-zero-mode",
+    "YSD_CLOUDFLARE_PLAN": "workers-free",
+    "YSD_BILLING_STATE": "no-payment-method",
+    "YSD_OWNED_ZONE_COUNT": "0",
+    "YSD_TUNNEL_COUNT": "0",
+    "YSD_ZERO_MODE_ATTESTED_AT": "2026-08-31",
   },
   "secrets": {
     "required": ["BETTER_AUTH_SECRET"],

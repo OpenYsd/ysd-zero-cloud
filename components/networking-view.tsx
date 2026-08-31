@@ -8,6 +8,7 @@ import {
   TableRow,
 } from '@/components/ui/table';
 import { MetricGrid } from '@/components/ui-bits';
+import { PublicExposureControls } from '@/components/public-exposure-controls';
 import type { NetworkState } from '@/lib/networking';
 import {
   Globe2,
@@ -40,15 +41,15 @@ export function NetworkingView({ state }: { state: NetworkState }) {
           },
           {
             icon: Link2,
-            label: 'Custom domains',
+            label: 'Domain inventory',
             value: String(state.customDomains),
-            detail: state.customDomains === 0 ? 'no owned zone' : 'configured',
+            detail: state.availability.ownedZones === 0 ? 'no owned Cloudflare zone' : 'owned zone connected',
           },
           {
             icon: Route,
             label: 'Tunnels',
             value: String(state.tunnels),
-            detail: 'none provisioned',
+            detail: state.availability.available ? 'reviewed connector available' : 'none provisioned',
           },
           {
             icon: LockKeyhole,
@@ -80,9 +81,12 @@ export function NetworkingView({ state }: { state: NetworkState }) {
           </div>
           <Badge
             variant="outline"
-            className="border-[#b7ff3c]/15 bg-[#b7ff3c]/5 text-[#c8ff69]"
+            className={state.availability.available
+              ? 'border-[#b7ff3c]/15 bg-[#b7ff3c]/5 text-[#c8ff69]'
+              : 'border-amber-300/15 bg-amber-300/5 text-amber-200'}
           >
-            <ShieldCheck className="size-3" /> Zero-cost edge
+            <ShieldCheck className="size-3" />
+            {state.availability.available ? 'Zero-cost transport ready' : 'Public transport gated'}
           </Badge>
         </div>
         <div className="mt-5 grid gap-3 border-t border-white/[0.06] pt-4 text-[11px] sm:grid-cols-3">
@@ -101,6 +105,19 @@ export function NetworkingView({ state }: { state: NetworkState }) {
             <p className="mt-1 text-[#c8ff69]">None</p>
           </div>
         </div>
+        <div className="mt-4 rounded-lg border border-amber-200/10 bg-amber-200/[0.035] p-3 text-[10px] leading-4 text-white/42">
+          {state.availability.reason} Plan: {state.availability.accountPlan}; billing: {state.availability.billingState}; projected cost: $0.00/month.
+        </div>
+      </section>
+
+      <section className="cloud-card p-5">
+        <div className="mb-4">
+          <h2 className="text-sm font-semibold text-white/80">Public App Exposure</h2>
+          <p className="mt-1 text-[10px] text-white/27">
+            Server-enforced organization, workspace, project, health, access, and rate-limit policy. A saved public policy is not reported as a live URL until secure transport and Cloudflare TLS are actually ready.
+          </p>
+        </div>
+        <PublicExposureControls state={state} />
       </section>
 
       <section className="cloud-card overflow-hidden">
@@ -161,9 +178,10 @@ export function NetworkingView({ state }: { state: NetworkState }) {
         <ShieldCheck className="mt-px size-3.5 shrink-0 text-[#b7ff3c]" />
         <span>
           No domain purchase, nameserver change, Tunnel, Spectrum, Argo, load
-          balancer, or public bucket endpoint is configured. Networking remains
-          on the free workers.dev origin until an owned domain is deliberately
-          added later.
+          balancer, router port, firewall rule, or public bucket endpoint was
+          created. Node origin addresses and connector credentials are never
+          returned by this surface. Public routes fail closed while transport
+          is unavailable under Zero Mode.
         </span>
       </div>
     </>

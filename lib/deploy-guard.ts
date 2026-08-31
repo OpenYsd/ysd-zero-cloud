@@ -26,6 +26,8 @@ const DISALLOWED_ARRAY_BINDINGS = [
   'services',
   'vectorize',
   'workflows',
+  'dispatch_namespaces',
+  'mtls_certificates',
 ] as const;
 
 function isRecord(value: unknown): value is UnknownRecord {
@@ -69,9 +71,31 @@ export function inspectDeploymentConfig(
     'limits',
     'queues',
     'send_email',
+    'routes',
+    'route',
   ]) {
     if (hasEntries(config[key]))
       reasons.push(`The generated config enables ${key}.`);
+  }
+
+  const vars = isRecord(config.vars) ? config.vars : {};
+  const attestation = {
+    transport: vars.YSD_PUBLIC_TRANSPORT_MODE,
+    plan: vars.YSD_CLOUDFLARE_PLAN,
+    billing: vars.YSD_BILLING_STATE,
+    zones: vars.YSD_OWNED_ZONE_COUNT,
+    tunnels: vars.YSD_TUNNEL_COUNT,
+  };
+  if (
+    attestation.transport !== 'unavailable-zero-mode' ||
+    attestation.plan !== 'workers-free' ||
+    attestation.billing !== 'no-payment-method' ||
+    attestation.zones !== '0' ||
+    attestation.tunnels !== '0'
+  ) {
+    reasons.push(
+      'Public transport must remain unavailable under the verified Workers Free, no-zone, no-tunnel account state.',
+    );
   }
 
   const databases = Array.isArray(config.d1_databases)

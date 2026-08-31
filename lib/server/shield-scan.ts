@@ -33,6 +33,7 @@ import { nodesForShield } from './nodes';
 import { aiForShield } from './ai';
 import { gameServersForShield } from './game-servers';
 import { appRuntimeForShield } from './app-runtime-control';
+import { publicExposureForShield } from './public-exposure';
 
 /**
  * YSD Shield: gathering the snapshot and persisting the result.
@@ -93,6 +94,7 @@ async function collectSnapshot(
     ai,
     gameServers,
     appRuntime,
+    publicExposure,
     ownerInvariant,
     staleAdmins,
     expiredInvitations,
@@ -169,6 +171,7 @@ async function collectSnapshot(
     aiForShield(workspaceId, now),
     gameServersForShield(workspaceId, now),
     appRuntimeForShield(workspaceId, now),
+    publicExposureForShield(workspaceId, now),
     queryOne<{ valid: number }>(
       `SELECT CASE WHEN
           EXISTS (
@@ -255,7 +258,9 @@ async function collectSnapshot(
           'invitation_tenant_guard', 'invitation_tenant_update_guard',
           'service_account_tenant_guard', 'service_account_tenant_update_guard',
           'audit_event_tenant_guard',
-          'workspace_limit_tenant_guard', 'workspace_limit_tenant_update_guard'
+          'workspace_limit_tenant_guard', 'workspace_limit_tenant_update_guard',
+          'public_exposure_tenant_guard', 'public_exposure_tenant_update_guard',
+          'exposure_domain_tenant_guard', 'exposure_domain_tenant_update_guard'
         )`,
     ),
     count(
@@ -264,7 +269,18 @@ async function collectSnapshot(
     ),
   ]);
 
-  const network = await readNetworkState(workspaceId);
+  const network = await readNetworkState({
+    organizationId,
+    workspaceId,
+    actor: {
+      userId,
+      role: 'owner',
+      suspended: false,
+      organizationId,
+      workspaceId,
+      projectIds: null,
+    },
+  });
 
   return {
     zeroModeEnabled: workspace?.zeroMode ?? true,
@@ -333,7 +349,7 @@ async function collectSnapshot(
     collaboration: {
       ownerInvariant: ownerInvariant?.valid === 1,
       tenantIsolationViolations,
-      tenantIsolationGuarded: tenantTriggerCount === 13,
+      tenantIsolationGuarded: tenantTriggerCount === 17,
       auditAppendOnly: auditTriggerCount === 2,
       staleAdmins,
       expiredInvitations,
@@ -360,6 +376,7 @@ async function collectSnapshot(
     ai,
     gameServers,
     appRuntime,
+    publicExposure,
     now,
   };
 }

@@ -56,6 +56,25 @@ function snapshot(overrides: Partial<ShieldSnapshot> = {}): ShieldSnapshot {
       unboundedServiceTokens: 0,
       privilegeEscalationBlocked: true,
     },
+    publicExposure: {
+      unavailableUnderZeroMode: true,
+      unexpectedPublic: 0,
+      staleRoutes: 0,
+      offlineOrRevokedRoutes: 0,
+      unverifiedDomains: 0,
+      tlsUnavailable: 0,
+      originLeakIndicators: 0,
+      openProxyAttempts: 0,
+      excessivePublicRoutes: 0,
+      rateLimitDisabled: 0,
+      suspiciousDomainChurn: 0,
+      lowPrivilegeChanges: 0,
+      tunnelCredentialAnomaly: 0,
+      unexpectedConnectorTarget: 0,
+      orphanRoutes: 0,
+      crossOrgDomainConflict: 0,
+      zeroModeBypass: 0,
+    },
     now: NOW,
     ...overrides,
   };
@@ -657,4 +676,46 @@ void test('an unobservable header probe is not reported as a failure', () => {
   assert.ok(
     !report.findings.some((f) => f.code === 'security-headers-missing'),
   );
+});
+
+void test('public exposure anomalies are critical and unavailable transport is reported honestly', () => {
+  const clean = runShieldRules(snapshot());
+  const check = clean.checks.find((entry) => entry.id === 'public-exposure');
+  assert.equal(check?.state, 'passed');
+  assert.match(check?.detail ?? '', /Unavailable under Zero Mode/);
+
+  const report = runShieldRules(snapshot({
+    publicExposure: {
+      unavailableUnderZeroMode: true,
+      unexpectedPublic: 1,
+      staleRoutes: 1,
+      offlineOrRevokedRoutes: 1,
+      unverifiedDomains: 1,
+      tlsUnavailable: 1,
+      originLeakIndicators: 1,
+      openProxyAttempts: 1,
+      excessivePublicRoutes: 1,
+      rateLimitDisabled: 1,
+      suspiciousDomainChurn: 1,
+      lowPrivilegeChanges: 1,
+      tunnelCredentialAnomaly: 1,
+      unexpectedConnectorTarget: 1,
+      orphanRoutes: 1,
+      crossOrgDomainConflict: 1,
+      zeroModeBypass: 1,
+    },
+  }));
+  const codes = new Set(report.findings.map((finding) => finding.code));
+  for (const code of [
+    'exposure-unexpected-public-route',
+    'exposure-unhealthy-route',
+    'exposure-domain-or-tls-unverified',
+    'exposure-ssrf-or-origin-leak',
+    'exposure-abuse-controls',
+    'exposure-suspicious-change',
+    'exposure-connector-anomaly',
+    'exposure-tenant-integrity',
+    'exposure-zero-mode-bypass',
+  ]) assert.equal(codes.has(code), true, code);
+  assert.equal(report.checks.find((entry) => entry.id === 'public-exposure')?.state, 'failed');
 });

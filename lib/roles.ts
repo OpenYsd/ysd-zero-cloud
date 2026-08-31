@@ -40,6 +40,10 @@ export const PERMISSIONS = [
   'deployment.read',
   'deployment.deploy',
   'deployment.lifecycle',
+  'exposure.read',
+  'exposure.preview',
+  'exposure.manage',
+  'domain.manage',
   'secret.metadata.read',
   'secret.write',
   'node.read',
@@ -84,6 +88,7 @@ const VIEWER: readonly Permission[] = [
   'ai.read', 'database.read', 'billing.read', 'member.read',
   'session.read-own', 'session.revoke-own', 'usage.read', 'shield.read',
   'storage.read',
+  'exposure.read',
 ];
 
 const DEVELOPER: readonly Permission[] = [
@@ -92,6 +97,7 @@ const DEVELOPER: readonly Permission[] = [
   'deployment.deploy', 'deployment.lifecycle', 'secret.write', 'node.manage',
   'game-server.manage', 'game-server.lifecycle', 'ai.jobs.run', 'shield.scan',
   'storage.write',
+  'exposure.preview',
 ];
 
 const ADMIN: readonly Permission[] = [
@@ -101,6 +107,7 @@ const ADMIN: readonly Permission[] = [
   'invitation.read',
   'service-account.read', 'service-account.manage', 'session.revoke-member',
   'audit.read', 'audit.export',
+  'exposure.manage', 'domain.manage',
 ];
 
 const OWNER: readonly Permission[] = [
@@ -165,6 +172,8 @@ const PROJECT_BOUND_PERMISSIONS = new Set<Permission>([
   'deployment.read',
   'deployment.deploy',
   'deployment.lifecycle',
+  'exposure.read',
+  'exposure.preview',
   'secret.metadata.read',
   'secret.write',
   'member.read',
@@ -253,6 +262,8 @@ export function permissionForRequest(method: string, pathname: string): Permissi
   if (pathname.startsWith('/api/projects')) return read ? 'project.read' : verb === 'DELETE' ? 'project.delete' : 'project.create';
   if (pathname === '/api/smart-deploy') return 'deployment.deploy';
   if (pathname.startsWith('/api/deployments')) return read ? 'deployment.read' : 'deployment.lifecycle';
+  if (pathname.startsWith('/api/exposures')) return read ? 'exposure.read' : 'exposure.preview';
+  if (pathname.startsWith('/api/domains')) return read ? 'exposure.read' : 'domain.manage';
   if (pathname.startsWith('/api/secrets')) return read ? 'secret.metadata.read' : 'secret.write';
   if (pathname.startsWith('/api/nodes/agent/')) return null;
   if (pathname.startsWith('/api/nodes')) return read ? 'node.read' : 'node.manage';

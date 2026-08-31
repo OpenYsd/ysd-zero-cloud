@@ -161,6 +161,32 @@ export async function recordAppRuntimeJobOutcome(input: {
     database
       .prepare(`UPDATE project SET status = ?, updatedAt = ? WHERE workspaceId = ? AND id = ?`)
       .bind(deploymentState === 'healthy' ? 'live' : deploymentState === 'failed' || deploymentState === 'crash_loop' ? 'blocked' : 'idle', input.now, input.job.workspaceId, payload.projectId),
+    database
+      .prepare(
+        `UPDATE public_exposure
+            SET targetArtifactId = CASE WHEN ? = 1 AND ? IS NOT NULL THEN ? ELSE targetArtifactId END,
+                healthState = ?,
+                status = CASE WHEN mode = 'private' THEN 'disabled' ELSE 'unavailable_zero_mode' END,
+                transport = 'none', transportState = 'unavailable_zero_mode',
+                tlsState = 'unavailable', lastError = ?, updatedAt = ?
+          WHERE workspaceId = ? AND deploymentId = ? AND deletedAt IS NULL`,
+      )
+      .bind(
+        effectiveSuccess ? 1 : 0,
+        artifactId,
+        artifactId,
+        deploymentState === 'healthy'
+          ? 'healthy'
+          : deploymentState === 'stopped'
+            ? 'offline'
+            : 'failed',
+        deploymentState === 'healthy'
+          ? 'Public transport remains unavailable under Zero Mode.'
+          : `Deployment lifecycle changed to ${deploymentState}; routing is failed closed.`,
+        input.now,
+        input.job.workspaceId,
+        payload.deploymentId,
+      ),
   ];
   if (artifactId && (payload.operation === 'deploy' || payload.operation === 'redeploy' || payload.operation === 'rollback')) {
     statements.push(
@@ -195,6 +221,24 @@ export async function recordAppRuntimeJobOutcome(input: {
            WHERE workspaceId = ? AND deploymentId = ? AND deletedAt IS NULL`,
         )
         .bind(input.now, input.job.workspaceId, payload.deploymentId),
+      database
+        .prepare(
+          `UPDATE exposure_domain
+              SET exposureId = NULL, attachState = 'detached', tlsState = 'unavailable',
+                  detachedAt = ?, updatedAt = ?
+            WHERE workspaceId = ? AND exposureId IN (
+              SELECT id FROM public_exposure WHERE workspaceId = ? AND deploymentId = ?
+            ) AND deletedAt IS NULL`,
+        )
+        .bind(input.now, input.now, input.job.workspaceId, input.job.workspaceId, payload.deploymentId),
+      database
+        .prepare(
+          `UPDATE public_exposure
+              SET mode = 'private', status = 'deleted', assignedHostname = NULL,
+                  healthState = 'failed', tlsState = 'unavailable', deletedAt = ?, updatedAt = ?
+            WHERE workspaceId = ? AND deploymentId = ? AND deletedAt IS NULL`,
+        )
+        .bind(input.now, input.now, input.job.workspaceId, payload.deploymentId),
     );
   }
   const logs = Array.isArray(input.result?.logs)
@@ -367,6 +411,20 @@ export async function syncAppRuntimeSnapshots(input: {
         input.cpuLoadPercent ?? null,
         snapshot.memoryUsedBytes ?? input.memoryUsedBytes ?? null,
         snapshot.uptimeSeconds, snapshot.restartCount, input.now,
+      ),
+      database.prepare(
+        `UPDATE public_exposure
+            SET healthState = ?,
+                status = CASE WHEN mode = 'private' THEN 'disabled' ELSE 'unavailable_zero_mode' END,
+                transport = 'none', transportState = 'unavailable_zero_mode',
+                tlsState = 'unavailable', updatedAt = ?
+          WHERE workspaceId = ? AND deploymentId = ? AND targetNodeId = ? AND deletedAt IS NULL`,
+      ).bind(
+        snapshot.crashLoop ? 'failed' : snapshot.state === 'running' ? 'healthy' : 'offline',
+        input.now,
+        input.workspaceId,
+        snapshot.deploymentId,
+        input.nodeId,
       ),
     );
   }
