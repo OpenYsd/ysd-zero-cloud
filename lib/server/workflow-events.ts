@@ -14,6 +14,7 @@ const PAYLOAD_KEYS = new Set([
   'status', 'previousStatus', 'severity', 'previousSeverity', 'role',
   'previousRole', 'projectId', 'nodeId', 'deploymentId', 'serverId',
   'jobId', 'findingId', 'crashCount', 'failureCount', 'environment',
+  'incidentId',
   'sourceId', 'externalEventType', 'externalEventId', 'subject', 'category',
   'action', 'ref', 'label', 'count', 'value', 'success',
 ]);
@@ -140,6 +141,13 @@ async function resourceProject(input: {
       input.workspaceId, input.resourceId, input.workspaceId, input.resourceId,
     );
     return { exists: Boolean(row), projectId: null };
+  }
+  if (prefix === 'incident') {
+    const row = await queryOne<{ projectId: string | null }>(
+      'SELECT projectId FROM workflow_incident WHERE workspaceId = ? AND id = ?',
+      input.workspaceId, input.resourceId,
+    );
+    return row ? { exists: true, projectId: row.projectId } : { exists: false, projectId: null };
   }
   return { exists: false, projectId: null };
 }

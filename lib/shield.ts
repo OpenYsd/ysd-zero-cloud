@@ -213,6 +213,14 @@ export type ShieldSnapshot = {
     secretExposure: number;
     zeroModeBypass: number;
   };
+  incidents?: {
+    staleCritical: number;
+    unassignedCritical: number;
+    storms: number;
+    orphanReferences: number;
+    crossTenantAnomalies: number;
+    suspiciousDeniedMutations: number;
+  };
   now: number;
 };
 
@@ -1558,6 +1566,45 @@ function checkWorkflows(snapshot: ShieldSnapshot): {
   };
 }
 
+function checkIncidents(snapshot: ShieldSnapshot): {
+  check: ShieldCheck;
+  findings: ShieldFinding[];
+} {
+  const state = snapshot.incidents;
+  const findings: ShieldFinding[] = [];
+  if (!state) {
+    return {
+      check: { id: 'incident-operations', name: 'Incident Operations', detail: 'No incident security state was sampled', state: 'passed' },
+      findings,
+    };
+  }
+  const add = (count: number, code: string, title: string, severity: Severity, remediation: string) => {
+    if (count > 0) findings.push({
+      code,
+      title,
+      detail: `${count} incident operation signal${count === 1 ? '' : 's'} require review.`,
+      resource: 'incidents/operations',
+      severity,
+      remediation,
+    });
+  };
+  add(state.staleCritical, 'incident-stale-critical', 'Critical incidents are stale', 'critical', 'Assign and acknowledge critical incidents, then record a bounded resolution summary.');
+  add(state.unassignedCritical, 'incident-critical-unassigned', 'Critical incidents are unassigned', 'high', 'Assign every active critical incident to an active organization member.');
+  add(state.storms, 'incident-occurrence-storm', 'Incident occurrence storm detected', 'high', 'Inspect the root cause and correlation chain; aggregation is containing duplicate inbox noise.');
+  add(state.orphanReferences, 'incident-orphan-reference', 'Incident resource references are orphaned', 'high', 'Review retained evidence and repair or annotate the missing same-tenant resource reference.');
+  add(state.crossTenantAnomalies, 'incident-cross-tenant-anomaly', 'Incident tenant relationships disagree', 'critical', 'Quarantine the affected row and verify the Phase 11 D1 tenant guards before accepting mutations.');
+  add(state.suspiciousDeniedMutations, 'incident-suspicious-denials', 'Suspicious incident mutations were denied', 'high', 'Review actor audit history and keep server-authoritative incident permissions enabled.');
+  return {
+    check: {
+      id: 'incident-operations',
+      name: 'Incident Operations',
+      detail: 'D1 dedupe · append-only timeline · tenant guards · bounded response actions',
+      state: findings.some((finding) => finding.severity === 'critical' || finding.severity === 'high') ? 'failed' : findings.length ? 'review' : 'passed',
+    },
+    findings,
+  };
+}
+
 /** Runs every rule against a snapshot and scores the result. */
 export function runShieldRules(snapshot: ShieldSnapshot): ShieldReport {
   const results = [
@@ -1573,6 +1620,7 @@ export function runShieldRules(snapshot: ShieldSnapshot): ShieldReport {
     checkAppRuntime(snapshot),
     checkPublicExposure(snapshot),
     checkWorkflows(snapshot),
+    checkIncidents(snapshot),
     checkSurface(snapshot),
     checkHardening(snapshot),
   ];

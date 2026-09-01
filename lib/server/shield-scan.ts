@@ -35,6 +35,7 @@ import { gameServersForShield } from './game-servers';
 import { appRuntimeForShield } from './app-runtime-control';
 import { publicExposureForShield } from './public-exposure';
 import { workflowsForShield } from './workflows';
+import { incidentsForShield } from './incidents';
 import { emitWorkflowEvent } from './workflow-events';
 
 /**
@@ -98,6 +99,7 @@ async function collectSnapshot(
     appRuntime,
     publicExposure,
     workflows,
+    incidents,
     ownerInvariant,
     staleAdmins,
     expiredInvitations,
@@ -176,6 +178,7 @@ async function collectSnapshot(
     appRuntimeForShield(workspaceId, now),
     publicExposureForShield(workspaceId, now),
     workflowsForShield(organizationId, workspaceId, now),
+    incidentsForShield(workspaceId, now),
     queryOne<{ valid: number }>(
       `SELECT CASE WHEN
           EXISTS (
@@ -297,6 +300,10 @@ async function collectSnapshot(
           'webhook_source_tenant_guard', 'webhook_source_tenant_update_guard',
           'webhook_replay_tenant_guard', 'webhook_delivery_tenant_guard',
           'webhook_delivery_tenant_update_guard'
+          ,'incident_phase11_insert_guard', 'incident_phase11_scope_immutable_guard',
+          'incident_phase11_assignee_guard', 'incident_event_tenant_guard',
+          'incident_event_volume_guard',
+          'incident_event_append_only_update', 'incident_event_append_only_delete'
         )`,
     ),
     count(
@@ -385,7 +392,7 @@ async function collectSnapshot(
     collaboration: {
       ownerInvariant: ownerInvariant?.valid === 1,
       tenantIsolationViolations,
-      tenantIsolationGuarded: tenantTriggerCount === 34,
+      tenantIsolationGuarded: tenantTriggerCount === 41,
       auditAppendOnly: auditTriggerCount === 2,
       staleAdmins,
       expiredInvitations,
@@ -414,6 +421,7 @@ async function collectSnapshot(
     appRuntime,
     publicExposure,
     workflows,
+    incidents,
     now,
   };
 }

@@ -1,6 +1,6 @@
 # YSD Zero Cloud
 
-YSD Zero Cloud is a zero-cost-first cloud operating system. Version `0.10.0` runs authentication,
+YSD Zero Cloud is a zero-cost-first cloud operating system. Production version `0.10.0` runs authentication,
 persistence, security scanning, the cost guard, private-object storage policy, network inventory,
 an outbound-only user-owned compute control plane, a private Node.js App Runtime, local AI
 scheduling, private Minecraft Java server orchestration, organization collaboration, and a
@@ -8,6 +8,10 @@ fail-closed Public App Exposure control plane against Cloudflare Workers and D1.
 the tenant-isolated YSD Workflows engine: immutable published versions, bounded D1 execution,
 internal notifications, audit history, one global free-plan scheduler tick, and a signed inbound
 External Event Gateway with workspace-scoped webhook sources.
+
+The current source tree targets `0.11.0` and adds the Operations Center described below. Phase 11
+is locally verified but is **not live** until its migration and Worker release receive explicit
+Production approval.
 
 **Live:** <https://ysd-zero-cloud.ysd-zero-cloud.workers.dev>
 
@@ -189,6 +193,30 @@ gateway stores only safe delivery metadata and never stores the raw body, signat
 There is deliberately no generic outbound HTTP, JavaScript, shell, Queue, Durable Object, or
 Cloudflare Workflows action. Phase 10 reuses the existing Worker, D1 database, Workflow engine, and
 one-minute Cron Trigger, so the projected incremental monthly cost remains `$0.00` under Zero Mode.
+
+## Operations Center (Phase 11 pre-deploy)
+
+Phase 11 expands the existing `workflow_incident` records in place and adds an append-only
+`incident_event` timeline. Repeated root causes aggregate into one active incident with an
+occurrence count and last-seen time. Operators can acknowledge, assign, change severity, add a
+bounded plain-text note, resolve, and reopen without deleting execution, notification, or audit
+history. Every write uses an expected revision, so concurrent stale changes fail instead of
+overwriting a newer response.
+
+The `/incidents` Operations Center provides a scoped inbox, filters, incident inspector, timeline,
+correlation IDs, and D1-derived MTTA/MTTR. Viewers are read-only; project-restricted developers can
+manage only incidents in their allowlist; owners/admins manage workspace incidents, and resolving a
+critical incident remains owner/admin-only. Assignees must be active members of the same
+organization. Notes and resolutions reject URLs, executable content, scripts, commands, HTML, and
+credential-shaped values before storage.
+
+Incident lifecycle events (`opened`, `acknowledged`, `severity_changed`, `resolved`, and `reopened`)
+enter the existing trusted Workflow event path with correlation, causation, self-trigger, cycle,
+and maximum-chain-depth guards. Shield checks stale/unassigned critical incidents, occurrence
+storms, orphan or cross-tenant references, and suspicious denied mutations. The feature uses only
+the existing Worker, D1 database, internal notifications, audit log, and global Cron tick: no Queue,
+Durable Object, Cloudflare Workflow, R2, external provider, or paid binding is added. Projected
+incremental monthly cost remains `$0.00` under server-enforced Zero Mode.
 
 ## Compute Nodes
 
@@ -473,8 +501,7 @@ Workers output.
 
 ## Roadmap
 
-1. Execute accepted plans through a deploy pipeline rather than recording them.
-2. Enable the already-implemented private R2 binding only if Cloudflare confirms `$0` account activation.
-3. Add organizations, roles, and per-member audit scoping.
-4. Add another game only after it has an equally narrow reviewed runtime contract.
-5. Add owned-domain inventory only after a domain exists; keep workers.dev as the zero-cost default.
+Completed capabilities are documented in their sections above rather than repeated as future work.
+Phase 11 Operations Center is the only pending release in this source tree. Later phases remain
+unselected; private R2 and owned-domain transport stay unavailable unless Cloudflare first confirms
+a no-Billing `$0.00` path, and any future runtime must keep the same narrow reviewed contracts.

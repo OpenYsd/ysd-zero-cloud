@@ -21,6 +21,7 @@ import { SettingsView } from '@/components/settings-view';
 import { ShieldView } from '@/components/shield-view';
 import { SmartDeployPanel } from '@/components/smart-deploy-panel';
 import { WorkflowsView } from '@/components/workflows-view';
+import { IncidentsView } from '@/components/incidents-view';
 import {
   AuditView,
   InvitationsView,
@@ -55,6 +56,8 @@ import { listAuditEvents } from '@/lib/server/audit';
 import { listOwnSessions } from '@/lib/server/devices';
 import { readCollaborationLimits } from '@/lib/server/organization-limits';
 import { listWorkflowsState } from '@/lib/server/workflows';
+import { listIncidentState } from '@/lib/server/incidents';
+import { parseIncidentFilters } from '@/lib/incidents';
 
 export const dynamic = 'force-dynamic';
 
@@ -71,10 +74,13 @@ export async function generateMetadata({
 
 export default async function SectionPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ section: string }>;
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const { section } = await params;
+  const search = await searchParams;
   if (!isSection(section)) notFound();
 
   const { organization, workspace, actor, user } = await requireSession();
@@ -87,7 +93,7 @@ export default async function SectionPage({
     projects: 'project.read', deployments: 'deployment.read', databases: 'database.read',
     storage: 'storage.read', ai: 'ai.read', 'game-servers': 'game-server.read',
     nodes: 'node.read', logs: 'workspace.read', networking: 'workspace.read',
-    secrets: 'secret.metadata.read', workflows: 'workflow.read', usage: 'usage.read', shield: 'shield.read',
+    secrets: 'secret.metadata.read', workflows: 'workflow.read', incidents: 'incident.read', usage: 'usage.read', shield: 'shield.read',
     members: 'member.read', invitations: 'invitation.read',
     'service-accounts': 'service-account.read', audit: 'audit.read',
     sessions: 'session.read-own', settings: 'workspace.update', admin: 'member.read',
@@ -111,6 +117,7 @@ export default async function SectionPage({
         actor={actor}
         userId={user.id}
         now={now}
+        search={search}
       />
     </div>
   );
@@ -123,6 +130,7 @@ async function SectionBody({
   actor,
   userId,
   now,
+  search,
 }: {
   section: Section;
   workspace: Workspace;
@@ -130,6 +138,7 @@ async function SectionBody({
   actor: Actor;
   userId: string;
   now: number;
+  search: Record<string, string | string[] | undefined>;
 }) {
   const workspaceId = workspace.id;
 
@@ -228,6 +237,28 @@ async function SectionBody({
           actor={{ userId, role: actor.role }}
           projects={projects}
           secrets={secrets}
+          now={now}
+        />
+      );
+    }
+
+    case 'incidents': {
+      const params = new URLSearchParams();
+      for (const [key, value] of Object.entries(search)) {
+        if (typeof value === 'string') params.set(key, value);
+      }
+      const [state, members, projects] = await Promise.all([
+        listIncidentState({ workspaceId, actor, filters: parseIncidentFilters(params) }),
+        listMembers(organization.id, workspaceId),
+        listProjects(workspaceId, actor.projectIds),
+      ]);
+      return (
+        <IncidentsView
+          initialState={state}
+          members={members}
+          projects={projects}
+          canManage={can(actor, 'incident.manage')}
+          canResolveCritical={can(actor, 'incident.resolve-critical')}
           now={now}
         />
       );

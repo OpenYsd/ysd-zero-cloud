@@ -21,6 +21,7 @@ import { recordAudit } from './audit';
 import { createDeploymentAction } from './deployments';
 import { execute, query, queryOne } from './db';
 import { queueGameServerRequest } from './game-servers';
+import { createOrAggregateIncident } from './incidents';
 import { readNodesState, revokeNode } from './nodes';
 import {
   listWebhookGatewayState,
@@ -222,6 +223,7 @@ const ADMIN_ACTIONS = new Set([
 const EVENT_EMITTING_ACTIONS = new Set<WorkflowAction['type']>([
   'deployment.redeploy', 'deployment.rollback_to_previous_healthy',
   'node.revoke', 'game_server.stop', 'game_server.restart',
+  'shield.create_incident',
 ]);
 const LEASE_MS = 25_000;
 const MAX_EVENTS_PER_TICK = 16;
@@ -1275,20 +1277,26 @@ async function executeAction(input: {
         : { ok: false, error: 'Open Shield finding not found.' };
     }
     case 'shield.create_incident': {
-      const id = createId('incident');
-      const now = Date.now();
-      await execute(
-        `INSERT INTO workflow_incident
-          (id, organizationId, workspaceId, projectId, workflowId, executionId,
-           resourceType, resourceId, title, detail, severity, status, createdBy,
-           createdAt, updatedAt)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)`,
-        id, input.execution.organizationId, input.execution.workspaceId,
-        input.execution.projectId, input.workflow.id, input.execution.id,
-        input.event.resourceType, resourceId, input.action.title,
-        input.action.message, input.action.severity ?? 'medium', actor, now, now,
-      );
-      return { ok: true, resourceType: 'incident', resourceId: id };
+      const result = await createOrAggregateIncident({
+        organizationId: input.execution.organizationId,
+        workspaceId: input.execution.workspaceId,
+        projectId: input.execution.projectId,
+        workflowId: input.workflow.id,
+        executionId: input.execution.id,
+        resourceType: input.event.resourceType,
+        resourceId,
+        title: input.action.title ?? 'Workflow incident',
+        detail: input.action.message ?? 'A workflow opened an internal incident.',
+        severity: input.action.severity ?? 'medium',
+        createdBy: actor,
+        correlationId: input.execution.correlationId,
+        causationId: input.event.id,
+        sourceWorkflowId: input.workflow.id,
+        chainDepth: input.execution.chainDepth + 1,
+      });
+      return result.ok
+        ? { ok: true, resourceType: 'incident', resourceId: result.incidentId }
+        : { ok: false, error: result.error };
     }
     case 'notification.create': {
       const id = createId('note');

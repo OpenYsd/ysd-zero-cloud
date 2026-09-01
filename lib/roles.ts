@@ -77,6 +77,9 @@ export const PERMISSIONS = [
   'webhook.read',
   'webhook.manage',
   'notification.read',
+  'incident.read',
+  'incident.manage',
+  'incident.resolve-critical',
   'usage.read',
   'shield.read',
   'shield.scan',
@@ -98,6 +101,7 @@ const VIEWER: readonly Permission[] = [
   'storage.read',
   'exposure.read',
   'workflow.read', 'webhook.read', 'notification.read',
+  'incident.read',
 ];
 
 const DEVELOPER: readonly Permission[] = [
@@ -108,6 +112,7 @@ const DEVELOPER: readonly Permission[] = [
   'storage.write',
   'exposure.preview',
   'workflow.create', 'workflow.execute',
+  'incident.manage',
 ];
 
 const ADMIN: readonly Permission[] = [
@@ -120,6 +125,7 @@ const ADMIN: readonly Permission[] = [
   'exposure.manage', 'domain.manage',
   'workflow.manage', 'workflow.retry',
   'webhook.manage',
+  'incident.resolve-critical',
 ];
 
 const OWNER: readonly Permission[] = [
@@ -187,6 +193,7 @@ const PROJECT_BOUND_PERMISSIONS = new Set<Permission>([
   'exposure.read',
   'exposure.preview',
   'workflow.read', 'workflow.create', 'workflow.execute',
+  'incident.read', 'incident.manage', 'incident.resolve-critical',
   'webhook.read',
   'secret.metadata.read',
   'secret.write',
@@ -296,6 +303,7 @@ export function permissionForRequest(method: string, pathname: string): Permissi
   if (pathname.startsWith('/api/webhook-sources')) return read ? 'webhook.read' : 'webhook.manage';
   if (pathname.startsWith('/api/workflows')) return read ? 'workflow.read' : 'workflow.create';
   if (pathname.startsWith('/api/notifications')) return 'notification.read';
+  if (pathname.startsWith('/api/incidents')) return read ? 'incident.read' : 'incident.manage';
   if (pathname.startsWith('/api/admin/users')) return read ? 'admin.users.read' : 'admin.users.write';
   return null;
 }

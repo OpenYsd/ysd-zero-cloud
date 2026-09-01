@@ -110,6 +110,11 @@ export const SECTION_META: Record<
     eyebrow: 'Automation',
     description: 'Safe event-driven automation with versioned execution history.',
   },
+  incidents: {
+    title: 'Operations Center',
+    eyebrow: 'Incident Response',
+    description: 'Deduplicated incidents, assignment, response timelines, and MTTA/MTTR.',
+  },
   usage: {
     title: 'Usage',
     eyebrow: 'Limits',

@@ -29,6 +29,11 @@ export const WORKFLOW_TRIGGER_TYPES = [
   'organization.member.invited',
   'organization.member.removed',
   'organization.member.role_changed',
+  'incident.opened',
+  'incident.acknowledged',
+  'incident.severity_changed',
+  'incident.resolved',
+  'incident.reopened',
   'external.event',
   'schedule',
   'manual',
@@ -97,6 +102,7 @@ export const WORKFLOW_EVENT_PATHS = [
   'event.payload.serverId',
   'event.payload.jobId',
   'event.payload.findingId',
+  'event.payload.incidentId',
   'event.payload.crashCount',
   'event.payload.failureCount',
   'event.payload.environment',
@@ -239,6 +245,7 @@ const ACTION_EMITTED_EVENTS: Readonly<Partial<Record<WorkflowActionType, readonl
   'node.revoke': ['node.revoked'],
   'game_server.stop': ['game_server.stopped'],
   'game_server.restart': ['game_server.started'],
+  'shield.create_incident': ['incident.opened'],
 };
 
 const ACTION_TRIGGER_PREFIX: Readonly<Partial<Record<WorkflowActionType, string>>> = {

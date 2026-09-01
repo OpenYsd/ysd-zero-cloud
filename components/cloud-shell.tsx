@@ -30,6 +30,7 @@ import {
   MonitorSmartphone,
   Plus,
   Workflow,
+  Siren,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Switch } from '@/components/ui/switch';
@@ -76,6 +77,7 @@ const navigation = [
   { label: 'Networking', href: '/networking', icon: Network, permission: 'workspace.read' },
   { label: 'Secrets', href: '/secrets', icon: KeyRound, permission: 'secret.metadata.read' },
   { label: 'Workflows', href: '/workflows', icon: Workflow, permission: 'workflow.read' },
+  { label: 'Incidents', href: '/incidents', icon: Siren, permission: 'incident.read' },
   { label: 'Usage', href: '/usage', icon: Gauge, permission: 'usage.read' },
   { label: 'YSD Shield', href: '/shield', icon: ShieldCheck, permission: 'shield.read' },
   { label: 'Members', href: '/members', icon: Users, permission: 'member.read' },

@@ -73,7 +73,8 @@ export type LogSource =
   | 'node'
   | 'ai'
   | 'game-server'
-  | 'workflow';
+  | 'workflow'
+  | 'incident';
 
 export const LOG_LEVELS = ['INFO', 'WARN', 'ERROR'] as const;
 
@@ -91,6 +92,7 @@ export const LOG_SOURCES = [
   'ai',
   'game-server',
   'workflow',
+  'incident',
 ] as const;
 
 export type StorageObject = {
@@ -674,6 +676,67 @@ export type WorkflowsState = {
   projectedMonthlyCost: 0;
 };
 
+export type IncidentTimelineEvent = {
+  id: string;
+  incidentId: string;
+  projectId: string | null;
+  type: import('./incidents.ts').IncidentEventType;
+  actorType: 'user' | 'system' | 'workflow';
+  actorId: string;
+  correlationId: string;
+  fromStatus: import('./incidents.ts').IncidentStatus | null;
+  toStatus: import('./incidents.ts').IncidentStatus | null;
+  message: string | null;
+  metadata: Record<string, string | number | boolean | null>;
+  createdAt: number;
+};
+
+export type Incident = {
+  id: string;
+  projectId: string | null;
+  workflowId: string | null;
+  executionId: string | null;
+  resourceType: string;
+  resourceId: string | null;
+  title: string;
+  detail: string;
+  severity: import('./incidents.ts').IncidentSeverity;
+  status: import('./incidents.ts').IncidentStatus;
+  correlationId: string;
+  occurrenceCount: number;
+  lastSeenAt: number;
+  assignedTo: string | null;
+  assigneeName: string | null;
+  acknowledgedAt: number | null;
+  acknowledgedBy: string | null;
+  resolvedAt: number | null;
+  resolvedBy: string | null;
+  resolution: string | null;
+  revision: number;
+  createdBy: string;
+  createdAt: number;
+  updatedAt: number;
+  timeline: IncidentTimelineEvent[];
+};
+
+export type IncidentState = {
+  incidents: Incident[];
+  summary: {
+    open: number;
+    acknowledged: number;
+    resolved: number;
+    critical: number;
+    unassigned: number;
+    occurrences: number;
+    mttaMs: number | null;
+    mttrMs: number | null;
+  };
+  filters: import('./incidents.ts').IncidentFilters;
+  hardLimits: { list: number; timeline: number; activePerWorkspace: number };
+  zeroModeEnforced: true;
+  projectedMonthlyCost: 0;
+};
+
 export type Workspace = {
   id: string;
   organizationId: string;
@@ -818,6 +881,7 @@ export const SECTIONS = [
   'logs',
   'networking',
   'workflows',
+  'incidents',
   'secrets',
   'usage',
   'shield',
@@ -855,6 +919,7 @@ export const LIVE_SECTIONS: readonly Section[] = [
   'storage',
   'networking',
   'workflows',
+  'incidents',
   'nodes',
   'ai',
   'game-servers',

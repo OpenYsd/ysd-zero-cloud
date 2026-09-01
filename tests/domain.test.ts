@@ -29,12 +29,13 @@ void test('every live section is a real section', () => {
   }
 });
 
-void test('storage, networking, nodes, AI, and Game Servers are live surfaces', () => {
+void test('storage, networking, nodes, AI, Game Servers, and Incidents are live surfaces', () => {
   assert.equal(isLiveSection('storage'), true);
   assert.equal(isLiveSection('networking'), true);
   assert.equal(isLiveSection('nodes'), true);
   assert.equal(isLiveSection('ai'), true);
   assert.equal(isLiveSection('game-servers'), true);
+  assert.equal(isLiveSection('incidents'), true);
 });
 
 void test('log guards reject anything outside the catalog', () => {
@@ -46,6 +47,7 @@ void test('log guards reject anything outside the catalog', () => {
   assert.equal(isLogSource('node'), true);
   assert.equal(isLogSource('ai'), true);
   assert.equal(isLogSource('game-server'), true);
+  assert.equal(isLogSource('incident'), true);
   assert.equal(isLogSource('anything-else'), false);
 });
 
