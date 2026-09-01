@@ -33,6 +33,7 @@ const MASKED_COLUMNS: Record<string, string[]> = {
   organization_invitation: ['tokenHash'],
   service_account_token: ['tokenHash'],
   exposure_domain: ['tokenHash'],
+  webhook_source: ['secretCiphertext', 'secretFingerprint'],
   // AI prompts and bounded model output live in these JSON columns. They are
   // visible only through the purpose-built, workspace-scoped AI surface.
   node_job: ['payload', 'payloadHash', 'claimSignature', 'result'],

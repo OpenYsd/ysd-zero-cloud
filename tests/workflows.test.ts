@@ -179,6 +179,7 @@ function workflowDatabase(): DatabaseSync {
     '0004_security.sql', '0005_storage.sql', '0006_compute_nodes.sql',
     '0007_ai_compute.sql', '0008_game_servers.sql', '0009_app_runtime.sql',
     '0010_organizations.sql', '0011_public_exposure.sql', '0012_workflows.sql',
+    '0013_external_event_gateway.sql',
   ]) apply(database, name);
   database.exec(`
     INSERT INTO "user" (id,name,email,emailVerified,image,createdAt,updatedAt)

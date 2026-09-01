@@ -537,6 +537,16 @@ export type WorkflowExecution = {
   createdAt: number;
   updatedAt: number;
   actions: WorkflowActionExecution[];
+  event: {
+    type: import('./workflows.ts').WorkflowTriggerType;
+    resourceType: string;
+    resourceId: string | null;
+    correlationId: string;
+    sourceId: string | null;
+    externalEventType: string | null;
+    externalEventId: string | null;
+    subject: string | null;
+  } | null;
 };
 
 export type WorkflowVariable = {
@@ -590,9 +600,57 @@ export type InternalNotification = {
   createdAt: number;
 };
 
+export type WebhookSource = {
+  id: string;
+  projectId: string | null;
+  name: string;
+  description: string;
+  status: 'enabled' | 'disabled' | 'archived';
+  secretVersion: number;
+  receivedCount: number;
+  acceptedCount: number;
+  rejectedCount: number;
+  deduplicatedCount: number;
+  workflowExecutionsCreated: number;
+  lastReceivedAt: number | null;
+  lastAcceptedAt: number | null;
+  lastRejectedAt: number | null;
+  createdAt: number;
+  updatedAt: number;
+  rotatedAt: number | null;
+  archivedAt: number | null;
+  webhookPath: string;
+};
+
+export type WebhookDelivery = {
+  id: string;
+  sourceId: string;
+  projectId: string | null;
+  externalEventId: string | null;
+  eventType: string | null;
+  subject: string | null;
+  status: 'accepted' | 'rejected' | 'deduplicated';
+  reasonCode: string | null;
+  workflowEventId: string | null;
+  correlationId: string | null;
+  workflowExecutionsCreated: number;
+  receivedAt: number;
+};
+
 export type WorkflowsState = {
   workflows: Workflow[];
   notifications: InternalNotification[];
+  webhookGateway: {
+    sources: WebhookSource[];
+    recentEvents: WebhookDelivery[];
+    summary: {
+      received: number;
+      accepted: number;
+      rejected: number;
+      deduplicated: number;
+      workflowExecutionsCreated: number;
+    };
+  };
   templates: readonly {
     id: string;
     name: string;

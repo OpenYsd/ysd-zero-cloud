@@ -14,6 +14,8 @@ const PAYLOAD_KEYS = new Set([
   'status', 'previousStatus', 'severity', 'previousSeverity', 'role',
   'previousRole', 'projectId', 'nodeId', 'deploymentId', 'serverId',
   'jobId', 'findingId', 'crashCount', 'failureCount', 'environment',
+  'sourceId', 'externalEventType', 'externalEventId', 'subject', 'category',
+  'action', 'ref', 'label', 'count', 'value', 'success',
 ]);
 const RESOURCE_ID = /^[a-z][a-z0-9_-]{2,159}$/i;
 
@@ -76,6 +78,14 @@ async function resourceProject(input: {
   if (input.type === 'schedule') {
     const row = await queryOne<{ projectId: string | null }>(
       'SELECT projectId FROM workflow WHERE workspaceId = ? AND id = ? AND deletedAt IS NULL',
+      input.workspaceId, input.resourceId,
+    );
+    return row ? { exists: true, projectId: row.projectId } : { exists: false, projectId: null };
+  }
+  if (input.type === 'external.event') {
+    const row = await queryOne<{ projectId: string | null }>(
+      `SELECT projectId FROM webhook_source
+        WHERE workspaceId = ? AND id = ? AND status = 'enabled' AND archivedAt IS NULL`,
       input.workspaceId, input.resourceId,
     );
     return row ? { exists: true, projectId: row.projectId } : { exists: false, projectId: null };

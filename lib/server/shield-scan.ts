@@ -245,7 +245,29 @@ async function collectSnapshot(
               LEFT JOIN workspace w ON w.id = l.workspaceId
              WHERE l.organizationId = ?
                AND (w.organizationId IS NULL OR w.organizationId <> l.organizationId))
+          + (SELECT COUNT(*) FROM webhook_source s
+              LEFT JOIN workspace w ON w.id = s.workspaceId
+              LEFT JOIN project p ON p.id = s.projectId
+             WHERE s.organizationId = ? AND (
+               w.organizationId IS NULL OR w.organizationId <> s.organizationId
+               OR (s.projectId IS NOT NULL AND (p.workspaceId IS NULL OR p.workspaceId <> s.workspaceId))))
+          + (SELECT COUNT(*) FROM webhook_replay_guard r
+              LEFT JOIN webhook_source s ON s.id = r.sourceId
+             WHERE r.organizationId = ? AND (
+               s.organizationId IS NULL OR s.organizationId <> r.organizationId
+               OR s.workspaceId <> r.workspaceId))
+          + (SELECT COUNT(*) FROM webhook_delivery d
+              LEFT JOIN webhook_source s ON s.id = d.sourceId
+              LEFT JOIN workflow_event e ON e.id = d.workflowEventId
+             WHERE d.organizationId = ? AND (
+               s.organizationId IS NULL OR s.organizationId <> d.organizationId
+               OR s.workspaceId <> d.workspaceId
+               OR (d.workflowEventId IS NOT NULL AND (
+                 e.organizationId IS NULL OR e.organizationId <> d.organizationId OR e.workspaceId <> d.workspaceId))))
         ) AS total`,
+      organizationId,
+      organizationId,
+      organizationId,
       organizationId,
       organizationId,
       organizationId,
@@ -271,7 +293,10 @@ async function collectSnapshot(
           'workflow_event_tenant_guard', 'workflow_execution_tenant_guard',
           'workflow_action_tenant_guard', 'workflow_incident_tenant_guard',
           'workflow_security_event_tenant_guard', 'notification_tenant_guard',
-          'workflow_resource_state_tenant_guard'
+          'workflow_resource_state_tenant_guard',
+          'webhook_source_tenant_guard', 'webhook_source_tenant_update_guard',
+          'webhook_replay_tenant_guard', 'webhook_delivery_tenant_guard',
+          'webhook_delivery_tenant_update_guard'
         )`,
     ),
     count(
@@ -360,7 +385,7 @@ async function collectSnapshot(
     collaboration: {
       ownerInvariant: ownerInvariant?.valid === 1,
       tenantIsolationViolations,
-      tenantIsolationGuarded: tenantTriggerCount === 29,
+      tenantIsolationGuarded: tenantTriggerCount === 34,
       auditAppendOnly: auditTriggerCount === 2,
       staleAdmins,
       expiredInvitations,

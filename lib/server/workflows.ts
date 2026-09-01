@@ -23,6 +23,10 @@ import { execute, query, queryOne } from './db';
 import { queueGameServerRequest } from './game-servers';
 import { readNodesState, revokeNode } from './nodes';
 import {
+  listWebhookGatewayState,
+  type WebhookGatewayState,
+} from './webhook-sources';
+import {
   emitWorkflowEvent,
   recordWorkflowSecurityEvent,
 } from './workflow-events';
@@ -152,6 +156,16 @@ export type WorkflowVersionView = Omit<VersionRow, 'definition'> & {
 
 export type WorkflowExecutionView = Omit<ExecutionRow, 'leaseToken'> & {
   actions: ActionRow[];
+  event: {
+    type: WorkflowTriggerType;
+    resourceType: string;
+    resourceId: string | null;
+    correlationId: string;
+    sourceId: string | null;
+    externalEventType: string | null;
+    externalEventId: string | null;
+    subject: string | null;
+  } | null;
 };
 
 export type WorkflowView = Omit<WorkflowRow, 'deletedAt'> & {
@@ -177,6 +191,7 @@ export type InternalNotification = {
 export type WorkflowsState = {
   workflows: WorkflowView[];
   notifications: InternalNotification[];
+  webhookGateway: WebhookGatewayState;
   templates: typeof WORKFLOW_TEMPLATES;
   summary: {
     total: number;
@@ -337,19 +352,44 @@ async function insertVersion(input: {
 }
 
 async function validateForWorkflow(input: {
-  workflow: Pick<WorkflowRow, 'projectId'>;
+  workflow: Pick<WorkflowRow, 'organizationId' | 'workspaceId' | 'projectId'>;
   definition: unknown;
   role: Role;
   zeroMode: boolean;
+  requireEnabledSource?: boolean;
 }): Promise<{ ok: true; definition: WorkflowDefinition } | { ok: false; error: string; securityCode?: string }> {
   const validation = validateWorkflowDefinition(input.definition, {
     role: input.role,
     projectId: input.workflow.projectId,
     zeroMode: input.zeroMode,
   });
-  return validation.ok
-    ? { ok: true, definition: validation.definition }
-    : validation;
+  if (!validation.ok) return validation;
+  if (validation.definition.trigger.type === 'external.event') {
+    const source = await queryOne<{ status: string; archivedAt: number | null }>(
+      `SELECT status, archivedAt FROM webhook_source
+        WHERE id = ? AND organizationId = ? AND workspaceId = ?
+          AND COALESCE(projectId, '') = COALESCE(?, '')`,
+      validation.definition.trigger.sourceId,
+      input.workflow.organizationId,
+      input.workflow.workspaceId,
+      input.workflow.projectId,
+    );
+    if (!source || source.archivedAt !== null) {
+      return {
+        ok: false,
+        error: 'External Event source is outside this workflow scope or archived.',
+        securityCode: 'workflow-webhook-source-reference-rejected',
+      };
+    }
+    if (input.requireEnabledSource && source.status !== 'enabled') {
+      return {
+        ok: false,
+        error: 'Enable the External Event source before publishing or running this workflow.',
+        securityCode: 'workflow-webhook-source-disabled',
+      };
+    }
+  }
+  return { ok: true, definition: validation.definition };
 }
 
 export async function listWorkflowsState(input: {
@@ -395,15 +435,33 @@ export async function listWorkflowsState(input: {
     const versionViews = versions.map(toVersion).filter((value): value is WorkflowVersionView => value !== null);
     const executionViews: WorkflowExecutionView[] = [];
     for (const execution of executions) {
-      const actions = await query<ActionRow>(
+      const [actions, eventRow] = await Promise.all([query<ActionRow>(
         `SELECT id, executionId, actionIndex, attempt, actionType, state,
                 resourceType, resourceId, error, startedAt, finishedAt
            FROM workflow_action_execution WHERE executionId = ?
           ORDER BY actionIndex ASC, attempt ASC`,
         execution.id,
-      );
+      ), queryOne<EventRow>(
+        `SELECT * FROM workflow_event
+          WHERE organizationId = ? AND workspaceId = ? AND id = ?`,
+        input.organizationId, input.workspaceId, execution.eventId,
+      )]);
       const { leaseToken: _leaseToken, ...safeExecution } = execution;
-      executionViews.push({ ...safeExecution, actions });
+      const eventPayload = eventRow ? parsedPayload(eventRow.payload) : {};
+      executionViews.push({
+        ...safeExecution,
+        actions,
+        event: eventRow ? {
+          type: eventRow.type,
+          resourceType: eventRow.resourceType,
+          resourceId: eventRow.resourceId,
+          correlationId: eventRow.correlationId,
+          sourceId: typeof eventPayload.sourceId === 'string' ? eventPayload.sourceId : null,
+          externalEventType: typeof eventPayload.externalEventType === 'string' ? eventPayload.externalEventType : null,
+          externalEventId: typeof eventPayload.externalEventId === 'string' ? eventPayload.externalEventId : null,
+          subject: typeof eventPayload.subject === 'string' ? eventPayload.subject : null,
+        } : null,
+      });
     }
     const { deletedAt: _deletedAt, ...safeWorkflow } = workflow;
     views.push({
@@ -425,9 +483,15 @@ export async function listWorkflowsState(input: {
     (total, workflow) => total + workflow.executions.filter((item) => item.state === 'failed' || item.state === 'timed_out').length,
     0,
   );
+  const webhookGateway = await listWebhookGatewayState({
+    organizationId: input.organizationId,
+    workspaceId: input.workspaceId,
+    actor: input.actor,
+  });
   return {
     workflows: views,
     notifications,
+    webhookGateway,
     templates: WORKFLOW_TEMPLATES,
     summary: {
       total: views.length,
@@ -468,7 +532,8 @@ export async function createWorkflow(input: {
   const workspace = await organizationForWorkspace(input.workspaceId);
   if (!workspace || workspace.organizationId !== input.organizationId) return { ok: false, status: 404, error: 'Workspace not found.' };
   const validated = await validateForWorkflow({
-    workflow: { projectId }, definition: input.definition,
+    workflow: { organizationId: input.organizationId, workspaceId: input.workspaceId, projectId },
+    definition: input.definition,
     role: input.actor.role, zeroMode: workspace.zeroMode,
   });
   if (!validated.ok) return { ok: false, status: 400, error: validated.error, securityCode: validated.securityCode };
@@ -573,6 +638,7 @@ export async function publishWorkflow(input: {
   const workspace = await organizationForWorkspace(input.workspaceId);
   const validated = await validateForWorkflow({
     workflow, definition, role: input.actor.role, zeroMode: workspace?.zeroMode ?? false,
+    requireEnabledSource: true,
   });
   if (!validated.ok) return { ok: false, status: 400, error: validated.error, securityCode: validated.securityCode };
   const published = await insertVersion({
@@ -604,7 +670,10 @@ export async function rollbackWorkflowVersion(input: {
   const definition = source ? parsedDefinition(source.definition) : null;
   if (!source || !definition) return { ok: false, status: 404, error: 'Published version not found.' };
   const workspace = await organizationForWorkspace(input.workspaceId);
-  const validated = await validateForWorkflow({ workflow, definition, role: input.actor.role, zeroMode: workspace?.zeroMode ?? false });
+  const validated = await validateForWorkflow({
+    workflow, definition, role: input.actor.role, zeroMode: workspace?.zeroMode ?? false,
+    requireEnabledSource: true,
+  });
   if (!validated.ok) return { ok: false, status: 400, error: validated.error };
   const rollback = await insertVersion({
     workflow, definition: validated.definition, kind: 'rollback',
@@ -799,6 +868,7 @@ async function dispatchEvent(row: EventRow): Promise<number> {
     );
     const definition = version ? parsedDefinition(version.definition) : null;
     if (!version || !definition || definition.trigger.type !== row.type) continue;
+    if (definition.trigger.type === 'external.event' && definition.trigger.sourceId !== row.resourceId) continue;
     if (row.sourceWorkflowId === workflow.id) {
       await recordWorkflowSecurityEvent({
         workspaceId: workflow.workspaceId, workflowId: workflow.id,
@@ -817,8 +887,9 @@ async function dispatchEvent(row: EventRow): Promise<number> {
       });
       continue;
     }
-    const validation = validateWorkflowDefinition(definition, {
-      role, projectId: workflow.projectId, zeroMode: workspace.zeroMode,
+    const validation = await validateForWorkflow({
+      workflow, definition, role, zeroMode: workspace.zeroMode,
+      requireEnabledSource: true,
     });
     if (!validation.ok) {
       await recordWorkflowSecurityEvent({
@@ -842,6 +913,21 @@ async function dispatchEvent(row: EventRow): Promise<number> {
     }
   }
   await execute('UPDATE workflow_event SET processedAt = ? WHERE id = ? AND processedAt IS NULL', Date.now(), row.id);
+  if (row.type === 'external.event') {
+    await execute(
+      `UPDATE webhook_delivery SET workflowExecutionsCreated = ?
+        WHERE workflowEventId = ? AND status = 'accepted'`,
+      created, row.id,
+    );
+    if (created > 0 && row.resourceId) {
+      await execute(
+        `UPDATE webhook_source
+            SET workflowExecutionsCreated = workflowExecutionsCreated + ?, updatedAt = ?
+          WHERE organizationId = ? AND workspaceId = ? AND id = ?`,
+        created, Date.now(), row.organizationId, row.workspaceId, row.resourceId,
+      );
+    }
+  }
   return created;
 }
 

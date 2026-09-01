@@ -29,6 +29,7 @@ export const WORKFLOW_TRIGGER_TYPES = [
   'organization.member.invited',
   'organization.member.removed',
   'organization.member.role_changed',
+  'external.event',
   'schedule',
   'manual',
 ] as const;
@@ -99,9 +100,38 @@ export const WORKFLOW_EVENT_PATHS = [
   'event.payload.crashCount',
   'event.payload.failureCount',
   'event.payload.environment',
+  'event.payload.sourceId',
+  'event.payload.externalEventType',
+  'event.payload.externalEventId',
+  'event.payload.subject',
+  'event.payload.category',
+  'event.payload.action',
+  'event.payload.ref',
+  'event.payload.label',
+  'event.payload.count',
+  'event.payload.value',
+  'event.payload.success',
 ] as const;
 
 export type WorkflowEventPath = (typeof WORKFLOW_EVENT_PATHS)[number];
+export const WORKFLOW_EXTERNAL_EVENT_PATHS = [
+  'event.type',
+  'event.resourceId',
+  'event.payload.status',
+  'event.payload.severity',
+  'event.payload.environment',
+  'event.payload.sourceId',
+  'event.payload.externalEventType',
+  'event.payload.externalEventId',
+  'event.payload.subject',
+  'event.payload.category',
+  'event.payload.action',
+  'event.payload.ref',
+  'event.payload.label',
+  'event.payload.count',
+  'event.payload.value',
+  'event.payload.success',
+] as const satisfies readonly WorkflowEventPath[];
 export type WorkflowScalar = string | number | boolean | null;
 
 export type WorkflowCondition = {
@@ -120,7 +150,8 @@ export type WorkflowAction = {
 };
 
 export type WorkflowTrigger =
-  | { type: Exclude<WorkflowTriggerType, 'schedule'> }
+  | { type: Exclude<WorkflowTriggerType, 'schedule' | 'external.event'> }
+  | { type: 'external.event'; sourceId: string }
   | {
       type: 'schedule';
       intervalMinutes?: number;
@@ -166,6 +197,12 @@ const TRIGGERS = new Set<string>(WORKFLOW_TRIGGER_TYPES);
 const ACTIONS = new Set<string>(WORKFLOW_ACTION_TYPES);
 const OPERATORS = new Set<string>(CONDITION_OPERATORS);
 const PATHS = new Set<string>(WORKFLOW_EVENT_PATHS);
+const EXTERNAL_PATHS = new Set<string>(WORKFLOW_EXTERNAL_EVENT_PATHS);
+const EXTERNAL_ONLY_PATHS = new Set<string>([
+  'event.payload.sourceId', 'event.payload.externalEventType', 'event.payload.externalEventId',
+  'event.payload.subject', 'event.payload.category', 'event.payload.action', 'event.payload.ref',
+  'event.payload.label', 'event.payload.count', 'event.payload.value', 'event.payload.success',
+]);
 const SEVERITIES = new Set(['low', 'medium', 'high', 'critical']);
 const MAX_TEXT = 240;
 export const MAX_WORKFLOW_CHAIN_DEPTH = 5;
@@ -183,7 +220,7 @@ const ACTION_KEYS = new Set([
 ]);
 const CONDITION_KEYS = new Set(['path', 'operator', 'value']);
 const ROOT_KEYS = new Set(['trigger', 'conditions', 'actions', 'retry', 'timeoutSeconds', 'concurrency']);
-const TRIGGER_KEYS = new Set(['type', 'intervalMinutes', 'cron']);
+const TRIGGER_KEYS = new Set(['type', 'intervalMinutes', 'cron', 'sourceId']);
 const RETRY_KEYS = new Set(['maxAttempts', 'initialDelaySeconds', 'maximumDelaySeconds']);
 const CONCURRENCY_KEYS = new Set(['workflow', 'workspace']);
 
@@ -271,10 +308,16 @@ function parseTrigger(value: unknown): WorkflowTrigger | null {
   if (!isRecord(value) || !exactKeys(value, TRIGGER_KEYS) || typeof value.type !== 'string' || !TRIGGERS.has(value.type)) {
     return null;
   }
-  if (value.type !== 'schedule') {
-    if ('intervalMinutes' in value || 'cron' in value) return null;
-    return { type: value.type as Exclude<WorkflowTriggerType, 'schedule'> };
+  if (value.type === 'external.event') {
+    if ('intervalMinutes' in value || 'cron' in value ||
+        typeof value.sourceId !== 'string' || !/^whsrc_[a-f0-9]{24}$/.test(value.sourceId)) return null;
+    return { type: 'external.event', sourceId: value.sourceId };
   }
+  if (value.type !== 'schedule') {
+    if ('intervalMinutes' in value || 'cron' in value || 'sourceId' in value) return null;
+    return { type: value.type as Exclude<WorkflowTriggerType, 'schedule' | 'external.event'> };
+  }
+  if ('sourceId' in value) return null;
   const intervalMinutes = value.intervalMinutes === undefined
     ? undefined
     : integer(value.intervalMinutes, 5, 1_440) ?? null;
@@ -361,6 +404,15 @@ export function validateWorkflowDefinition(
   const conditions = value.conditions.map(parseCondition);
   if (conditions.some((item) => item === null)) {
     return { ok: false, error: 'Conditions must use allowlisted event paths and operators.', securityCode: 'workflow-expression-rejected' };
+  }
+  const conditionPaths = (conditions as WorkflowCondition[]).map((condition) => condition.path);
+  if (trigger.type === 'external.event' && conditionPaths.some((path) => !EXTERNAL_PATHS.has(path)) ||
+      trigger.type !== 'external.event' && conditionPaths.some((path) => EXTERNAL_ONLY_PATHS.has(path))) {
+    return {
+      ok: false,
+      error: 'Condition fields must belong to the selected trigger schema.',
+      securityCode: 'workflow-expression-rejected',
+    };
   }
   if (!Array.isArray(value.actions) || value.actions.length < 1 || value.actions.length > 8) {
     return { ok: false, error: 'A workflow needs between 1 and 8 reviewed actions.' };

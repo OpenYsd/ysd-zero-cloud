@@ -13,6 +13,7 @@ import appRuntimeSchema from '../../db/migrations/0009_app_runtime.sql?raw';
 import organizationsSchema from '../../db/migrations/0010_organizations.sql?raw';
 import publicExposureSchema from '../../db/migrations/0011_public_exposure.sql?raw';
 import workflowsSchema from '../../db/migrations/0012_workflows.sql?raw';
+import externalEventGatewaySchema from '../../db/migrations/0013_external_event_gateway.sql?raw';
 
 /**
  * D1 access and schema management.
@@ -36,6 +37,7 @@ const MIGRATIONS: { name: string; sql: string }[] = [
   { name: '0010_organizations', sql: organizationsSchema },
   { name: '0011_public_exposure', sql: publicExposureSchema },
   { name: '0012_workflows', sql: workflowsSchema },
+  { name: '0013_external_event_gateway', sql: externalEventGatewaySchema },
 ];
 
 const LEDGER = `CREATE TABLE IF NOT EXISTS ysd_migration (
@@ -104,6 +106,9 @@ export const WORKSPACE_TABLES = [
   'workflow_security_event',
   'internal_notification',
   'workflow_resource_state',
+  'webhook_source',
+  'webhook_replay_guard',
+  'webhook_delivery',
 ] as const;
 
 export function getDatabase(): D1Database {

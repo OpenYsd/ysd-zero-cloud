@@ -60,6 +60,10 @@ export const RATE_LIMIT_RULES = {
   'node:agent': { limit: 180, windowMs: MINUTE },
   /** The SQL Editor, which is expensive and owner-only. */
   'sql:query': { limit: 30, windowMs: MINUTE },
+  /** One inbound integration source cannot monopolize the shared Worker. */
+  'webhook:source': { limit: 60, windowMs: MINUTE },
+  /** Aggregate workspace ceiling protects D1 even with many enabled sources. */
+  'webhook:workspace': { limit: 240, windowMs: MINUTE },
 } as const satisfies Record<string, RateLimitRule>;
 
 export type RateLimitName = keyof typeof RATE_LIMIT_RULES;

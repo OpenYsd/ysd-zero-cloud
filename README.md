@@ -1,12 +1,13 @@
 # YSD Zero Cloud
 
-YSD Zero Cloud is a zero-cost-first cloud operating system. Version `0.9.0` runs authentication,
+YSD Zero Cloud is a zero-cost-first cloud operating system. Version `0.10.0` runs authentication,
 persistence, security scanning, the cost guard, private-object storage policy, network inventory,
 an outbound-only user-owned compute control plane, a private Node.js App Runtime, local AI
 scheduling, private Minecraft Java server orchestration, organization collaboration, and a
 fail-closed Public App Exposure control plane against Cloudflare Workers and D1. It also includes
 the tenant-isolated YSD Workflows engine: immutable published versions, bounded D1 execution,
-internal notifications, audit history, and one global free-plan scheduler tick.
+internal notifications, audit history, one global free-plan scheduler tick, and a signed inbound
+External Event Gateway with workspace-scoped webhook sources.
 
 **Live:** <https://ysd-zero-cloud.ysd-zero-cloud.workers.dev>
 
@@ -38,7 +39,7 @@ deployed Worker's explicit zero-cost configuration.
 | YSD AI Compute    | Approved local models, safe scheduling, cancellation, results, and metrics   |
 | App Runtime       | Private Node.js deploy, health, logs, metrics, rollback, and artifact guards  |
 | Game Servers      | Private Minecraft Java lifecycle, players, backups, logs, and resource guards|
-| Workflows         | D1 triggers, conditions, guarded actions, versions, executions, and notices  |
+| Workflows         | D1 workflows plus signed, source-bound External Event integrations           |
 
 Storage, Networking, Nodes, App Runtime, YSD AI Compute, and Game Servers are live surfaces.
 The current Cloudflare account returns `10042: Please enable R2`, so Storage honestly renders the
@@ -160,6 +161,34 @@ YSD Shield checks unexpected exposure, unhealthy/revoked routes, missing TLS,
 unverified or conflicting domains, open-proxy/SSRF attempts, origin leaks,
 route volume, disabled rate limits, domain churn, low-privilege changes,
 connector anomalies, orphan routes, and paid-provider bypass attempts.
+
+## External Event Gateway
+
+Phase 10 adds organization/workspace-scoped webhook sources on the existing Worker and D1. An
+owner or admin creates a source and receives its secret once. D1 stores an AES-GCM envelope and a
+non-reversible fingerprint; Database Studio masks both fields. Rotation replaces the credential,
+and disabling or archiving the source stops ingress server-side.
+
+Inbound v1 requests use `POST /api/webhooks/inbound/<source-id>`, `Content-Type: application/json`,
+and a body no larger than 32 KiB. Four headers bind the request:
+
+- `x-ysd-timestamp`: current Unix time in seconds, within five minutes.
+- `x-ysd-event-id`: a stable source event identifier.
+- `x-ysd-nonce`: a new 16–128 character URL-safe random value.
+- `x-ysd-signature`: `v1=` plus the lowercase HMAC-SHA256 hex digest of
+  `timestamp.eventId.nonce.rawJsonBody`.
+
+The JSON root contains `event`, optional `subject`, and optional `data`. `data` accepts only the
+bounded scalar keys `status`, `severity`, `category`, `action`, `environment`, `ref`, `label`,
+`count`, `value`, and `success`. URLs, internal addresses, commands, shells, scripts, providers,
+secret-shaped values, nested objects, and unknown fields fail closed. D1 enforces single-use event
+IDs and nonce digests per source, while separate source and workspace rate limits protect the
+shared Worker. Accepted data becomes a server-trusted `external.event` with a correlation ID; the
+gateway stores only safe delivery metadata and never stores the raw body, signature, or nonce.
+
+There is deliberately no generic outbound HTTP, JavaScript, shell, Queue, Durable Object, or
+Cloudflare Workflows action. Phase 10 reuses the existing Worker, D1 database, Workflow engine, and
+one-minute Cron Trigger, so the projected incremental monthly cost remains `$0.00` under Zero Mode.
 
 ## Compute Nodes
 
