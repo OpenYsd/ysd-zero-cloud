@@ -31,6 +31,7 @@ import {
   Plus,
   Workflow,
   Siren,
+  UserRound,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Switch } from '@/components/ui/switch';
@@ -79,6 +80,7 @@ const navigation = [
   { label: 'Workflows', href: '/workflows', icon: Workflow, permission: 'workflow.read' },
   { label: 'Incidents', href: '/incidents', icon: Siren, permission: 'incident.read' },
   { label: 'Usage', href: '/usage', icon: Gauge, permission: 'usage.read' },
+  { label: 'Account', href: '/account', icon: UserRound, permission: 'session.read-own' },
   { label: 'YSD Shield', href: '/shield', icon: ShieldCheck, permission: 'shield.read' },
   { label: 'Members', href: '/members', icon: Users, permission: 'member.read' },
   { label: 'Invitations', href: '/invitations', icon: UserPlus, permission: 'invitation.read' },
@@ -355,6 +357,7 @@ function CloudShellFrame({
               </span>
             </div>
             <Switch
+              id="zero-mode-toggle"
               checked={zeroMode.enabled}
               onCheckedChange={zeroMode.setEnabled}
               disabled={zeroMode.pending || !user.canUpdateWorkspace}
@@ -443,10 +446,36 @@ function CloudShellFrame({
   );
 }
 
+/**
+ * How the account is named in the shell.
+ *
+ * An email address is a credential-adjacent identifier, not an identity: it is
+ * long, it truncates badly, and it is on screen for anyone standing behind the
+ * operator. The display name is used instead, falling back to the local part of
+ * the address only when no name has been set. The full address stays available
+ * in Account settings.
+ */
+function displayName(user: { name: string; email: string }): string {
+  const name = user.name.trim();
+  if (name) return name;
+  const local = user.email.split('@')[0] ?? '';
+  return local || 'Account';
+}
+
 function initials(name: string, email: string): string {
   const source = name.trim() || email;
   const parts = source.split(/[\s@._-]+/).filter(Boolean);
   return `${parts[0]?.[0] ?? 'Y'}${parts[1]?.[0] ?? ''}`.toUpperCase();
+}
+
+/** Best-effort: a failure here must never block signing out. */
+async function clearStoredContext(): Promise<void> {
+  try {
+    await fetch('/api/context', { method: 'DELETE' });
+  } catch {
+    // Ignored on purpose — the auth cookie still goes, and a stale preference
+    // is now self-healing on the server anyway.
+  }
 }
 
 function UserMenu({ user }: { user: ShellUser }) {
@@ -455,6 +484,9 @@ function UserMenu({ user }: { user: ShellUser }) {
   async function handleSignOut() {
     setPending(true);
     try {
+      // Clear the context preference before the auth cookie goes, so a stale
+      // organization cannot be inherited by the next account on this browser.
+      await clearStoredContext();
       await signOut();
       // Full document load for the same reason the sign-in redirect uses one:
       // the root layout must re-render without a session.
@@ -472,6 +504,7 @@ function UserMenu({ user }: { user: ShellUser }) {
     setPending(true);
     try {
       await authClient.revokeSessions();
+      await clearStoredContext();
       window.location.assign('/sign-in');
     } finally {
       setPending(false);
@@ -484,8 +517,11 @@ function UserMenu({ user }: { user: ShellUser }) {
         <span className="grid size-6 place-items-center rounded-md bg-[#7569ff] text-[10px] font-bold text-white">
           {initials(user.name, user.email)}
         </span>
-        <span className="hidden max-w-[160px] truncate text-xs text-white/70 sm:inline">
-          {user.email}
+        <span
+          className="hidden max-w-[160px] truncate text-xs text-white/70 sm:inline"
+          title={displayName(user)}
+        >
+          {displayName(user)}
         </span>
       </div>
       <Button

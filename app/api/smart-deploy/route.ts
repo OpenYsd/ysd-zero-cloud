@@ -1,4 +1,5 @@
 import { APP_RUNTIME_LIMITS, type AppEnvironment } from '@/lib/app-runtime';
+import { recordEvidence } from '@/lib/server/audit';
 import { planDeployment } from '@/lib/server/deployments';
 import { recordAppRuntimeSecurityEvent } from '@/lib/server/app-runtime-control';
 import { readBoundedJson } from '@/lib/server/node-request';
@@ -82,6 +83,21 @@ export async function POST(request: Request): Promise<Response> {
       { status: result.status },
     );
   }
+  await recordEvidence({
+    action: 'deployment.create',
+    organizationId: auth.session.organization.id,
+    workspaceId: auth.session.workspace.id,
+    actorType: auth.session.principal,
+    actorId: auth.session.actor.userId,
+    resourceId: result.deployment?.id ?? null,
+    outcome: 'success',
+    request,
+    metadata: {
+      environment: environment(body.environment),
+      branch: branch ?? 'default',
+      nodeId,
+    },
+  });
   return Response.json(
     { plan: result.plan, deployment: result.deployment, duplicate: result.duplicate, zeroMode: true },
     { status: result.duplicate ? 200 : 202 },

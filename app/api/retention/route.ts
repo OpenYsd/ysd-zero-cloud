@@ -19,6 +19,9 @@ export async function GET(request: Request): Promise<Response> {
     organizationId: auth.session.organization.id,
     projectIds: auth.session.actor.projectIds,
     includeDatabaseBytes: true,
+    // Interactive request: never walk 67 tables. The exact row total comes
+    // from the snapshot the scheduled collector already captured.
+    databaseRows: 'summary',
   });
 
   const state = await listDataLifecycleState({

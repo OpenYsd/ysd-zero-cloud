@@ -1,4 +1,5 @@
 import { can } from '@/lib/roles';
+import { recordEvidence, statementFingerprint } from '@/lib/server/audit';
 import { writeLog } from '@/lib/server/logs';
 import { enforceRateLimit } from '@/lib/server/rate-limit';
 import { requireApiSession } from '@/lib/server/session';
@@ -31,6 +32,16 @@ export async function POST(request: Request): Promise<Response> {
       source: 'database',
       message: 'SQL Editor refused: organization isolation requires Database Studio',
       actor: user.email,
+    });
+    await recordEvidence({
+      action: 'database.query.execute',
+      organizationId: auth.session.organization.id,
+      workspaceId: workspace.id,
+      actorType: auth.session.principal,
+      actorId: actor.userId,
+      outcome: 'denied',
+      request,
+      metadata: { reason: 'sql-editor-closed' },
     });
     return Response.json(
       {
@@ -70,6 +81,20 @@ export async function POST(request: Request): Promise<Response> {
         message: `Statement blocked · ${result.analysis.reason}`,
         actor: user.email,
       });
+      await recordEvidence({
+        action: 'database.query.execute',
+        organizationId: auth.session.organization.id,
+        workspaceId: workspace.id,
+        actorType: auth.session.principal,
+        actorId: actor.userId,
+        outcome: 'denied',
+        request,
+        metadata: {
+          kind: result.analysis.kind,
+          statementHash: await statementFingerprint(sql),
+          reason: 'guard-blocked',
+        },
+      });
       return Response.json(result, { status: 422 });
     }
 
@@ -83,10 +108,38 @@ export async function POST(request: Request): Promise<Response> {
       });
     }
 
+    // The statement itself is never stored: it can embed literal credentials.
+    // A truncated digest still correlates repeat executions.
+    await recordEvidence({
+      action: 'database.query.execute',
+      organizationId: auth.session.organization.id,
+      workspaceId: workspace.id,
+      actorType: auth.session.principal,
+      actorId: actor.userId,
+      outcome: 'success',
+      request,
+      metadata: {
+        kind: result.analysis.kind,
+        verb: result.analysis.verb,
+        statementHash: await statementFingerprint(sql),
+        rowsWritten: result.rowsWritten,
+        tables: result.analysis.referencedTables.join(',').slice(0, 240),
+      },
+    });
     return Response.json(result);
   } catch (error) {
     // A syntax error is the operator's, not the server's: report it as a
     // failed statement rather than a 500.
+    await recordEvidence({
+      action: 'database.query.execute',
+      organizationId: auth.session.organization.id,
+      workspaceId: workspace.id,
+      actorType: auth.session.principal,
+      actorId: actor.userId,
+      outcome: 'failed',
+      request,
+      metadata: { statementHash: await statementFingerprint(sql), reason: 'statement-error' },
+    });
     return Response.json(
       { error: error instanceof Error ? error.message : 'The statement could not be run.' },
       { status: 422 },

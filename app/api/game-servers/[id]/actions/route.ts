@@ -1,4 +1,5 @@
 import { queueGameServerRequest } from '@/lib/server/game-servers';
+import { recordEvidence } from '@/lib/server/audit';
 import { readBoundedJson } from '@/lib/server/node-request';
 import { enforceRateLimit } from '@/lib/server/rate-limit';
 import { requireApiSession } from '@/lib/server/session';
@@ -27,5 +28,21 @@ export async function POST(
   if (!result.ok) {
     return Response.json({ error: result.error }, { status: result.status });
   }
+  await recordEvidence({
+    action: 'game-server.action',
+    organizationId: auth.session.organization.id,
+    workspaceId: auth.session.workspace.id,
+    actorType: auth.session.principal,
+    actorId: auth.session.actor.userId,
+    resourceId: id,
+    outcome: 'success',
+    request,
+    metadata: {
+      operation:
+        typeof (parsed.body as { operation?: unknown }).operation === 'string'
+          ? ((parsed.body as { operation: string }).operation)
+          : 'unknown',
+    },
+  });
   return Response.json(result, { status: result.created ? 201 : 200 });
 }

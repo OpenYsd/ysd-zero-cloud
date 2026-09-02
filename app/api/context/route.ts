@@ -45,3 +45,24 @@ export async function POST(request: Request): Promise<Response> {
   response.headers.append('Set-Cookie', `ysd_workspace=${encodeURIComponent(access.workspace.id)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000${secure}`);
   return response;
 }
+
+/**
+ * Clears the stored organization and workspace preferences.
+ *
+ * Signing out drops the auth cookie but previously left `ysd_organization` and
+ * `ysd_workspace` behind for a year, so the next account to sign in on this
+ * browser inherited someone else's context preference. This carries no session
+ * requirement on purpose: it reveals nothing, touches no data, and must still
+ * work in the moment after the auth cookie has already gone.
+ */
+export async function DELETE(request: Request): Promise<Response> {
+  const response = Response.json({ cleared: true });
+  const secure = new URL(request.url).protocol === 'https:' ? '; Secure' : '';
+  for (const name of ['ysd_organization', 'ysd_workspace']) {
+    response.headers.append(
+      'Set-Cookie',
+      `${name}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${secure}`,
+    );
+  }
+  return response;
+}

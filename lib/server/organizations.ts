@@ -1,4 +1,5 @@
 import { createId, createOpaqueToken, sha256Hex } from '@/lib/crypto';
+import { selectMembership, selectWorkspace } from '@/lib/context-fallback';
 import type {
   Organization,
   OrganizationInvitation,
@@ -43,6 +44,13 @@ export type OrganizationAccess = {
   workspace: Workspace;
   membership: MembershipRow & { role: Role };
   projectIds: string[] | null;
+  /**
+   * True when a stored `ysd_organization` / `ysd_workspace` preference could
+   * not be honoured and a valid membership was chosen instead. Callers that
+   * own a response use this to rewrite the stale cookie; resolution itself
+   * stays pure.
+   */
+  repairedContext: boolean;
 };
 
 const MAX_ORGANIZATIONS_PER_USER = 8;
@@ -218,6 +226,8 @@ export async function createOrganization(input: {
       suspendedAt: null,
     },
     projectIds: null,
+    // A brand-new organization is never a repaired preference.
+    repairedContext: false,
   };
 }
 
@@ -298,18 +308,28 @@ export async function resolveOrganizationAccess(input: {
     if (anyMembership > 0) return null;
     return createOrganization(input);
   }
-  const selectedMembership = input.organizationId
-    ? memberships.find((row) => row.organizationId === input.organizationId)
-    : memberships[0];
+  // A stored preference is exactly that: a preference. If it no longer names
+  // an organization this user can reach, fall back to a real membership rather
+  // than reporting "no session" — a valid login must never be turned into a
+  // sign-out by a year-old cookie. The candidate list is already restricted to
+  // this user's active memberships, so the fallback cannot cross a tenant.
+  const membershipChoice = selectMembership(memberships, input.organizationId);
+  const selectedMembership = membershipChoice.selected;
   if (!selectedMembership) return null;
+  const organizationRepaired = membershipChoice.repaired;
   const role = normalizeRole(selectedMembership.role);
   const organization = await getOrganization(selectedMembership.organizationId);
   if (!organization || organization.status !== 'active') return null;
   const workspaces = await accessibleWorkspaces(organization.id, input.userId, role);
-  const workspace = input.workspaceId
-    ? workspaces.find((item) => item.id === input.workspaceId)
-    : workspaces[0];
+  // Same rule for the workspace preference. `accessibleWorkspaces` is already
+  // scoped to the resolved organization and this user, so the first entry is a
+  // safe landing place and can never belong to another organization.
+  const workspaceChoice = selectWorkspace(workspaces, input.workspaceId);
+  const workspace = workspaceChoice.selected;
+  // Only genuinely empty access reaches here: the organization has no workspace
+  // this member may enter. That is a real dead end, not a stale preference.
   if (!workspace) return null;
+  const workspaceRepaired = workspaceChoice.repaired;
   const workspaceMembership = role === 'owner' || role === 'admin'
     ? null
     : await queryOne<{ projectScope: string }>(
@@ -338,6 +358,7 @@ export async function resolveOrganizationAccess(input: {
       role === 'owner' || role === 'admin' || workspaceMembership?.projectScope !== 'restricted'
         ? null
         : projects.map((row) => row.projectId),
+    repairedContext: organizationRepaired || workspaceRepaired,
   };
 }
 

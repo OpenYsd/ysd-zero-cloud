@@ -3,7 +3,7 @@ import {
   isRetentionDataClass,
   parseRetentionMutation,
 } from '@/lib/retention';
-import { recordAudit, requestAuditContext } from '@/lib/server/audit';
+import { recordAudit, recordEvidence, requestAuditContext, statementFingerprint } from '@/lib/server/audit';
 import { readBoundedJson } from '@/lib/server/node-request';
 import { enforceRateLimit } from '@/lib/server/rate-limit';
 import { mutateRetentionPolicy } from '@/lib/server/retention';
@@ -41,6 +41,22 @@ export async function PATCH(
 
   const { id } = await params;
   if (!isRetentionDataClass(id)) {
+    // Enumerating class names is a probe and used to be invisible. The
+    // identifier is hashed rather than stored: it is attacker-supplied text
+    // and must never be replayed into the evidence trail verbatim.
+    await recordEvidence({
+      action: 'retention.unknown-class.denied',
+      organizationId: auth.session.organization.id,
+      workspaceId: auth.session.workspace.id,
+      actorType: auth.session.principal,
+      actorId: auth.session.actor.userId,
+      outcome: 'denied',
+      request,
+      metadata: {
+        classHash: await statementFingerprint(id),
+        classLength: id.length,
+      },
+    });
     return Response.json(
       { error: 'Unknown retention data class.' },
       { status: 404, headers: limited.headers },
@@ -59,6 +75,7 @@ export async function PATCH(
         actor: auth.session.actor,
         mutation: parsed.mutation,
         now: Date.now(),
+        request,
       })
     : {
         ok: false as const,

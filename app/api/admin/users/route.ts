@@ -1,4 +1,5 @@
 import { canChangeRole, canSuspend, isRole } from '@/lib/roles';
+import { recordEvidence } from '@/lib/server/audit';
 import { writeLog } from '@/lib/server/logs';
 import { enforceRateLimit } from '@/lib/server/rate-limit';
 import {
@@ -98,5 +99,19 @@ export async function PATCH(request: Request): Promise<Response> {
     });
   }
 
+  await recordEvidence({
+    action: 'admin.user.update',
+    organizationId: auth.session.organization.id,
+    workspaceId: workspace.id,
+    actorType: auth.session.principal,
+    actorId: actor.userId,
+    resourceId: userId,
+    outcome: 'success',
+    request,
+    metadata: {
+      operation: typeof body.suspended === 'boolean' ? 'suspension' : 'role',
+      role: typeof body.role === 'string' ? body.role : target.role,
+    },
+  });
   return Response.json({ user: await getManagedUser(userId) });
 }

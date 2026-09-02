@@ -1,4 +1,5 @@
 import { STORAGE_LIMITS } from '@/lib/storage';
+import { recordEvidence } from '@/lib/server/audit';
 import { enforceRateLimit } from '@/lib/server/rate-limit';
 import { requireApiSession } from '@/lib/server/session';
 import { listStorage, uploadObject } from '@/lib/server/storage';
@@ -63,5 +64,16 @@ export async function POST(request: Request): Promise<Response> {
   });
   if (!result.ok)
     return Response.json({ error: result.error }, { status: result.status });
+  await recordEvidence({
+    action: 'storage.write',
+    organizationId: auth.session.organization.id,
+    workspaceId: auth.session.workspace.id,
+    actorType: auth.session.principal,
+    actorId: auth.session.actor.userId,
+    resourceId: result.object.id,
+    outcome: 'success',
+    request,
+    metadata: { bytes: result.object.size },
+  });
   return Response.json({ object: result.object }, { status: 201 });
 }

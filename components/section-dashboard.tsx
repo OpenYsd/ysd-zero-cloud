@@ -115,6 +115,11 @@ export const SECTION_META: Record<
     eyebrow: 'Incident Response',
     description: 'Deduplicated incidents, assignment, response timelines, and MTTA/MTTR.',
   },
+  account: {
+    title: 'Account',
+    eyebrow: 'Profile & Security',
+    description: 'Your display name, sign-in address, password, and active sessions.',
+  },
   usage: {
     title: 'Usage',
     eyebrow: 'Limits',

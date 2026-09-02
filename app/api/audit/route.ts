@@ -29,7 +29,7 @@ export async function GET(request: Request): Promise<Response> {
   const format = url.searchParams.get('format');
   if (format === 'csv') {
     if (!can(auth.session.actor, 'audit.export')) return Response.json({ error: 'Export not permitted.' }, { status: 403 });
-    const columns = ['id', 'createdAt', 'workspaceId', 'actorType', 'actorId', 'action', 'resourceType', 'resourceId', 'outcome', 'ipAddress', 'userAgent', 'metadata'] as const;
+    const columns = ['sequence', 'id', 'createdAt', 'workspaceId', 'actorType', 'actorId', 'action', 'resourceType', 'resourceId', 'outcome', 'ipAddress', 'userAgent', 'metadata'] as const;
     const csv = [columns.join(','), ...events.map((event) => columns.map((column) => csvCell(event[column])).join(','))].join('\n');
     return new Response(csv, { headers: { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': 'attachment; filename="ysd-audit.csv"' } });
   }

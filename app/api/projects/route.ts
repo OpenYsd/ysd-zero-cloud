@@ -1,4 +1,5 @@
 import { createProject, listProjects } from '@/lib/server/projects';
+import { recordEvidence } from '@/lib/server/audit';
 import { enforceRateLimit } from '@/lib/server/rate-limit';
 import { requireApiSession } from '@/lib/server/session';
 
@@ -34,5 +35,20 @@ export async function POST(request: Request): Promise<Response> {
   });
 
   if (!result.ok) return Response.json({ error: result.error }, { status: result.status });
+  await recordEvidence({
+    action: 'project.create',
+    organizationId: auth.session.organization.id,
+    workspaceId: auth.session.workspace.id,
+    actorType: auth.session.principal,
+    actorId: auth.session.actor.userId,
+    resourceId: result.project.id,
+    outcome: 'success',
+    request,
+    metadata: {
+      framework: result.project.framework,
+      environment: result.project.environment,
+      region: result.project.region,
+    },
+  });
   return Response.json({ project: result.project }, { status: 201 });
 }

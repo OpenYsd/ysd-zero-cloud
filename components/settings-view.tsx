@@ -218,6 +218,7 @@ function SettingToggle({
         </p>
       </div>
       <Switch
+        id={`setting-toggle-${toggle.setting}`}
         checked={value}
         onCheckedChange={change}
         disabled={busy}

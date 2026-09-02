@@ -1,0 +1,28 @@
+-- P0 stabilization: Account experience.
+--
+-- One nullable column, and nothing else.
+--
+-- The display name needed no schema change at all: Better Auth's `user` table
+-- already carries `name`, so the Account page edits the field that exists
+-- rather than introducing a parallel one. `emailVerified` already exists too,
+-- which is what lets the UI tell the truth about an unverified address instead
+-- of inventing a verification state.
+--
+-- `passwordChangedAt` is the only genuinely missing fact. Account Security
+-- cannot honestly answer "when did I last change this?" without it, and a
+-- credential's age is exactly the kind of thing an operator checks after an
+-- incident.
+--
+-- Safety:
+--   * No password or hash is read, rewritten, or moved. Credentials live in
+--     `account.password` and this migration does not touch that table.
+--   * No session is deleted. Signing in again after an upgrade is not required.
+--   * `ALTER TABLE ... ADD COLUMN` is the convention this project already uses
+--     (0009 adds ten columns the same way), and the lazy runner treats
+--     "duplicate column name" as already-applied, so a replay on a cold isolate
+--     is a no-op rather than a failure.
+--   * The column is nullable on purpose. NULL means "never changed since this
+--     column existed", which is honest; a backfilled timestamp would be a
+--     fabricated claim about when a credential was last rotated.
+
+ALTER TABLE "user" ADD COLUMN passwordChangedAt INTEGER;

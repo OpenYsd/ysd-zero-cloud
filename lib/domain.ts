@@ -737,6 +737,35 @@ export type IncidentState = {
   projectedMonthlyCost: 0;
 };
 
+export type AccountSessionSummary = {
+  id: string;
+  createdAt: string;
+  updatedAt: string;
+  expiresAt: string;
+  ipAddress: string | null;
+  userAgent: string | null;
+};
+
+export type AccountProfile = {
+  /** What the shell shows. Never the full address. */
+  displayName: string;
+  name: string;
+  email: string;
+  /** Reported exactly as stored; this deployment has no sending domain. */
+  emailVerified: boolean;
+  initials: string;
+  role: import('./roles.ts').Role;
+  organizationName: string;
+  workspaceName: string;
+  suspended: boolean;
+  createdAt: number | null;
+  /** `null` means "not since this was recorded", not "never changed". */
+  passwordChangedAt: number | null;
+  /** No token is ever included. */
+  sessions: AccountSessionSummary[];
+  emailChange: { available: boolean; reason: string };
+};
+
 export type RetentionPolicyView = {
   id: string;
   dataClass: import('./retention.ts').RetentionDataClass;
@@ -865,6 +894,12 @@ export type ServiceAccount = {
 
 export type AuditEvent = {
   id: string;
+  /**
+   * Per-organization monotonic position, assigned by D1 in migration 0016.
+   * `null` only for a row whose numbering could not be read; a gap in this
+   * run of integers is what makes a removed audit row detectable.
+   */
+  sequence: number | null;
   workspaceId: string | null;
   actorType: 'user' | 'service_account' | 'system';
   actorId: string;
@@ -943,6 +978,7 @@ export const SECTIONS = [
   'service-accounts',
   'audit',
   'sessions',
+  'account',
   'admin',
   'settings',
 ] as const;
@@ -967,6 +1003,7 @@ export const LIVE_SECTIONS: readonly Section[] = [
   'service-accounts',
   'audit',
   'sessions',
+  'account',
   'admin',
   'settings',
   'storage',

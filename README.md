@@ -1,20 +1,38 @@
 # YSD Zero Cloud
 
-YSD Zero Cloud is a zero-cost-first cloud operating system. Production version `0.11.0` runs authentication,
+YSD Zero Cloud is a zero-cost-first cloud operating system. Production runs `0.13.2` today: authentication,
 persistence, security scanning, the cost guard, private-object storage policy, network inventory,
 an outbound-only user-owned compute control plane, a private Node.js App Runtime, local AI
 scheduling, private Minecraft Java server orchestration, organization collaboration, and a
 fail-closed Public App Exposure control plane against Cloudflare Workers and D1. It also includes
 the tenant-isolated YSD Workflows engine: immutable published versions, bounded D1 execution,
 internal notifications, audit history, one global free-plan scheduler tick, and a signed inbound
-External Event Gateway with workspace-scoped webhook sources, and the Operations Center.
+External Event Gateway with workspace-scoped webhook sources, the Operations Center, and the Data
+Lifecycle & Capacity Guard.
 
-The current source tree targets `0.12.1`, a hotfix over the live `0.12.0` Data Lifecycle & Capacity
-Guard described below. It changes no schema and no retention behaviour: it restores the two
-`retention_policy_class_floor_*` guards to the Shield tenant-guard inventory, which had been counted
-but not listed, so a scan reported `organization-tenant-guards-missing` even though every guard was
-present and enforcing in D1. The hotfix is locally verified but is **not live** until its Worker
-release receives explicit Production approval.
+`0.13.2` is the deployed P0 stabilization release. It is **not a new phase**: it adds no feature
+and no schema beyond the account column in `0017`. It fixes defects that were proven in
+production, the first two of which are:
+
+* **A valid login could bounce back to the sign-in page for ever.** The `ysd_organization` and
+  `ysd_workspace` preferences are written for a year and are `HttpOnly`, so a user cannot clear them.
+  If one later named an organization or workspace the account could no longer reach, context
+  resolution returned "no access", which the session layer reported as "not signed in". The
+  preference is now treated as a preference: an unreachable one is ignored in favour of a real
+  membership, chosen only from the already tenant-scoped candidate list, so the fallback can never
+  cross an organization. Signing out now clears both cookies as well.
+* **The page sign-in lands on was walking the entire database.** `listTables` issues a
+  `PRAGMA table_info` and a `SELECT COUNT(*)` per table — with 67 tables in production that is 135
+  sequential D1 round-trips, and it ran on the dashboard, on Usage, and again on the capacity API.
+  Interactive pages now read the exact row total from the Phase 12 `usage_snapshot` the scheduled
+  collector already captured, plus one count of tables. The full walk still exists, but only for the
+  cron collector and for Database Studio, which genuinely needs it. Nothing is estimated: with no
+  snapshot yet, the metric reports as unmeasured rather than inventing a number.
+
+It also restores the Account and Profile page, changes a password through Better Auth while
+keeping the browser that made the change signed in, removes a hydration mismatch by giving every
+switch a fixed DOM id, fixes an `/audit` render crash caused by the one remaining `next/link`
+import, and states in the Audit table what a position is and what a missing one means.
 
 **Live:** <https://ysd-zero-cloud.ysd-zero-cloud.workers.dev>
 
@@ -253,6 +271,58 @@ archive or generic export executor: it adds no HTTP action, Queue, Durable Objec
 R2 bucket, Analytics Engine dataset, Worker, D1 database, or paid binding. It reuses the same Worker,
 D1, and single global Cron Trigger, so projected incremental monthly cost remains `$0.00` under Zero
 Mode.
+
+## Audit Completeness & Evidence Integrity (Phase 13 pre-deploy)
+
+The platform writes two kinds of record, and Phase 13 makes the distinction explicit rather than
+incidental.
+
+**Evidence** goes to `audit_event`. It is append-only at the database — migration 0010 aborts every
+UPDATE and DELETE — it carries actor identity, outcome, address, and user agent, it is exportable as
+CSV or JSON, and it is never eligible for retention.
+
+**Telemetry** goes to `log_event`. It is the readable operational detail behind the Logs surface,
+and it is deliberately prunable by the Phase 12 `platform-logs` retention class.
+
+Before this phase several of the highest-impact operations existed only as telemetry: secret
+creation and deletion, deployment rollback and stop, node revocation, storage deletion, project
+deletion, game-server lifecycle actions, AI job runs, workspace settings changes, admin user
+changes, and raw SQL Editor execution. Enabling a supported retention policy would therefore have
+erased the only record of them. Each is now dual-written: telemetry keeps its message, and
+`audit_event` keeps the proof. `lib/audit-actions.ts` is the reviewed catalog, and a test asserts
+every entry is actually recorded by the module it names, so the catalog and the code cannot drift.
+
+**What is never recorded.** Secret material is absent by construction: an audit record for a secret
+carries the environment and scope, never the name's value, the plaintext, the ciphertext, or the
+fingerprint. The SQL Editor records that a statement ran, by whom, and with what outcome, plus a
+truncated SHA-256 of the statement — never the statement itself, which can embed literal
+credentials. Denied and failed attempts are recorded too, including the refusal that keeps the SQL
+Editor closed to every role.
+
+**Gap detection.** Append-only proves no row was altered; it cannot prove none was removed beneath
+the triggers, because nothing knew how many rows there should be. Migration 0016 adds
+`audit_sequence`, a per-organization monotonic numbering assigned entirely by a D1 trigger — the
+application never supplies, chooses, or can influence a value. It is a side table rather than a
+column precisely because backfilling a column would have required an UPDATE that the append-only
+trigger forbids. Two tables also detect more: a removed audit row leaves orphaned numbering, and
+removed numbering leaves a hole in the run of integers. Shield reports either, and reports a missing
+record as critical.
+
+**Previously silent refusals.** Two paths returned an error and left no trace. A retention revision
+conflict now records `retention.change.conflict` before its 409, so a client repeatedly losing
+concurrency races is visible. An unknown data-class probe now records
+`retention.unknown-class.denied` before its 404, with the supplied identifier hashed rather than
+replayed into the trail.
+
+**Failure semantics.** Evidence for a `critical` action is not best-effort: if the record cannot be
+written the request fails rather than quietly succeeding, because an unprovable privileged action
+should surface. Non-critical evidence and all telemetry stay best-effort so they cannot break a
+request. The mutation may already have applied when a critical write fails; a pre-authorisation
+record would be needed to close that window and is deliberately out of scope here.
+
+**Zero Mode.** One table, one trigger set, and two indexes. No new binding, no schema change to any
+existing table, no queue, no external log shipping, and no second database. Projected incremental
+monthly cost remains `$0.00`.
 
 ## Compute Nodes
 

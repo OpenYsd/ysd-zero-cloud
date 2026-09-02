@@ -30,7 +30,7 @@ import {
   type RetentionRunStatus,
 } from '@/lib/retention';
 import type { Actor } from '@/lib/roles';
-import { recordAudit } from './audit';
+import { recordAudit, recordEvidence } from './audit';
 import { execute, query, queryOne } from './db';
 import { createOrAggregateIncident } from './incidents';
 import { collectUsageReadings } from './usage';
@@ -426,6 +426,8 @@ export async function mutateRetentionPolicy(input: {
   actor: Actor;
   mutation: RetentionMutation;
   now: number;
+  /** Present for API callers so evidence carries address and user agent. */
+  request?: Request;
 }): Promise<MutationResult> {
   if (!canManageRetention(input.actor)) {
     return {
@@ -461,6 +463,24 @@ export async function mutateRetentionPolicy(input: {
     };
   }
   if (policy.revision !== input.mutation.expectedRevision) {
+    // A conflict used to return 409 and leave no trace, so a client
+    // repeatedly losing concurrency races was invisible to an auditor.
+    await recordEvidence({
+      action: 'retention.change.conflict',
+      organizationId: input.organizationId,
+      workspaceId: input.workspaceId,
+      actorType: 'user',
+      actorId: input.actor.userId,
+      resourceId: policy.id,
+      outcome: 'denied',
+      request: input.request,
+      metadata: {
+        dataClass: policy.dataClass,
+        operation: input.mutation.operation,
+        expectedRevision: input.mutation.expectedRevision,
+        currentRevision: policy.revision,
+      },
+    });
     return {
       ok: false,
       status: 409,
@@ -860,6 +880,9 @@ export async function captureUsageSnapshot(input: {
     organizationId: input.organizationId,
     projectIds: null,
     includeDatabaseBytes: false,
+    // The snapshot is the exact measurement every cheap reader later trusts,
+    // so this is the one caller that walks the tables — off the request path.
+    databaseRows: 'inventory',
   });
 
   const metrics: Partial<Record<UsageMetricId, number>> = {};

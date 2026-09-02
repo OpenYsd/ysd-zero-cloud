@@ -4,15 +4,43 @@ import { Switch as SwitchPrimitive } from '@base-ui/react/switch';
 
 import { cn } from '@/lib/utils';
 
+/**
+ * Switch with a caller-supplied, deterministic DOM id.
+ *
+ * `id` is required, and that is the point. Base UI's `SwitchRoot` gives its root
+ * element `base-ui-${React.useId()}` and offers no way to override it: the `id`
+ * prop is consumed for the hidden input instead, and with the default
+ * `nativeButton={false}` the root always receives the generated value. React's
+ * `useId` encodes a component's position in the tree, and under this framework's
+ * RSC setup the server tree and the hydrating client tree are not the same
+ * shape — server components are real components during the server render and
+ * already-resolved output on the client. The two sides therefore computed
+ * different ids for the same control, and React reported a hydration mismatch
+ * on every authenticated page load, which it explicitly does not patch up.
+ *
+ * Pinning the id removes the nondeterminism rather than hiding it: no
+ * `suppressHydrationWarning` anywhere, so a genuine mismatch would still be
+ * reported. The root id is supplied through `render`, the only channel Base UI
+ * leaves open for it, and the hidden input takes `${id}-control` through the
+ * `id` prop so the two elements stay distinct.
+ *
+ * Requiring the prop is what stops this returning: a new Switch does not
+ * type-check until it is given a stable id.
+ */
 function Switch({
   className,
   size = 'default',
+  id,
   ...props
-}: SwitchPrimitive.Root.Props & {
+}: Omit<SwitchPrimitive.Root.Props, 'id' | 'render'> & {
   size?: 'sm' | 'default';
+  /** Stable across server and client, and unique within the page. */
+  id: string;
 }) {
   return (
     <SwitchPrimitive.Root
+      render={<span id={id} />}
+      id={`${id}-control`}
       data-slot="switch"
       data-size={size}
       className={cn(

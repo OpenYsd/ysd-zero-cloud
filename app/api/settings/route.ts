@@ -1,4 +1,5 @@
 import { writeLog } from '@/lib/server/logs';
+import { recordEvidence } from '@/lib/server/audit';
 import { enforceRateLimit } from '@/lib/server/rate-limit';
 import { requireApiSession } from '@/lib/server/session';
 import { isWorkspaceSetting, updateWorkspaceSetting } from '@/lib/server/workspace';
@@ -49,5 +50,16 @@ export async function PATCH(request: Request): Promise<Response> {
     resource: workspace.id,
   });
 
+  await recordEvidence({
+    action: 'workspace.settings.update',
+    organizationId: auth.session.organization.id,
+    workspaceId: workspace.id,
+    actorType: auth.session.principal,
+    actorId: auth.session.actor.userId,
+    resourceId: workspace.id,
+    outcome: 'success',
+    request,
+    metadata: { setting, value: body.value },
+  });
   return Response.json({ workspace });
 }

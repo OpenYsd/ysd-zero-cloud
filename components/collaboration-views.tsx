@@ -1,15 +1,15 @@
 'use client';
 
 import { useState } from 'react';
-import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
-import { Check, Copy, KeyRound, Loader2, ShieldBan, Trash2, UserRoundCog } from 'lucide-react';
+import { Check, Copy, Info, KeyRound, Loader2, ShieldBan, Trash2, UserRoundCog } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { NativeSelect } from '@/components/ui/native-select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { EmptyState } from '@/components/ui-bits';
+import { NavLink } from '@/components/nav-link';
 import type {
   AuditEvent,
   Organization,
@@ -198,9 +198,70 @@ export function ServiceAccountsView({ initialAccounts, projects }: { initialAcco
   }}><option value="">Whole workspace</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</NativeSelect><NativeSelect value={String(expiresInDays)} onChange={(event) => setExpiresInDays(Number(event.target.value))} aria-label="Token lifetime"><option value="7">7 days</option><option value="30">30 days</option><option value="90">90 days</option><option value="180">180 days</option></NativeSelect></div><div className="flex flex-wrap gap-2">{availableScopes.map((scope) => <label key={scope} className="flex items-center gap-1.5 rounded-md border border-white/[0.07] px-2 py-1 text-[10px] text-white/48"><input type="checkbox" checked={scopes.includes(scope)} onChange={(event) => setScopes((current) => event.target.checked ? [...current, scope] : current.filter((item) => item !== scope))} />{scope}</label>)}</div><Button disabled={pending || !name.trim() || scopes.length === 0} onClick={() => void create()}>{pending ? <Loader2 className="animate-spin" /> : <KeyRound />}Create token</Button>{token && <div className="rounded-lg border border-amber-400/20 bg-amber-400/[0.04] p-3"><p className="text-[10px] text-amber-300">Shown once. Store it now.</p><div className="mt-2 flex gap-2"><Input readOnly value={token} className="font-mono text-[10px]" /><Button variant="outline" onClick={() => void navigator.clipboard.writeText(token)}><Copy />Copy</Button></div></div>}</section>{accounts.length === 0 ? <EmptyState title="No service accounts" copy="Create a scoped token for automation." /> : <section className="cloud-card overflow-hidden"><Table className="text-[11px]"><TableHeader><TableRow><TableHead>Name</TableHead><TableHead>Project</TableHead><TableHead>Scopes</TableHead><TableHead>Expires</TableHead><TableHead>Status</TableHead><TableHead /></TableRow></TableHeader><TableBody>{accounts.map((account) => <TableRow key={account.id}><TableCell>{account.name}</TableCell><TableCell>{account.projectName ?? 'workspace'}</TableCell><TableCell className="max-w-[360px] text-[10px] text-white/40">{account.scopes.join(', ')}</TableCell><TableCell>{account.expiresAt ? new Date(account.expiresAt).toLocaleDateString() : 'unbounded'}</TableCell><TableCell><Badge variant="outline">{account.status}</Badge></TableCell><TableCell className="text-right">{account.status === 'active' && <Button variant="ghost" size="sm" disabled={pending} onClick={() => void revoke(account.id)}><Trash2 />Revoke</Button>}</TableCell></TableRow>)}</TableBody></Table></section>}</div>;
 }
 
+/**
+ * Fixed, not generated.
+ *
+ * The header points at the explanation with `aria-describedby`, so both ends
+ * must agree between the server render and the client hydration. A `useId`
+ * value would not, which is the defect this release already had to fix once.
+ */
+const AUDIT_POSITION_HELP_ID = 'audit-position-help';
+
 export function AuditView({ events, now }: { events: AuditEvent[]; now: number }) {
   if (events.length === 0) return <EmptyState title="No audit events" copy="Security and organization changes will appear here." />;
-  return <section className="cloud-card overflow-hidden"><div className="flex justify-end gap-2 border-b border-white/[0.06] p-3"><Link href="/api/audit?format=csv" className="rounded-md border border-white/[0.08] px-3 py-1.5 text-[10px] text-white/55">Export CSV</Link><Link href="/api/audit?format=json" className="rounded-md border border-white/[0.08] px-3 py-1.5 text-[10px] text-white/55">Export JSON</Link></div><Table className="text-[11px]"><TableHeader><TableRow><TableHead>When</TableHead><TableHead>Actor</TableHead><TableHead>Action</TableHead><TableHead>Resource</TableHead><TableHead>Outcome</TableHead></TableRow></TableHeader><TableBody>{events.map((event) => <TableRow key={event.id}><TableCell>{relativeTime(event.createdAt, now)}</TableCell><TableCell className="font-mono text-[10px]">{event.actorId}</TableCell><TableCell>{event.action}</TableCell><TableCell>{event.resourceType}{event.resourceId ? ` · ${event.resourceId}` : ''}</TableCell><TableCell><Badge variant="outline">{event.outcome}</Badge></TableCell></TableRow>)}</TableBody></Table></section>;
+  return (
+    <section className="cloud-card overflow-hidden">
+      <div className="flex flex-wrap items-start justify-between gap-3 border-b border-white/[0.06] p-3">
+        {/*
+          Stated in the page rather than hidden behind a hover tooltip. The
+          column is a bare integer, and a number nobody can interpret is not
+          evidence: hover never fires on touch, and a tooltip is invisible to
+          someone scanning the table or reading it with a screen reader. The
+          same element is the accessible description for the column header.
+        */}
+        <p
+          id={AUDIT_POSITION_HELP_ID}
+          className="flex max-w-xl items-start gap-2 text-[10px] leading-4 text-white/40"
+        >
+          <Info aria-hidden="true" className="mt-0.5 size-3.5 shrink-0 text-white/30" />
+          <span>
+            <span className="text-white/60">Position</span> is each record&apos;s permanent
+            place in this organization&apos;s audit trail. Positions are assigned in order and
+            should run unbroken — a missing position means a record is no longer present and
+            should be investigated.
+          </span>
+        </p>
+        <div className="flex shrink-0 gap-2">
+          <NavLink href="/api/audit?format=csv" className="rounded-md border border-white/[0.08] px-3 py-1.5 text-[10px] text-white/55">Export CSV</NavLink>
+          <NavLink href="/api/audit?format=json" className="rounded-md border border-white/[0.08] px-3 py-1.5 text-[10px] text-white/55">Export JSON</NavLink>
+        </div>
+      </div>
+      <Table className="text-[11px]">
+        <TableHeader>
+          <TableRow>
+            <TableHead scope="col" aria-describedby={AUDIT_POSITION_HELP_ID}>Position</TableHead>
+            <TableHead scope="col">When</TableHead>
+            <TableHead scope="col">Actor</TableHead>
+            <TableHead scope="col">Action</TableHead>
+            <TableHead scope="col">Resource</TableHead>
+            <TableHead scope="col">Outcome</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {events.map((event) => (
+            <TableRow key={event.id}>
+              <TableCell className="font-mono text-[10px] text-white/40">{event.sequence ?? '—'}</TableCell>
+              <TableCell>{relativeTime(event.createdAt, now)}</TableCell>
+              <TableCell className="font-mono text-[10px]">{event.actorId}</TableCell>
+              <TableCell>{event.action}</TableCell>
+              <TableCell>{event.resourceType}{event.resourceId ? ` · ${event.resourceId}` : ''}</TableCell>
+              <TableCell><Badge variant="outline">{event.outcome}</Badge></TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+    </section>
+  );
 }
 
 export function SessionsView({ initialSessions }: { initialSessions: DeviceSession[] }) {

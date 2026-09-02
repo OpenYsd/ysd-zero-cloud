@@ -1,4 +1,5 @@
 import { APP_RUNTIME_OPERATIONS, type AppRuntimeOperation } from '@/lib/app-runtime';
+import { recordEvidence } from '@/lib/server/audit';
 import { cancelDeployment, createDeploymentAction } from '@/lib/server/deployments';
 import { recordAppRuntimeSecurityEvent } from '@/lib/server/app-runtime-control';
 import { readBoundedJson } from '@/lib/server/node-request';
@@ -43,6 +44,17 @@ export async function POST(
       actor: auth.session.user.email,
       allowedProjectIds: auth.session.actor.projectIds,
     });
+    await recordEvidence({
+      action: 'deployment.action',
+      organizationId: auth.session.organization.id,
+      workspaceId: auth.session.workspace.id,
+      actorType: auth.session.principal,
+      actorId: auth.session.actor.userId,
+      resourceId: id,
+      outcome: result.ok ? 'success' : 'failed',
+      request,
+      metadata: { operation: 'cancel' },
+    });
     return result.ok ? Response.json(result) : Response.json({ error: result.error }, { status: result.status });
   }
   if (typeof parsed.body.operation !== 'string' || !ACTIONS.includes(parsed.body.operation as Exclude<AppRuntimeOperation, 'deploy'>)) {
@@ -56,6 +68,17 @@ export async function POST(
     targetArtifactId: typeof parsed.body.targetArtifactId === 'string' ? parsed.body.targetArtifactId : null,
     idempotencyKey: request.headers.get('idempotency-key'),
     allowedProjectIds: auth.session.actor.projectIds,
+  });
+  await recordEvidence({
+    action: 'deployment.action',
+    organizationId: auth.session.organization.id,
+    workspaceId: auth.session.workspace.id,
+    actorType: auth.session.principal,
+    actorId: auth.session.actor.userId,
+    resourceId: id,
+    outcome: result.ok ? 'success' : 'failed',
+    request,
+    metadata: { operation: parsed.body.operation as string },
   });
   return result.ok
     ? Response.json(result, { status: result.duplicate ? 200 : 202 })

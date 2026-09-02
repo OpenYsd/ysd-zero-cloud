@@ -36,6 +36,7 @@ import { appRuntimeForShield } from './app-runtime-control';
 import { publicExposureForShield } from './public-exposure';
 import { workflowsForShield } from './workflows';
 import { capacityForShield } from './retention';
+import { auditIntegrityForShield } from './audit';
 import { incidentsForShield } from './incidents';
 import { emitWorkflowEvent } from './workflow-events';
 
@@ -102,6 +103,7 @@ async function collectSnapshot(
     workflows,
     incidents,
     capacity,
+    auditIntegrity,
     ownerInvariant,
     staleAdmins,
     expiredInvitations,
@@ -182,6 +184,7 @@ async function collectSnapshot(
     workflowsForShield(organizationId, workspaceId, now),
     incidentsForShield(workspaceId, now),
     capacityForShield(workspaceId, now),
+    auditIntegrityForShield(organizationId),
     queryOne<{ valid: number }>(
       `SELECT CASE WHEN
           EXISTS (
@@ -432,6 +435,7 @@ async function collectSnapshot(
     workflows,
     incidents,
     capacity,
+    auditIntegrity,
     now,
   };
 }

@@ -23,6 +23,7 @@ import { SmartDeployPanel } from '@/components/smart-deploy-panel';
 import { WorkflowsView } from '@/components/workflows-view';
 import { IncidentsView } from '@/components/incidents-view';
 import { CapacityView } from '@/components/capacity-view';
+import { AccountView } from '@/components/account-view';
 import {
   AuditView,
   InvitationsView,
@@ -46,7 +47,7 @@ import { readNetworkState } from '@/lib/server/networking';
 import { readNodesState } from '@/lib/server/nodes';
 import { listProjects } from '@/lib/server/projects';
 import { listSecrets } from '@/lib/server/secrets';
-import { requireSession } from '@/lib/server/session';
+import { requireSession, type WorkspaceSession } from '@/lib/server/session';
 import { readShieldState } from '@/lib/server/shield-scan';
 import { databaseBytes, listTables } from '@/lib/server/studio';
 import { listStorage } from '@/lib/server/storage';
@@ -58,6 +59,7 @@ import { listOwnSessions } from '@/lib/server/devices';
 import { readCollaborationLimits } from '@/lib/server/organization-limits';
 import { listWorkflowsState } from '@/lib/server/workflows';
 import { listIncidentState } from '@/lib/server/incidents';
+import { readAccountProfile } from '@/lib/server/account';
 import { listDataLifecycleState } from '@/lib/server/retention';
 import { parseIncidentFilters } from '@/lib/incidents';
 
@@ -85,7 +87,8 @@ export default async function SectionPage({
   const search = await searchParams;
   if (!isSection(section)) notFound();
 
-  const { organization, workspace, actor, user } = await requireSession();
+  const session = await requireSession();
+  const { organization, workspace, actor, user } = session;
 
   // The admin surface is not merely hidden from the navigation: reaching it
   // directly without the capability sends the visitor back to the overview.
@@ -98,7 +101,7 @@ export default async function SectionPage({
     secrets: 'secret.metadata.read', workflows: 'workflow.read', incidents: 'incident.read', usage: 'usage.read', shield: 'shield.read',
     members: 'member.read', invitations: 'invitation.read',
     'service-accounts': 'service-account.read', audit: 'audit.read',
-    sessions: 'session.read-own', settings: 'workspace.update', admin: 'member.read',
+    sessions: 'session.read-own', account: 'session.read-own', settings: 'workspace.update', admin: 'member.read',
   } as const;
   if (!can(actor, permissions[section])) notFound();
 
@@ -120,6 +123,7 @@ export default async function SectionPage({
         userId={user.id}
         now={now}
         search={search}
+        session={session}
       />
     </div>
   );
@@ -133,6 +137,7 @@ async function SectionBody({
   userId,
   now,
   search,
+  session,
 }: {
   section: Section;
   workspace: Workspace;
@@ -141,6 +146,7 @@ async function SectionBody({
   userId: string;
   now: number;
   search: Record<string, string | string[] | undefined>;
+  session: WorkspaceSession;
 }) {
   const workspaceId = workspace.id;
 
@@ -264,6 +270,10 @@ async function SectionBody({
           now={now}
         />
       );
+    }
+
+    case 'account': {
+      return <AccountView initialAccount={await readAccountProfile(session)} now={now} />;
     }
 
     case 'usage': {

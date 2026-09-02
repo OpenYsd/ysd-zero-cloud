@@ -73,6 +73,42 @@ export async function listTableNames(): Promise<string[]> {
   return rows.map((row) => row.name);
 }
 
+type TableMetadataRow = {
+  name: string;
+  columnCount: number;
+  hasPrimaryKey: number;
+  /** Comma-joined; no column in this schema contains a comma. */
+  columnNames: string;
+};
+
+/**
+ * Name, shape, and column list for every table — in one statement.
+ *
+ * `pragma_table_info` is a table-valued function, so it can be joined against
+ * `sqlite_master` instead of being issued once per table. That is the whole
+ * fix: the previous implementation ran a `PRAGMA` and a `COUNT(*)` per table,
+ * which on a 67-table database meant 135 sequential round-trips on the first
+ * render of the Databases section.
+ *
+ * Cost here is one statement regardless of how many tables exist. Adding a
+ * hundred more tables adds rows to this result, not round-trips.
+ */
+async function tableMetadata(): Promise<TableMetadataRow[]> {
+  return query<TableMetadataRow>(
+    `SELECT m.name AS name,
+            COUNT(c.name) AS columnCount,
+            MAX(CASE WHEN c.pk > 0 THEN 1 ELSE 0 END) AS hasPrimaryKey,
+            group_concat(c.name) AS columnNames
+       FROM sqlite_master m
+       JOIN pragma_table_info(m.name) c
+      WHERE m.type = 'table'
+        AND m.name NOT LIKE 'sqlite_%'
+        AND m.name NOT LIKE '_cf_%'
+      GROUP BY m.name
+      ORDER BY m.name`,
+  );
+}
+
 async function columnsOf(table: string): Promise<ColumnInfo[]> {
   // `table` is always a name that came back from sqlite_master, so the only
   // quoting concern is an embedded quote character.
@@ -90,22 +126,6 @@ async function columnsOf(table: string): Promise<ColumnInfo[]> {
   }));
 }
 
-async function rowCount(
-  table: string,
-  columns: ColumnInfo[],
-  scope: TenantScope,
-): Promise<number> {
-  const predicate = scopeForTable(
-    table,
-    columns.map((column) => column.name),
-    scope,
-  );
-  const rows = await query<{ total: number }>(
-    `SELECT COUNT(*) AS total FROM "${table.replace(/"/g, '""')}" WHERE ${predicate.sql}`,
-    ...predicate.params,
-  );
-  return rows[0]?.total ?? 0;
-}
 
 /**
  * Every table in the schema, with row counts limited to the caller.
@@ -121,30 +141,49 @@ async function rowCount(
  * through to the deny-all default.
  */
 export async function listTableColumns(): Promise<Record<string, string[]>> {
-  const names = await listTableNames();
+  // Shares the single metadata statement rather than issuing a PRAGMA per
+  // table, which is what the security scan used to pay on every run.
   const out: Record<string, string[]> = {};
-  for (const name of names) {
-    out[name] = (await columnsOf(name)).map((column) => column.name);
+  for (const row of await tableMetadata()) {
+    out[row.name] = row.columnNames ? row.columnNames.split(',') : [];
   }
   return out;
 }
 
+
 export async function listTables(scope: TenantScope): Promise<TableSummary[]> {
-  const names = await listTableNames();
-  const summaries: TableSummary[] = [];
-  for (const name of names) {
-    const columns = await columnsOf(name);
-    summaries.push({
-      name,
-      kind: kindOf(name),
-      rows: await rowCount(name, columns, scope),
-      columns: columns.length,
-      hasPrimaryKey: columns.some((column) => column.primaryKey),
-      masked: (MASKED_COLUMNS[name]?.length ?? 0) > 0,
-    });
-  }
-  return summaries;
+  const metadata = await tableMetadata();
+
+  // Row counts are the one thing SQLite cannot answer for every table in a
+  // single statement, and D1 rejects a compound SELECT long enough to union
+  // them. They are therefore sent as one `batch`: still one statement per
+  // table, but one round-trip rather than sixty-seven.
+  const database = await db();
+  const counts = await database.batch<{ total: number }>(
+    metadata.map((row) => {
+      const predicate = scopeForTable(
+        row.name,
+        row.columnNames ? row.columnNames.split(',') : [],
+        scope,
+      );
+      return database
+        .prepare(
+          `SELECT COUNT(*) AS total FROM "${row.name.replace(/"/g, '""')}" WHERE ${predicate.sql}`,
+        )
+        .bind(...predicate.params);
+    }),
+  );
+
+  return metadata.map((row, index) => ({
+    name: row.name,
+    kind: kindOf(row.name),
+    rows: counts[index]?.results?.[0]?.total ?? 0,
+    columns: Number(row.columnCount),
+    hasPrimaryKey: Number(row.hasPrimaryKey) === 1,
+    masked: (MASKED_COLUMNS[row.name]?.length ?? 0) > 0,
+  }));
 }
+
 
 function maskRow(
   table: string,

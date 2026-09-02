@@ -16,6 +16,8 @@ import workflowsSchema from '../../db/migrations/0012_workflows.sql?raw';
 import externalEventGatewaySchema from '../../db/migrations/0013_external_event_gateway.sql?raw';
 import incidentOperationsSchema from '../../db/migrations/0014_incident_operations.sql?raw';
 import dataLifecycleSchema from '../../db/migrations/0015_data_lifecycle.sql?raw';
+import auditIntegritySchema from '../../db/migrations/0016_audit_integrity.sql?raw';
+import accountExperienceSchema from '../../db/migrations/0017_account_experience.sql?raw';
 
 /**
  * D1 access and schema management.
@@ -42,6 +44,8 @@ const MIGRATIONS: { name: string; sql: string }[] = [
   { name: '0013_external_event_gateway', sql: externalEventGatewaySchema },
   { name: '0014_incident_operations', sql: incidentOperationsSchema },
   { name: '0015_data_lifecycle', sql: dataLifecycleSchema },
+  { name: '0016_audit_integrity', sql: auditIntegritySchema },
+  { name: '0017_account_experience', sql: accountExperienceSchema },
 ];
 
 const LEDGER = `CREATE TABLE IF NOT EXISTS ysd_migration (
@@ -69,6 +73,7 @@ export const WORKSPACE_TABLES = [
   'service_account',
   'service_account_token',
   'audit_event',
+  'audit_sequence',
   'organization_limit',
   'workspace_limit',
   'workspace',

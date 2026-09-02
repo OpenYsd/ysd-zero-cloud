@@ -221,6 +221,12 @@ export type ShieldSnapshot = {
     crossTenantAnomalies: number;
     suspiciousDeniedMutations: number;
   };
+  auditIntegrity?: {
+    unnumbered: number;
+    orphanNumbering: number;
+    sequenceGap: boolean;
+    latestSequence: number;
+  };
   capacity?: {
     approachingLimit: number;
     forecastBreachSoon: number;
@@ -1665,6 +1671,53 @@ function checkCapacity(snapshot: ShieldSnapshot): {
   };
 }
 
+function checkAuditIntegrity(snapshot: ShieldSnapshot): {
+  check: ShieldCheck;
+  findings: ShieldFinding[];
+} {
+  const state = snapshot.auditIntegrity;
+  const findings: ShieldFinding[] = [];
+  if (!state) {
+    return {
+      check: { id: 'audit-integrity', name: 'Audit Integrity', detail: 'No audit integrity state was sampled', state: 'passed' },
+      findings,
+    };
+  }
+  if (state.unnumbered > 0) findings.push({
+    code: 'audit-evidence-unnumbered',
+    title: 'Audit records are missing their position',
+    detail: `${state.unnumbered} audit record${state.unnumbered === 1 ? ' has' : 's have'} no sequence, so a removal there would be undetectable.`,
+    resource: 'audit_event',
+    severity: 'high',
+    remediation: 'Reapply migration 0016 so every audit record is numbered.',
+  });
+  if (state.orphanNumbering > 0) findings.push({
+    code: 'audit-evidence-missing',
+    title: 'Audit records were removed beneath the append-only guards',
+    detail: `${state.orphanNumbering} numbered position${state.orphanNumbering === 1 ? ' has' : 's have'} no audit record, which means evidence was deleted at the storage layer.`,
+    resource: 'audit_event',
+    severity: 'critical',
+    remediation: 'Treat the audit trail as compromised, preserve the database, and investigate direct storage access.',
+  });
+  if (state.sequenceGap) findings.push({
+    code: 'audit-sequence-gap',
+    title: 'The audit sequence has a gap',
+    detail: 'The highest issued position does not match how many records exist, so the trail is not continuous.',
+    resource: 'audit_sequence',
+    severity: 'critical',
+    remediation: 'Preserve the database and investigate; a continuous sequence is what makes the trail provable.',
+  });
+  return {
+    check: {
+      id: 'audit-integrity',
+      name: 'Audit Integrity',
+      detail: 'Append-only evidence · per-organization numbering · gap detection',
+      state: findings.length ? 'failed' : 'passed',
+    },
+    findings,
+  };
+}
+
 /** Runs every rule against a snapshot and scores the result. */
 export function runShieldRules(snapshot: ShieldSnapshot): ShieldReport {
   const results = [
@@ -1682,6 +1735,7 @@ export function runShieldRules(snapshot: ShieldSnapshot): ShieldReport {
     checkWorkflows(snapshot),
     checkIncidents(snapshot),
     checkCapacity(snapshot),
+    checkAuditIntegrity(snapshot),
     checkSurface(snapshot),
     checkHardening(snapshot),
   ];

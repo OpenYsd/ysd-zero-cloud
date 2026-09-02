@@ -1,4 +1,5 @@
 import { revokeNode } from '@/lib/server/nodes';
+import { recordEvidence } from '@/lib/server/audit';
 import { enforceRateLimit } from '@/lib/server/rate-limit';
 import { requireApiSession } from '@/lib/server/session';
 
@@ -22,5 +23,15 @@ export async function DELETE(
   if (!revoked) {
     return Response.json({ error: 'Node not found.' }, { status: 404 });
   }
+  await recordEvidence({
+    action: 'node.revoke',
+    organizationId: auth.session.organization.id,
+    workspaceId: auth.session.workspace.id,
+    actorType: auth.session.principal,
+    actorId: auth.session.actor.userId,
+    resourceId: id,
+    outcome: 'success',
+    request,
+  });
   return Response.json({ revoked: id });
 }

@@ -1,4 +1,5 @@
 import { enforceRateLimit } from '@/lib/server/rate-limit';
+import { recordEvidence } from '@/lib/server/audit';
 import { requireApiSession } from '@/lib/server/session';
 import { deleteObject, downloadObject } from '@/lib/server/storage';
 
@@ -49,5 +50,15 @@ export async function DELETE(
   });
   if (!result.ok)
     return Response.json({ error: result.error }, { status: result.status });
+  await recordEvidence({
+    action: 'storage.delete',
+    organizationId: auth.session.organization.id,
+    workspaceId: auth.session.workspace.id,
+    actorType: auth.session.principal,
+    actorId: auth.session.actor.userId,
+    resourceId: id,
+    outcome: 'success',
+    request,
+  });
   return Response.json({ deleted: id });
 }

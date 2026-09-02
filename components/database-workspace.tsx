@@ -332,6 +332,7 @@ function SqlEditor() {
         <div className="flex items-center gap-4">
           <div className="flex items-center gap-2 text-[10px] text-white/40">
             <Switch
+              id="studio-write-mode-toggle"
               checked={allowWrite}
               onCheckedChange={setAllowWrite}
               aria-label="Allow writes"
