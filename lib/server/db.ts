@@ -15,6 +15,7 @@ import publicExposureSchema from '../../db/migrations/0011_public_exposure.sql?r
 import workflowsSchema from '../../db/migrations/0012_workflows.sql?raw';
 import externalEventGatewaySchema from '../../db/migrations/0013_external_event_gateway.sql?raw';
 import incidentOperationsSchema from '../../db/migrations/0014_incident_operations.sql?raw';
+import dataLifecycleSchema from '../../db/migrations/0015_data_lifecycle.sql?raw';
 
 /**
  * D1 access and schema management.
@@ -40,6 +41,7 @@ const MIGRATIONS: { name: string; sql: string }[] = [
   { name: '0012_workflows', sql: workflowsSchema },
   { name: '0013_external_event_gateway', sql: externalEventGatewaySchema },
   { name: '0014_incident_operations', sql: incidentOperationsSchema },
+  { name: '0015_data_lifecycle', sql: dataLifecycleSchema },
 ];
 
 const LEDGER = `CREATE TABLE IF NOT EXISTS ysd_migration (
@@ -106,6 +108,9 @@ export const WORKSPACE_TABLES = [
   'workflow_action_execution',
   'workflow_incident',
   'incident_event',
+  'retention_policy',
+  'usage_snapshot',
+  'retention_run',
   'workflow_security_event',
   'internal_notification',
   'workflow_resource_state',

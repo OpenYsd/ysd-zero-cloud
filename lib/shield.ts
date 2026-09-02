@@ -221,6 +221,13 @@ export type ShieldSnapshot = {
     crossTenantAnomalies: number;
     suspiciousDeniedMutations: number;
   };
+  capacity?: {
+    approachingLimit: number;
+    forecastBreachSoon: number;
+    retentionDisabledUnderPressure: number;
+    failingRetentionPolicies: number;
+    noUsageHistory: number;
+  };
   now: number;
 };
 
@@ -1605,6 +1612,59 @@ function checkIncidents(snapshot: ShieldSnapshot): {
   };
 }
 
+function checkCapacity(snapshot: ShieldSnapshot): {
+  check: ShieldCheck;
+  findings: ShieldFinding[];
+} {
+  const state = snapshot.capacity;
+  const findings: ShieldFinding[] = [];
+  if (!state) {
+    return {
+      check: { id: 'capacity-guard', name: 'Capacity Guard', detail: 'No capacity state was sampled', state: 'passed' },
+      findings,
+    };
+  }
+  // Codes and resources are constants, so a repeat scan updates the same
+  // finding row instead of opening a second one.
+  const add = (count: number, code: string, title: string, severity: Severity, detail: string, remediation: string) => {
+    if (count > 0) findings.push({ code, title, detail, resource: 'capacity/workspace', severity, remediation });
+  };
+  add(
+    state.forecastBreachSoon, 'capacity-forecast-breach', 'A free-tier allowance is forecast to be exhausted', 'critical',
+    `${state.forecastBreachSoon} measured metric${state.forecastBreachSoon === 1 ? ' is' : 's are'} projected to reach a trusted limit within the at-risk horizon.`,
+    'Enable a reviewed retention policy or reduce the write rate before D1 refuses writes.',
+  );
+  add(
+    state.approachingLimit, 'capacity-approaching-limit', 'A free-tier allowance is nearly consumed', 'high',
+    `${state.approachingLimit} measured metric${state.approachingLimit === 1 ? ' is' : 's are'} at or above the at-risk share of a trusted limit.`,
+    'Review the Capacity panel and reclaim rows through a dry-run before activating retention.',
+  );
+  add(
+    state.failingRetentionPolicies, 'capacity-retention-failing', 'Retention policies are failing repeatedly', 'high',
+    `${state.failingRetentionPolicies} policy or policies have failed consecutively.`,
+    'Inspect the retention run evidence, then disable the policy until the cause is understood.',
+  );
+  add(
+    state.retentionDisabledUnderPressure, 'capacity-retention-disabled', 'Data is growing with retention disabled', 'medium',
+    `${state.retentionDisabledUnderPressure} data class${state.retentionDisabledUnderPressure === 1 ? '' : 'es'} still delete nothing while the workspace is under capacity pressure.`,
+    'Run a dry-run for each class, review the candidate row count, then activate deliberately.',
+  );
+  add(
+    state.noUsageHistory, 'capacity-no-history', 'No usage history has been captured yet', 'low',
+    'Capacity forecasting needs several snapshots before it will project a breach date.',
+    'No action required. The scheduled tick captures a snapshot every few hours.',
+  );
+  return {
+    check: {
+      id: 'capacity-guard',
+      name: 'Capacity Guard',
+      detail: 'Trusted free-tier limits · usage history · reviewed retention · bounded pruning',
+      state: findings.some((finding) => finding.severity === 'critical' || finding.severity === 'high') ? 'failed' : findings.length ? 'review' : 'passed',
+    },
+    findings,
+  };
+}
+
 /** Runs every rule against a snapshot and scores the result. */
 export function runShieldRules(snapshot: ShieldSnapshot): ShieldReport {
   const results = [
@@ -1621,6 +1681,7 @@ export function runShieldRules(snapshot: ShieldSnapshot): ShieldReport {
     checkPublicExposure(snapshot),
     checkWorkflows(snapshot),
     checkIncidents(snapshot),
+    checkCapacity(snapshot),
     checkSurface(snapshot),
     checkHardening(snapshot),
   ];

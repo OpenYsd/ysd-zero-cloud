@@ -22,6 +22,7 @@ import { ShieldView } from '@/components/shield-view';
 import { SmartDeployPanel } from '@/components/smart-deploy-panel';
 import { WorkflowsView } from '@/components/workflows-view';
 import { IncidentsView } from '@/components/incidents-view';
+import { CapacityView } from '@/components/capacity-view';
 import {
   AuditView,
   InvitationsView,
@@ -57,6 +58,7 @@ import { listOwnSessions } from '@/lib/server/devices';
 import { readCollaborationLimits } from '@/lib/server/organization-limits';
 import { listWorkflowsState } from '@/lib/server/workflows';
 import { listIncidentState } from '@/lib/server/incidents';
+import { listDataLifecycleState } from '@/lib/server/retention';
 import { parseIncidentFilters } from '@/lib/incidents';
 
 export const dynamic = 'force-dynamic';
@@ -272,15 +274,25 @@ async function SectionBody({
         }),
         readCollaborationLimits(organization.id, workspaceId),
       ]);
+      const dataLifecycle = await listDataLifecycleState({
+        organizationId: organization.id,
+        workspaceId,
+        actor,
+        readings: usage.readings,
+        now,
+      });
       return (
-        <UsageView
-          readings={usage.readings}
-          projectedCost={usage.projectedMonthlyCost}
-          zeroMode={workspace.zeroMode}
-          measuredAt={usage.measuredAt}
-          now={now}
-          collaboration={collaboration}
-        />
+        <div className="space-y-5">
+          <UsageView
+            readings={usage.readings}
+            projectedCost={usage.projectedMonthlyCost}
+            zeroMode={workspace.zeroMode}
+            measuredAt={usage.measuredAt}
+            now={now}
+            collaboration={collaboration}
+          />
+          <CapacityView initialState={dataLifecycle} now={now} />
+        </div>
       );
     }
 

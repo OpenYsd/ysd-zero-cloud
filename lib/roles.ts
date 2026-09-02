@@ -80,6 +80,8 @@ export const PERMISSIONS = [
   'incident.read',
   'incident.manage',
   'incident.resolve-critical',
+  'retention.read',
+  'retention.manage',
   'usage.read',
   'shield.read',
   'shield.scan',
@@ -102,6 +104,7 @@ const VIEWER: readonly Permission[] = [
   'exposure.read',
   'workflow.read', 'webhook.read', 'notification.read',
   'incident.read',
+  'retention.read',
 ];
 
 const DEVELOPER: readonly Permission[] = [
@@ -126,6 +129,10 @@ const ADMIN: readonly Permission[] = [
   'workflow.manage', 'workflow.retry',
   'webhook.manage',
   'incident.resolve-critical',
+  // Retention deletes workspace-wide rows, so it stops at admin and is
+  // deliberately absent from PROJECT_BOUND_PERMISSIONS below: a developer
+  // restricted to two projects must never set a window that prunes the rest.
+  'retention.manage',
 ];
 
 const OWNER: readonly Permission[] = [
@@ -304,6 +311,7 @@ export function permissionForRequest(method: string, pathname: string): Permissi
   if (pathname.startsWith('/api/workflows')) return read ? 'workflow.read' : 'workflow.create';
   if (pathname.startsWith('/api/notifications')) return 'notification.read';
   if (pathname.startsWith('/api/incidents')) return read ? 'incident.read' : 'incident.manage';
+  if (pathname.startsWith('/api/retention')) return read ? 'retention.read' : 'retention.manage';
   if (pathname.startsWith('/api/admin/users')) return read ? 'admin.users.read' : 'admin.users.write';
   return null;
 }

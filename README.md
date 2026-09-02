@@ -1,15 +1,15 @@
 # YSD Zero Cloud
 
-YSD Zero Cloud is a zero-cost-first cloud operating system. Production version `0.10.0` runs authentication,
+YSD Zero Cloud is a zero-cost-first cloud operating system. Production version `0.11.0` runs authentication,
 persistence, security scanning, the cost guard, private-object storage policy, network inventory,
 an outbound-only user-owned compute control plane, a private Node.js App Runtime, local AI
 scheduling, private Minecraft Java server orchestration, organization collaboration, and a
 fail-closed Public App Exposure control plane against Cloudflare Workers and D1. It also includes
 the tenant-isolated YSD Workflows engine: immutable published versions, bounded D1 execution,
 internal notifications, audit history, one global free-plan scheduler tick, and a signed inbound
-External Event Gateway with workspace-scoped webhook sources.
+External Event Gateway with workspace-scoped webhook sources, and the Operations Center.
 
-The current source tree targets `0.11.0` and adds the Operations Center described below. Phase 11
+The current source tree targets `0.12.0` and adds Data Lifecycle & Capacity Guard described below. Phase 12
 is locally verified but is **not live** until its migration and Worker release receive explicit
 Production approval.
 
@@ -34,7 +34,7 @@ deployed Worker's explicit zero-cost configuration.
 | SQL Editor        | Real statements, classified by the SQL guard; limited to the instance owner   |
 | Logs              | The `log_event` audit trail every mutating action writes to                   |
 | Secrets           | AES-GCM sealed values in `secret`, write-only by design                       |
-| Usage             | Counts measured from D1 against the free-tier catalog                         |
+| Usage             | Live counts, six-hour snapshots, capacity forecasts, and reviewed retention  |
 | Zero Mode         | A workspace setting the server enforces, not a client preference              |
 | YSD Shield        | Rules scored against a real snapshot of the workspace                         |
 | Storage           | Private R2 adapter, D1 authorization index, and hard account/workspace quotas |
@@ -194,7 +194,7 @@ There is deliberately no generic outbound HTTP, JavaScript, shell, Queue, Durabl
 Cloudflare Workflows action. Phase 10 reuses the existing Worker, D1 database, Workflow engine, and
 one-minute Cron Trigger, so the projected incremental monthly cost remains `$0.00` under Zero Mode.
 
-## Operations Center (Phase 11 pre-deploy)
+## Operations Center
 
 Phase 11 expands the existing `workflow_incident` records in place and adds an append-only
 `incident_event` timeline. Repeated root causes aggregate into one active incident with an
@@ -217,6 +217,39 @@ storms, orphan or cross-tenant references, and suspicious denied mutations. The 
 the existing Worker, D1 database, internal notifications, audit log, and global Cron tick: no Queue,
 Durable Object, Cloudflare Workflow, R2, external provider, or paid binding is added. Projected
 incremental monthly cost remains `$0.00` under server-enforced Zero Mode.
+
+## Data Lifecycle & Capacity Guard (Phase 12 pre-deploy)
+
+Phase 12 extends the existing Usage experience with trusted capacity history and conservative,
+operator-controlled retention. One workspace snapshot is eligible every six hours. Its deterministic
+time slot and D1 uniqueness constraint make repeated one-minute ticks in the same slot a no-op. The
+scheduled path uses the same local D1 counters as the Usage meters, but deliberately omits the D1 file
+size because that metric requires an outbound Cloudflare API call. An omitted metric is shown as
+unmeasured, never as zero.
+
+Forecasting is pure and deterministic. It requires at least three snapshots spread over six hours,
+uses a least-squares growth trend, and never invents a breach date for short history, flat or falling
+usage, non-finite input, or a projection beyond the reviewed horizon. Results are classified as
+`healthy`, `watch`, `at-risk`, `critical`, or `insufficient-data` against the same trusted free-tier
+limits used by Usage. Shield reports approaching ceilings, a projected breach, retention disabled
+under real pressure, and repeated prune failures. Only critical capacity conditions enter the Phase
+11 incident aggregator, which reuses a stable root cause rather than opening a new incident each tick.
+
+Retention is disabled by default. Owners and admins may configure only seven reviewed data classes:
+platform logs, unreferenced workflow events, terminal unlinked workflow executions, workflow security
+events, webhook delivery metadata, read notifications, and resolved Shield findings. Every class has
+a server- and D1-enforced minimum window. Activation requires a recent dry-run against the exact
+revision and retention window; the preview records candidate rows and deletes nothing. Pruning uses
+tenant-scoped, indexed, oldest-first batches of 100 rows, with no more than two policies advanced per
+tick and a per-class cap of 200–500 rows. Workspaces and policies are selected oldest-due first, and a
+failure in one does not stop another.
+
+Audit history, incident timelines, published workflow versions, and retention run evidence are never
+automatically pruned. Existing append-only database guards remain intact. Phase 12 provides no external
+archive or generic export executor: it adds no HTTP action, Queue, Durable Object, Cloudflare Workflow,
+R2 bucket, Analytics Engine dataset, Worker, D1 database, or paid binding. It reuses the same Worker,
+D1, and single global Cron Trigger, so projected incremental monthly cost remains `$0.00` under Zero
+Mode.
 
 ## Compute Nodes
 
@@ -363,6 +396,7 @@ npm test
 npm run typecheck
 npm run lint
 npm run build
+npm audit
 ```
 
 With the local server running on port 3000 and interactive Turnstile keys omitted, the real
@@ -502,6 +536,6 @@ Workers output.
 ## Roadmap
 
 Completed capabilities are documented in their sections above rather than repeated as future work.
-Phase 11 Operations Center is the only pending release in this source tree. Later phases remain
+Phase 12 Data Lifecycle & Capacity Guard is the only pending release in this source tree. Later phases remain
 unselected; private R2 and owned-domain transport stay unavailable unless Cloudflare first confirms
 a no-Billing `$0.00` path, and any future runtime must keep the same narrow reviewed contracts.

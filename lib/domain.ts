@@ -737,6 +737,59 @@ export type IncidentState = {
   projectedMonthlyCost: 0;
 };
 
+export type RetentionPolicyView = {
+  id: string;
+  dataClass: import('./retention.ts').RetentionDataClass;
+  label: string;
+  description: string;
+  /** Always false until an owner or admin reviews a dry-run and activates it. */
+  enabled: boolean;
+  retentionDays: number;
+  /** The API refuses any window below this, and so does migration 0015. */
+  minimumRetentionDays: number;
+  maximumRowsPerRun: number;
+  revision: number;
+  lastDryRunAt: number | null;
+  lastDryRunRevision: number | null;
+  lastDryRunRetentionDays: number | null;
+  lastDryRunCandidateRows: number | null;
+  lastPrunedAt: number | null;
+  lastRunStatus: import('./retention.ts').RetentionRunStatus | null;
+  consecutiveFailures: number;
+  /** Rows a prune would consider now. `null` when the count failed. */
+  candidateRows: number | null;
+  updatedAt: number;
+};
+
+export type RetentionRunView = {
+  id: string;
+  dataClass: import('./retention.ts').RetentionDataClass;
+  mode: import('./retention.ts').RetentionRunMode;
+  actorType: 'user' | 'system';
+  retentionDays: number;
+  cutoff: number;
+  candidateRows: number;
+  deletedRows: number;
+  status: import('./retention.ts').RetentionRunStatus;
+  /** An allowlisted code, never a raw driver message. */
+  failureCode: string | null;
+  startedAt: number;
+  finishedAt: number | null;
+};
+
+export type DataLifecycleState = {
+  capacity: import('./capacity.ts').CapacityForecast[];
+  capacityState: import('./capacity.ts').CapacityState;
+  policies: RetentionPolicyView[];
+  runs: RetentionRunView[];
+  snapshots: number;
+  latestSnapshotAt: number | null;
+  snapshotIntervalMs: number;
+  canManage: boolean;
+  zeroModeEnforced: true;
+  projectedMonthlyCost: 0;
+};
+
 export type Workspace = {
   id: string;
   organizationId: string;

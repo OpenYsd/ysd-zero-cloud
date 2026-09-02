@@ -35,6 +35,7 @@ import { gameServersForShield } from './game-servers';
 import { appRuntimeForShield } from './app-runtime-control';
 import { publicExposureForShield } from './public-exposure';
 import { workflowsForShield } from './workflows';
+import { capacityForShield } from './retention';
 import { incidentsForShield } from './incidents';
 import { emitWorkflowEvent } from './workflow-events';
 
@@ -100,6 +101,7 @@ async function collectSnapshot(
     publicExposure,
     workflows,
     incidents,
+    capacity,
     ownerInvariant,
     staleAdmins,
     expiredInvitations,
@@ -179,6 +181,7 @@ async function collectSnapshot(
     publicExposureForShield(workspaceId, now),
     workflowsForShield(organizationId, workspaceId, now),
     incidentsForShield(workspaceId, now),
+    capacityForShield(workspaceId, now),
     queryOne<{ valid: number }>(
       `SELECT CASE WHEN
           EXISTS (
@@ -304,6 +307,11 @@ async function collectSnapshot(
           'incident_phase11_assignee_guard', 'incident_event_tenant_guard',
           'incident_event_volume_guard',
           'incident_event_append_only_update', 'incident_event_append_only_delete'
+          ,'retention_policy_tenant_guard', 'retention_policy_scope_immutable_guard',
+          'retention_policy_activation_guard', 'retention_policy_window_guard',
+          'usage_snapshot_tenant_guard', 'usage_snapshot_append_only_update',
+          'retention_run_tenant_guard', 'retention_run_finalize_guard',
+          'retention_run_append_only_delete'
         )`,
     ),
     count(
@@ -392,7 +400,7 @@ async function collectSnapshot(
     collaboration: {
       ownerInvariant: ownerInvariant?.valid === 1,
       tenantIsolationViolations,
-      tenantIsolationGuarded: tenantTriggerCount === 41,
+      tenantIsolationGuarded: tenantTriggerCount === 52,
       auditAppendOnly: auditTriggerCount === 2,
       staleAdmins,
       expiredInvitations,
@@ -422,6 +430,7 @@ async function collectSnapshot(
     publicExposure,
     workflows,
     incidents,
+    capacity,
     now,
   };
 }
