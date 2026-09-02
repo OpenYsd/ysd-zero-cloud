@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 
@@ -435,4 +435,66 @@ void test('Phase 12 adds no billable binding, queue, object, workflow, R2, or se
   assert.equal((wrangler.match(/"database_id"/g) ?? []).length, 1);
   assert.doesNotMatch(wrangler, /durable_objects|queues|workflows|r2_buckets|analytics_engine_datasets/i);
   assert.doesNotMatch(lifecycleFiles, /fetch\(|eval\(|new Function|child_process|shell|generic http/i);
+});
+
+/**
+ * Regression guard for the 0.12.1 hotfix.
+ *
+ * Phase 12 shipped with `tenantIsolationGuarded` comparing against 52 while the
+ * SQL inventory it counts named only 50 triggers: the two class-floor guards
+ * from migration 0015 were never added to the list. Every guard existed and
+ * worked in D1, so the sole symptom was Shield raising a critical
+ * `organization-tenant-guards-missing` finding on the next scan — a false
+ * positive about its own bookkeeping.
+ *
+ * Asserting `tenantIsolationGuarded === true` would not have caught it. This
+ * test instead locks three things together: the inventory list, the total the
+ * code compares against, and the triggers the migrations actually create. Order
+ * is irrelevant throughout; only membership and counts matter.
+ */
+void test('Shield tenant guard inventory stays in sync with the migrations and its own total', () => {
+  const scan = source('lib/server/shield-scan.ts');
+
+  const block = scan.match(/type = 'trigger' AND name IN \(([\s\S]*?)\)`/);
+  assert.ok(block, 'the tenant guard inventory query must be present');
+  const listed = [...block[1].matchAll(/'([A-Za-z_0-9]+)'/g)].map((match) => match[1]!);
+  const inventory = new Set(listed);
+  assert.equal(inventory.size, listed.length, 'the inventory must not repeat a trigger name');
+
+  // The number Shield tests against must be exactly what it asked D1 for.
+  // This single assertion is what the 0.12.0 defect would have failed.
+  const expected = scan.match(/tenantIsolationGuarded: tenantTriggerCount === (\d+)/);
+  assert.ok(expected, 'the expected tenant trigger total must be present');
+  assert.equal(Number(expected[1]), inventory.size);
+
+  const created = new Set<string>();
+  const perMigration = new Map<string, string[]>();
+  for (const file of readdirSync(new URL('../db/migrations', import.meta.url))) {
+    if (!file.endsWith('.sql')) continue;
+    const names = [...migration(file).matchAll(/CREATE TRIGGER IF NOT EXISTS ([A-Za-z_0-9]+)/g)]
+      .map((match) => match[1]!);
+    perMigration.set(file, names);
+    for (const name of names) created.add(name);
+  }
+
+  // No phantom entries: everything counted is a trigger a migration really makes.
+  for (const name of inventory) {
+    assert.ok(created.has(name), `${name} is inventoried but no migration creates it`);
+  }
+
+  // Every guard the data lifecycle migration adds is inventoried. This is the
+  // rule the hotfix restores, and it holds for any future migration too.
+  const phase12 = perMigration.get('0015_data_lifecycle.sql') ?? [];
+  assert.equal(phase12.length, 11);
+  for (const name of phase12) {
+    assert.ok(inventory.has(name), `${name} is created by 0015 but missing from the Shield inventory`);
+  }
+
+  // The exact pair that regressed, named so a future edit cannot quietly drop them.
+  for (const name of [
+    'retention_policy_class_floor_guard',
+    'retention_policy_class_floor_update_guard',
+  ]) {
+    assert.ok(inventory.has(name), `${name} must stay in the Shield tenant guard inventory`);
+  }
 });

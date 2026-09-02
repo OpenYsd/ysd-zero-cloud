@@ -309,6 +309,7 @@ async function collectSnapshot(
           'incident_event_append_only_update', 'incident_event_append_only_delete'
           ,'retention_policy_tenant_guard', 'retention_policy_scope_immutable_guard',
           'retention_policy_activation_guard', 'retention_policy_window_guard',
+          'retention_policy_class_floor_guard', 'retention_policy_class_floor_update_guard',
           'usage_snapshot_tenant_guard', 'usage_snapshot_append_only_update',
           'retention_run_tenant_guard', 'retention_run_finalize_guard',
           'retention_run_append_only_delete'

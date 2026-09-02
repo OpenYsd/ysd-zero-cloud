@@ -9,9 +9,12 @@ the tenant-isolated YSD Workflows engine: immutable published versions, bounded 
 internal notifications, audit history, one global free-plan scheduler tick, and a signed inbound
 External Event Gateway with workspace-scoped webhook sources, and the Operations Center.
 
-The current source tree targets `0.12.0` and adds Data Lifecycle & Capacity Guard described below. Phase 12
-is locally verified but is **not live** until its migration and Worker release receive explicit
-Production approval.
+The current source tree targets `0.12.1`, a hotfix over the live `0.12.0` Data Lifecycle & Capacity
+Guard described below. It changes no schema and no retention behaviour: it restores the two
+`retention_policy_class_floor_*` guards to the Shield tenant-guard inventory, which had been counted
+but not listed, so a scan reported `organization-tenant-guards-missing` even though every guard was
+present and enforcing in D1. The hotfix is locally verified but is **not live** until its Worker
+release receives explicit Production approval.
 
 **Live:** <https://ysd-zero-cloud.ysd-zero-cloud.workers.dev>
 
