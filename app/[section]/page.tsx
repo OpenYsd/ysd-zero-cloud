@@ -41,6 +41,7 @@ import { requestTime } from '@/lib/server/clock';
 import { readAiState } from '@/lib/server/ai';
 import { readGameServersState } from '@/lib/server/game-servers';
 import { listDeployments } from '@/lib/server/deployments';
+import { parseRepository, validGithubRef } from '@/lib/server/github';
 import { runtimeEnv } from '@/lib/server/env';
 import { listLogs } from '@/lib/server/logs';
 import { readNetworkState } from '@/lib/server/networking';
@@ -161,9 +162,28 @@ async function SectionBody({
         listDeployments(workspaceId, 50, actor.projectIds),
         readNodesState(workspaceId, now),
       ]);
+      // A project marked Ready links here with the exact repository it was
+      // analyzed against, so the panel opens pre-filled instead of asking the
+      // user to retype what Analyze already resolved. Each hint is validated
+      // with the same parser the deploy route itself uses -- a malformed or
+      // hostile query string simply fails to prefill, it never reaches a
+      // fetch or a form action unvalidated.
+      const repositoryHintRaw = typeof search.repository === 'string' ? search.repository : undefined;
+      const branchHintRaw = typeof search.branch === 'string' ? search.branch : undefined;
+      const commitHintRaw = typeof search.commit === 'string' ? search.commit : undefined;
+      const repositoryHint =
+        repositoryHintRaw && parseRepository(repositoryHintRaw) ? repositoryHintRaw : undefined;
+      const branchHint = branchHintRaw && validGithubRef(branchHintRaw) ? branchHintRaw : undefined;
+      const commitHint =
+        commitHintRaw && /^[a-f0-9]{40}$/i.test(commitHintRaw) ? commitHintRaw : undefined;
       return (
         <>
-          <SmartDeployPanel nodes={nodes.nodes} />
+          <SmartDeployPanel
+            nodes={nodes.nodes}
+            repositoryHint={repositoryHint}
+            branchHint={branchHint}
+            commitHint={commitHint}
+          />
           <DeploymentsList
             deployments={deployments}
             now={now}

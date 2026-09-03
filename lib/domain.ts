@@ -1,4 +1,5 @@
 import type { Framework } from './smart-deploy.ts';
+import type { ReadinessSummary } from './readiness.ts';
 import type { AiModelState, AiRuntime } from './ai.ts';
 import type {
   NodeCapabilities,
@@ -33,6 +34,12 @@ export type Project = {
   visibility: 'private' | 'public';
   createdAt: number;
   updatedAt: number;
+  /**
+   * Denormalised summary from the readiness columns on the same row -- never a
+   * parse of the stored report. Every list read carries this for free; the
+   * full report is parsed only where a detail view actually needs it.
+   */
+  readiness: ReadinessSummary;
 };
 
 export type Secret = {

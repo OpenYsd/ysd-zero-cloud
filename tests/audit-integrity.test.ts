@@ -566,3 +566,35 @@ void test('the audit table explains what a position is and what a gap means', ()
   // The icon is decorative — the sentence beside it is the accessible text.
   assert.match(view, /<Info aria-hidden="true"/);
 });
+
+void test('Phase 14 catalog grew by exactly the two implemented readiness actions', () => {
+  // Pinned deliberately: 23 (Phase 13 + P0) + 2 (readiness) = 25. A silent
+  // removal or rename of either action must fail this assertion by name, not
+  // just as a shrinking total.
+  assert.equal(EVIDENCE_ACTIONS.length, 25);
+
+  const readinessActions = EVIDENCE_ACTIONS.filter((entry) =>
+    entry.action.startsWith('project.readiness.'),
+  ).map((entry) => entry.action);
+  assert.deepEqual(readinessActions.sort(), [
+    'project.readiness.analyze',
+    'project.readiness.denied',
+  ]);
+
+  const analyze = EVIDENCE_ACTIONS.find((entry) => entry.action === 'project.readiness.analyze')!;
+  // Never manifest content, dependency names, tokens, or headers -- only the
+  // identity of what was analyzed and the verdict reached.
+  assert.deepEqual(
+    [...analyze.metadataKeys].sort(),
+    ['blockedCount', 'branch', 'commit', 'framework', 'owner', 'reportVersion', 'repository', 'verdict'].sort(),
+  );
+  for (const forbidden of ['manifest', 'dependenc', 'token', 'header', 'sql', 'password']) {
+    assert.ok(
+      !analyze.metadataKeys.some((key) => key.toLowerCase().includes(forbidden)),
+      `project.readiness.analyze must not carry a "${forbidden}"-shaped key`,
+    );
+  }
+
+  const denied = EVIDENCE_ACTIONS.find((entry) => entry.action === 'project.readiness.denied')!;
+  assert.deepEqual([...denied.metadataKeys], ['reason']);
+});

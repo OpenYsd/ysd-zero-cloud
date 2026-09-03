@@ -64,6 +64,16 @@ export const RATE_LIMIT_RULES = {
   'webhook:source': { limit: 60, windowMs: MINUTE },
   /** Aggregate workspace ceiling protects D1 even with many enabled sources. */
   'webhook:workspace': { limit: 240, windowMs: MINUTE },
+  /**
+   * Repository readiness analysis. Each call costs 3-8 outbound GitHub
+   * requests (metadata, commit, tree, plus up to five file reads), and without
+   * a configured `GITHUB_TOKEN` those share GitHub's unauthenticated 60/hour
+   * budget across every workspace on this Worker. 15/hour per user keeps a
+   * single account from being able to exhaust that shared budget alone, while
+   * comfortably allowing someone iterating on a repository to fix a blocker
+   * and re-check it.
+   */
+  'deploy:analyze': { limit: 15, windowMs: 60 * MINUTE },
 } as const satisfies Record<string, RateLimitRule>;
 
 export type RateLimitName = keyof typeof RATE_LIMIT_RULES;

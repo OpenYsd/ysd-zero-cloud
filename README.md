@@ -34,7 +34,19 @@ keeping the browser that made the change signed in, removes a hydration mismatch
 switch a fixed DOM id, fixes an `/audit` render crash caused by the one remaining `next/link`
 import, and states in the Audit table what a position is and what a missing one means.
 
-**Live:** <https://ysd-zero-cloud.ysd-zero-cloud.workers.dev>
+The current source tree targets `0.14.0`, Phase 14: **Repository Readiness & Deploy Planning**.
+It is **local acceptance complete and not yet deployed** — Production remains `0.13.2` until it
+ships. It gives a project with a public GitHub repository a way to reach a real, truthful verdict
+without owning a Compute Node: `POST /api/projects/{id}/analyze` runs the same hardened,
+GitHub-only reader and analyzer the deployment path already uses, reads a fixed set of files
+(manifest, lockfile, `.nvmrc`, `.env.example`, `.gitattributes`) with every read byte-capped and
+timeout-guarded, and stores a small, versioned, size-capped projection — never the manifest,
+never a dependency list, never a token or header. Nothing is built, cloned, or executed, and no
+deployment or node job is ever created by an analysis; a Compute Node stays mandatory for every
+build, execution, and deployment. Migration `0018` adds six nullable columns to `project`,
+additive only.
+
+**Live:** <https://ysd-zero-cloud.ysd-zero-cloud.workers.dev> — still running `0.13.2`.
 
 This is a standalone project intended only for `OpenYsd/ysd-zero-cloud`. It has no dependency on,
 and makes no changes to, `OpenYsd/ysd-ai`.

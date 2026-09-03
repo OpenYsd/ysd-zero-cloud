@@ -237,6 +237,22 @@ export const EVIDENCE_ACTIONS = [
     critical: false,
     why: 'Enumerating data-class names is a probe and was previously unrecorded.',
   },
+  {
+    action: 'project.readiness.analyze',
+    resourceType: 'project',
+    metadataKeys: ['owner', 'repository', 'commit', 'branch', 'framework', 'verdict', 'blockedCount', 'reportVersion'],
+    route: 'app/api/projects/[id]/analyze/route.ts',
+    critical: false,
+    why: 'A readiness verdict is what a user relies on before choosing a Compute Node; the exact commit it was computed against must be provable later.',
+  },
+  {
+    action: 'project.readiness.denied',
+    resourceType: 'project',
+    metadataKeys: ['reason'],
+    route: 'app/api/projects/[id]/analyze/route.ts',
+    critical: false,
+    why: 'A refused analysis (private repository, policy) is still a privileged action against a real, tenant-scoped project and belongs in the same trail as a successful one.',
+  },
 ] as const satisfies readonly EvidenceAction[];
 
 export type EvidenceActionName = (typeof EVIDENCE_ACTIONS)[number]['action'];

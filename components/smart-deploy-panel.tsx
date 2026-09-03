@@ -2,7 +2,7 @@
 
 import { useRouter } from 'next/navigation';
 import { useState } from 'react';
-import { AlertTriangle, CheckCircle2, GitBranch, Loader2, LockKeyhole, Rocket, Server } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, GitBranch, Info, Loader2, LockKeyhole, Rocket, Server } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -10,12 +10,22 @@ import { NativeSelect } from '@/components/ui/native-select';
 import type { ComputeNode, Deployment } from '@/lib/domain';
 import type { SmartDeployPlan } from '@/lib/smart-deploy';
 
-export function SmartDeployPanel({ nodes, repositoryHint }: { nodes: ComputeNode[]; repositoryHint?: string }) {
+export function SmartDeployPanel({
+  nodes,
+  repositoryHint,
+  branchHint,
+  commitHint,
+}: {
+  nodes: ComputeNode[];
+  repositoryHint?: string;
+  branchHint?: string;
+  commitHint?: string;
+}) {
   const router = useRouter();
   const eligible = nodes.filter((node) => node.status === 'online' && node.capabilities.appRuntime?.available);
   const [repository, setRepository] = useState(repositoryHint ?? 'owner/node-api');
-  const [branch, setBranch] = useState('main');
-  const [commit, setCommit] = useState('');
+  const [branch, setBranch] = useState(branchHint ?? 'main');
+  const [commit, setCommit] = useState(commitHint ?? '');
   const [nodeId, setNodeId] = useState(eligible[0]?.id ?? '');
   const [environment, setEnvironment] = useState('Production');
   const [healthPath, setHealthPath] = useState('/');
@@ -59,6 +69,17 @@ export function SmartDeployPanel({ nodes, repositoryHint }: { nodes: ComputeNode
           <LockKeyhole className="size-3" /> Zero Mode enforced
         </div>
       </div>
+
+      {repositoryHint && (
+        // Only arrives from a project readiness panel that already showed a
+        // Ready verdict. Selecting a Compute Node is still the one thing left
+        // before anything can run -- this does not weaken that requirement or
+        // change the disabled condition on the deploy button below it.
+        <p className="flex items-center gap-2 border-b border-white/[0.065] bg-[#b7ff3c]/[0.03] px-5 py-2.5 text-[11px] text-white/45">
+          <Info aria-hidden="true" className="size-3.5 shrink-0 text-[#b7ff3c]/70" />
+          Analyzed as ready. Select a Compute Node to deploy.
+        </p>
+      )}
 
       <div className="grid gap-4 p-5 lg:grid-cols-3">
         <label htmlFor="smart-deploy-repository" className="space-y-1.5 text-[11px] text-white/45">

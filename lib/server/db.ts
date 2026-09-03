@@ -18,6 +18,7 @@ import incidentOperationsSchema from '../../db/migrations/0014_incident_operatio
 import dataLifecycleSchema from '../../db/migrations/0015_data_lifecycle.sql?raw';
 import auditIntegritySchema from '../../db/migrations/0016_audit_integrity.sql?raw';
 import accountExperienceSchema from '../../db/migrations/0017_account_experience.sql?raw';
+import projectReadinessSchema from '../../db/migrations/0018_project_readiness.sql?raw';
 
 /**
  * D1 access and schema management.
@@ -46,6 +47,7 @@ const MIGRATIONS: { name: string; sql: string }[] = [
   { name: '0015_data_lifecycle', sql: dataLifecycleSchema },
   { name: '0016_audit_integrity', sql: auditIntegritySchema },
   { name: '0017_account_experience', sql: accountExperienceSchema },
+  { name: '0018_project_readiness', sql: projectReadinessSchema },
 ];
 
 const LEDGER = `CREATE TABLE IF NOT EXISTS ysd_migration (
