@@ -267,6 +267,24 @@ export const EVIDENCE_ACTIONS = [
     critical: false,
     why: 'A scan the platform ran on its own is a privileged read of every table, secret name, and member role in a workspace, performed with no human in the loop. Without evidence, nobody could later show which sweeps ran, what they found, or that a failing workspace was actually being attempted.',
   },
+  {
+    action: 'node.pairing.cancel',
+    resourceType: 'node_pairing',
+    metadataKeys: ['reason'],
+    // The ticket is invalidated, not deleted: the row and this record both
+    // survive, so "who stopped this pairing, and when" stays answerable.
+    route: 'app/api/nodes/pairing/[id]/route.ts',
+    critical: false,
+    why: 'Withdrawing an outstanding invitation to join the compute plane is an access decision, and the ticket row alone cannot say who made it.',
+  },
+  {
+    action: 'node.preflight.run',
+    resourceType: 'compute_node',
+    metadataKeys: ['verdict', 'failedChecks', 'agentVersion', 'protocolVersion'],
+    route: 'app/api/nodes/[id]/preflight/route.ts',
+    critical: false,
+    why: 'A readiness verdict is what an operator relies on before trusting a machine with a deployment; the check codes behind a refusal must be provable later.',
+  },
 ] as const satisfies readonly EvidenceAction[];
 
 export type EvidenceActionName = (typeof EVIDENCE_ACTIONS)[number]['action'];

@@ -75,8 +75,7 @@ finding has been open, and whether the last attempt failed. Migration `0019` add
 columns to `shield_scan`, additive only, with no backfill: a pre-0.15.0 row reads as "Legacy"
 rather than being guessed at.
 
-The current source tree targets `0.15.1`, a hotfix to how activity is attributed. It is
-**not yet deployed** — Production remains `0.15.0` until it ships.
+The `0.15.1` hotfix shipped, correcting how automation is attributed in the activity mirror.
 
 Phase 15 was the first system caller to hand `writeLog` a readable actor string
 (`system:shield-scheduler`), and the mirror that copies every telemetry line into `audit_event`
@@ -88,7 +87,41 @@ address and this app applies no email format validation of its own, so classifyi
 prefix would have let a self-registered account file its own activity as the platform. Existing
 rows are left alone — `audit_event` is append-only by design, so this is a forward fix.
 
-**Live:** <https://ysd-zero-cloud.ysd-zero-cloud.workers.dev> — running `0.15.0`.
+`0.16.0`, Phase 16: **Compute Node Onboarding & First Deployment**, is the current
+Production baseline. It was accepted against Production with a real Compute Node: the
+published bundle was downloaded, checksum-verified, paired, and it built and ran an app
+end to end before the acceptance node was revoked.
+
+Until now, pairing a Compute Node meant cloning this repository and running a TypeScript file
+with an experimental flag, from a PowerShell snippet that had no Linux or macOS equivalent. That
+is not an onboarding path; it is a wall. Phase 16 replaces it with a single self-contained
+JavaScript file the control plane serves from its own origin:
+
+- **No clone, no `node_modules`, no TypeScript flag.** The agent's whole transitive graph imports
+  nothing but `node:*` built-ins, so it bundles to one file that runs anywhere Node.js does. A
+  test asserts that property, so the day a dependency appears the build fails here rather than on
+  a stranger's machine.
+- **Version-pinned and checksum-verified.** `npm run agent:build` emits
+  `ysd-node-agent-<version>.mjs`, its SHA-256, and a manifest, reproducibly — identical source
+  produces identical bytes. The generated install command downloads, hashes, compares, and only
+  then runs, discarding the file on a mismatch. It is never `irm | iex`.
+- **A real preflight.** Heartbeat freshness, agent version, protocol, the App Runtime contract,
+  the runtime major, deployment capacity, and resource headroom are evaluated from data the node
+  already reports. Nothing executes on the node, and the deployment path re-runs the blocking
+  subset at queue time, so a browser cannot skip it.
+- **Windows, Linux and macOS**, each with correctly quoted commands.
+
+The one-time pairing code is typed at the agent's prompt rather than pasted into the command, so
+it never reaches shell history or a process list, and the agent now generates its own 256-bit
+local key instead of asking a person to invent a passphrase.
+
+On integrity, plainly: this is a pinned version, a published SHA-256, and HTTPS, with a build
+that fails closed on mismatch. It is **not** a code-signed binary — that needs a Windows signing
+certificate and an Apple Developer identity, neither of which exists for this project — and a
+compromised control plane could replace the artifact and its digest together. Migration `0019`
+remains the newest; Phase 16 adds no schema.
+
+**Live:** <https://ysd-zero-cloud.ysd-zero-cloud.workers.dev> — running `0.16.0`.
 
 This is a standalone project intended only for `OpenYsd/ysd-zero-cloud`. It has no dependency on,
 and makes no changes to, `OpenYsd/ysd-ai`.

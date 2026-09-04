@@ -1,13 +1,13 @@
 {
   "name": "ysd-zero-cloud",
-  "version": "0.15.1",
+  "version": "0.16.0",
   "private": true,
   "engines": {
     "node": ">=22.13.0"
   },
   "scripts": {
     "dev": "vinext dev",
-    "build": "vinext build",
+    "build": "npm run agent:build && vinext build",
     "predeploy": "npm run build && node scripts/prepare-deploy.mjs && npm run zero:check",
     "deploy": "wrangler deploy --config dist/server/wrangler.json",
     "start": "wrangler dev --config dist/server/wrangler.json",
@@ -18,7 +18,8 @@
     "zero:check": "node --experimental-strip-types scripts/zero-mode-deploy-guard.ts",
     "auth:schema": "node --experimental-strip-types scripts/generate-auth-schema.mjs",
     "db:migrate": "wrangler d1 migrations apply ysd-zero-cloud --remote",
-    "db:migrate:local": "wrangler d1 migrations apply ysd-zero-cloud --local"
+    "db:migrate:local": "wrangler d1 migrations apply ysd-zero-cloud --local",
+    "agent:build": "node scripts/build-agent.mjs"
   },
   "dependencies": {
     "@base-ui/react": "1.7.0",

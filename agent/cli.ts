@@ -12,6 +12,7 @@ import {
   signAgentRequest,
   type SignedJobClaim,
 } from '../lib/nodes.ts';
+import { defaultCredentialPath } from './agent-key.ts';
 import { loadCredentials, saveCredentials } from './credentials.ts';
 import {
   collectGameServerSnapshots,
@@ -56,12 +57,24 @@ function safeOrigin(value: string): string {
   return url.origin;
 }
 
+const USAGE = [
+  'YSD Node Agent',
+  '',
+  'Usage:',
+  '  node ysd-node-agent-<version>.mjs pair --url <https://control-plane>',
+  '  node ysd-node-agent-<version>.mjs run  --url <https://control-plane>',
+  '',
+  'Options:',
+  '  --url <origin>     Control plane origin. HTTPS, or HTTP on localhost.',
+  '  --config <path>    Credential file. Defaults to a per-user location.',
+  '  --version          Print the agent and protocol version.',
+  '  --help             Print this message.',
+].join(String.fromCharCode(10));
+
 function parseArguments(): Arguments {
   const candidate = process.argv[2] ?? 'run';
   if (candidate !== 'pair' && candidate !== 'run') {
-    throw new Error(
-      'Usage: agent/cli.ts pair|run --url <https://control-plane> [--config <path>]',
-    );
+    throw new Error(USAGE);
   }
   const origin = safeOrigin(
     argument('--url') ?? process.env.YSD_NODE_URL ?? '',
@@ -72,7 +85,7 @@ function parseArguments(): Arguments {
     configPath:
       argument('--config') ??
       process.env.YSD_NODE_CONFIG ??
-      '.ysd-node-agent.credentials',
+      defaultCredentialPath(),
   };
 }
 
@@ -101,13 +114,59 @@ async function jsonRequest<T>(url: string, init: RequestInit): Promise<T> {
   return body;
 }
 
-async function pair(arguments_: Arguments): Promise<void> {
-  const code = process.env.YSD_NODE_PAIRING_CODE ?? '';
-  if (!/^ysdp_[A-Za-z0-9_-]{32}$/.test(code)) {
+const PAIRING_CODE_PATTERN = /^ysdp_[A-Za-z0-9_-]{32}$/;
+
+/**
+ * Reads the one-time pairing code.
+ *
+ * An environment variable stays supported because automation and the
+ * acceptance harness need it, but it is no longer the documented path. Typing
+ * the code at a prompt keeps it out of shell history, out of the process list
+ * where any other local user can read it, and out of the terminal scrollback
+ * someone pastes into a screenshot. The code is never echoed back.
+ */
+async function readPairingCode(): Promise<string> {
+  const supplied = process.env.YSD_NODE_PAIRING_CODE?.trim() ?? '';
+  if (supplied) {
+    if (!PAIRING_CODE_PATTERN.test(supplied)) {
+      throw new Error('YSD_NODE_PAIRING_CODE is not a valid one-time pairing code.');
+    }
+    return supplied;
+  }
+
+  if (!process.stdin.isTTY) {
     throw new Error(
-      'Set YSD_NODE_PAIRING_CODE to the one-time code shown by the Nodes page.',
+      'Run this in an interactive terminal so the pairing code can be typed, '
+      + 'or set YSD_NODE_PAIRING_CODE for automation.',
     );
   }
+
+  process.stdout.write('Paste the one-time pairing code from the Nodes page: ');
+  const code = await new Promise<string>((resolve) => {
+    let buffer = '';
+    process.stdin.setEncoding('utf8');
+    const onData = (chunk: string) => {
+      buffer += chunk;
+      const newline = buffer.indexOf('\n');
+      if (newline < 0) return;
+      process.stdin.off('data', onData);
+      process.stdin.pause();
+      resolve(buffer.slice(0, newline).trim());
+    };
+    process.stdin.on('data', onData);
+    process.stdin.resume();
+  });
+  process.stdout.write('\n');
+
+  if (!PAIRING_CODE_PATTERN.test(code)) {
+    // The value is not echoed back: a mistyped code is still a secret.
+    throw new Error('That is not a valid one-time pairing code.');
+  }
+  return code;
+}
+
+async function pair(arguments_: Arguments): Promise<void> {
+  const code = await readPairingCode();
   const response = await jsonRequest<{
     nodeId: string;
     workspaceId: string;
@@ -368,6 +427,20 @@ async function run(arguments_: Arguments): Promise<never> {
       backoff = Math.min(30_000, backoff * 2);
     }
   }
+}
+
+const flags = new Set(process.argv.slice(2));
+if (flags.has('--version') || flags.has('-v')) {
+  // Deliberately just these two lines. Printing the platform, paths, or
+  // runtime details here would leak machine facts into whatever someone
+  // pastes into a support thread.
+  console.log('YSD Node Agent ' + CURRENT_AGENT_VERSION);
+  console.log('Protocol ' + String(NODE_PROTOCOL_VERSION));
+  process.exit(0);
+}
+if (flags.has('--help') || flags.has('-h') || flags.has('help')) {
+  console.log(USAGE);
+  process.exit(0);
 }
 
 const arguments_ = parseArguments();

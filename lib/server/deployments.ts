@@ -21,6 +21,7 @@ import {
   sealNodeEnvironment,
   stableJson,
 } from '@/lib/nodes';
+import { deploymentBlockers } from '@/lib/node-preflight';
 import { createSmartDeployPlan, type SmartDeployPlan } from '@/lib/smart-deploy';
 import { authSecret } from './auth';
 import { count, db, execute, query, queryOne } from './db';
@@ -62,6 +63,8 @@ type DeployNodeRow = {
   tokenCiphertext: string;
   lastHeartbeatAt: number | null;
   revokedAt: number | null;
+  agentVersion: string | null;
+  protocolVersion: number | null;
 };
 
 const SELECT = `d.id, d.projectId, d.repository, d.target, d.framework, d.commitSha,
@@ -107,7 +110,8 @@ async function deploymentNode(workspaceId: string, nodeId: string): Promise<
   | { ok: false; status: number; error: string }
 > {
   const row = await queryOne<DeployNodeRow>(
-    `SELECT id, name, capabilities, tokenCiphertext, lastHeartbeatAt, revokedAt
+    `SELECT id, name, capabilities, tokenCiphertext, lastHeartbeatAt, revokedAt,
+            agentVersion, protocolVersion
      FROM compute_node WHERE workspaceId = ? AND id = ?`,
     workspaceId,
     nodeId,
@@ -119,6 +123,33 @@ async function deploymentNode(workspaceId: string, nodeId: string): Promise<
   if (!capabilities?.contracts.appRuntime || !capabilities.appRuntime?.available) {
     return { ok: false, status: 409, error: 'The selected node does not advertise the secure App Runtime contract.' };
   }
+
+  // The same evaluator the preflight UI uses, re-run where it is
+  // authoritative. A browser cannot skip this by claiming preflight passed.
+  //
+  // It also closes something the heartbeat could not. An agent below the
+  // minimum version is refused at heartbeat and drifts offline on its own, so
+  // the version gate is enforced indirectly. `protocolVersion` is different:
+  // it is checked only when the node PAIRS, and the stored value never changes
+  // afterwards. Once the control plane moves to protocol 2, a node admitted
+  // under protocol 1 would still heartbeat happily and could be handed a job
+  // written against a contract it does not speak.
+  const blockers = deploymentBlockers({
+    belongsToWorkspace: true,
+    status,
+    agentVersion: row.agentVersion,
+    protocolVersion: row.protocolVersion,
+    capabilities,
+  });
+  if (blockers.length > 0) {
+    return {
+      ok: false,
+      status: 409,
+      // Check codes from the fixed enum, never node-supplied text.
+      error: `The selected Compute Node is not ready to deploy (${blockers.join(', ')}).`,
+    };
+  }
+
   try {
     return { ok: true, row, token: await decryptSecret(row.tokenCiphertext, credentialKey()) };
   } catch {

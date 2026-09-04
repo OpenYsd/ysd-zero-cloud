@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   Activity,
@@ -35,8 +35,27 @@ import { EmptyState, MetricGrid } from '@/components/ui-bits';
 import type { ComputeNode, NodeJob, NodesState } from '@/lib/domain';
 import { formatBytes } from '@/lib/free-tier';
 import { relativeTime } from '@/lib/format';
+import {
+  AGENT_PLATFORMS,
+  AGENT_PLATFORM_LABELS,
+  buildInstallCommand,
+  MINIMUM_NODE_VERSION,
+  parseAgentManifest,
+  type AgentManifest,
+  type AgentPlatform,
+} from '@/lib/agent-release';
+import { compatibilityLabel } from '@/lib/node-preflight';
 import { agentVersionSupported } from '@/lib/nodes';
 import { cn } from '@/lib/utils';
+
+type PairingWatch = {
+  id: string;
+  state: 'pending' | 'paired' | 'expired' | 'cancelled';
+  expiresAt: number;
+  nodeId: string | null;
+  nodeStatus: 'online' | 'stale' | 'offline' | 'revoked' | null;
+  compatibility: 'compatible' | 'upgrade_required' | 'protocol_mismatch' | 'unknown' | null;
+};
 
 type Pairing = {
   id: string;
@@ -66,6 +85,57 @@ export function NodesView({ state, now }: { state: NodesState; now: number }) {
   const [message, setMessage] = useState('YSD secure node check');
   const [targetNodeId, setTargetNodeId] = useState('');
   const [pairing, setPairing] = useState<Pairing | null>(null);
+  const [platform, setPlatform] = useState<AgentPlatform>('windows');
+  const [manifest, setManifest] = useState<AgentManifest | null>(null);
+  const [watch, setWatch] = useState<PairingWatch | null>(null);
+
+  // The release description is a static file the control plane already serves
+  // with its own assets. It carries the digest the install command pins, and
+  // nothing tenant-specific, so it needs no authenticated endpoint of its own.
+  useEffect(() => {
+    let cancelled = false;
+    void fetch('/agent/manifest.json')
+      .then((response) => (response.ok ? response.json() : null))
+      .then((body) => {
+        if (!cancelled) setManifest(parseAgentManifest(body));
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Watch the ticket until it reaches a terminal state or its own expiry.
+  // Bounded on both axes: a fixed interval, and a hard stop at the TTL, so a
+  // forgotten tab cannot poll the control plane forever.
+  useEffect(() => {
+    if (!pairing) return;
+    let stopped = false;
+    const deadline = pairing.expiresAt + 30_000;
+
+    async function tick() {
+      if (stopped || Date.now() > deadline) return;
+      try {
+        const response = await fetch(`/api/nodes/pairing/${pairing!.id}`);
+        const body = (await response.json()) as { pairing?: PairingWatch };
+        if (stopped || !body.pairing) return;
+        setWatch(body.pairing);
+        if (body.pairing.state !== 'pending') {
+          if (body.pairing.state === 'paired') router.refresh();
+          return;
+        }
+      } catch {
+        // A dropped poll is not an error worth showing; the next one retries.
+      }
+      if (!stopped) window.setTimeout(() => void tick(), 5_000);
+    }
+
+    const handle = window.setTimeout(() => void tick(), 5_000);
+    return () => {
+      stopped = true;
+      window.clearTimeout(handle);
+    };
+  }, [pairing, router]);
   const [pending, setPending] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
@@ -146,11 +216,29 @@ export function NodesView({ state, now }: { state: NodesState; now: number }) {
     }
   }
 
+  async function cancelTicket() {
+    if (!pairing) return;
+    setPending('cancel');
+    try {
+      await fetch(`/api/nodes/pairing/${pairing.id}`, { method: 'DELETE' });
+      setWatch({ ...(watch ?? { id: pairing.id, expiresAt: pairing.expiresAt, nodeId: null, nodeStatus: null, compatibility: null }), state: 'cancelled' });
+      setPairing(null);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'The ticket could not be cancelled.');
+    } finally {
+      setPending(null);
+    }
+  }
+
   const activeNodes = state.nodes.filter((node) => node.status !== 'revoked');
   const origin = typeof window === 'undefined' ? '' : window.location.origin;
-  const command = pairing
-    ? `$env:YSD_NODE_URL = '${origin}'\n$env:YSD_NODE_PAIRING_CODE = '${pairing.code}'\n$env:YSD_NODE_AGENT_KEY = '<your local passphrase, 16+ characters>'\nnode --experimental-strip-types agent/cli.ts pair --url $env:YSD_NODE_URL`
-    : '';
+  // Per-platform, version-pinned, checksum-verified. The one-time code is
+  // deliberately absent: it is typed at the agent prompt instead, so it never
+  // reaches a shell history file or a process list.
+  const install = manifest
+    ? buildInstallCommand({ origin, manifest, platform })
+    : null;
+  const command = install?.script ?? '';
 
   return (
     <>
@@ -235,14 +323,29 @@ export function NodesView({ state, now }: { state: NodesState; now: number }) {
           <div className="rounded-xl border border-white/[0.07] bg-black/20 p-4">
             {pairing ? (
               <>
+                <fieldset className="mb-3 flex flex-wrap gap-1.5">
+                  <legend className="sr-only">Choose your operating system</legend>
+                  {AGENT_PLATFORMS.map((option) => (
+                    <Button
+                      key={option}
+                      size="sm"
+                      variant={option === platform ? 'default' : 'ghost'}
+                      aria-pressed={option === platform}
+                      onClick={() => setPlatform(option)}
+                    >
+                      {AGENT_PLATFORM_LABELS[option]}
+                    </Button>
+                  ))}
+                </fieldset>
                 <div className="flex items-center justify-between gap-3">
                   <div>
                     <p className="text-xs font-semibold text-white/75">
-                      One-time agent command
+                      Install and pair on {AGENT_PLATFORM_LABELS[platform]}
                     </p>
                     <p className="mt-1 text-[10px] text-white/30">
                       Expires {relativeTime(pairing.expiresAt, now)} · agent{' '}
-                      {pairing.minimumAgentVersion}+
+                      {pairing.minimumAgentVersion}+ · needs Node.js{' '}
+                      {MINIMUM_NODE_VERSION}+
                     </p>
                   </div>
                   <Button
@@ -258,15 +361,56 @@ export function NodesView({ state, now }: { state: NodesState; now: number }) {
                   </Button>
                 </div>
                 <pre className="mt-3 overflow-x-auto whitespace-pre-wrap break-all rounded-lg border border-white/[0.06] bg-[#070a09] p-3 text-[10px] leading-5 text-[#c8ff69]/75">
-                  {command}
+                  {command || 'Building the agent release…'}
                 </pre>
+
+                <div className="mt-3 rounded-lg border border-white/[0.06] bg-black/20 p-3">
+                  <p className="text-[10px] font-semibold text-white/60">
+                    Your one-time code — the agent will ask for it
+                  </p>
+                  <p className="mt-1 break-all font-mono text-[11px] text-[#c8ff69]">
+                    {pairing.code}
+                  </p>
+                  <p className="mt-2 text-[10px] leading-4 text-white/30">
+                    It is kept out of the command on purpose, so it never reaches your
+                    shell history. It is shown once and cannot be recovered — if you
+                    lose it, create another ticket.
+                  </p>
+                </div>
+
+                <div className="mt-3 flex items-center justify-between gap-3">
+                  <output className="text-[10px] text-white/35">
+                    {watch?.state === 'paired'
+                      ? `Paired. ${compatibilityLabel(watch.nodeStatus ?? 'offline', watch.compatibility ?? 'unknown')}.`
+                      : watch?.state === 'expired'
+                        ? 'That ticket expired. Create another one.'
+                        : watch?.state === 'cancelled'
+                          ? 'That ticket was cancelled.'
+                          : 'Waiting for the node to pair…'}
+                  </output>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => void cancelTicket()}
+                    disabled={pending === 'cancel' || watch?.state === 'paired'}
+                  >
+                    {pending === 'cancel' ? <Loader2 className="animate-spin" /> : null}
+                    Cancel ticket
+                  </Button>
+                </div>
+
+                <p className="mt-3 text-[10px] leading-4 text-white/25">
+                  The command pins agent {manifest?.version ?? '…'} and checks its
+                  SHA-256 before running it, and stops if the digest does not match.
+                  That is a checksum over HTTPS, not a signed binary.
+                </p>
               </>
             ) : (
               <div className="grid min-h-28 place-items-center text-center">
                 <div>
                   <KeyRound className="mx-auto size-5 text-white/20" />
                   <p className="mt-2 text-[10px] text-white/28">
-                    Create a ticket to reveal the one-time onboarding command.
+                    Create a ticket to get a download-and-pair command for your machine.
                   </p>
                 </div>
               </div>

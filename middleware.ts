@@ -21,5 +21,14 @@ export function middleware() {
 export const config = {
   // Everything except the static asset paths, which Cloudflare serves directly
   // and which carry no session or user data.
-  matcher: ['/((?!_next/static|_next/image|favicon.svg|og.png).*)'],
+  //
+  // `agent/` is the Compute Node release: a public, immutable, version-pinned
+  // bundle plus its checksum and manifest. It has to be listed here for the
+  // same reason the two files above are. Anything the matcher covers reaches
+  // the app router first, which answers an unknown path with the 404 page --
+  // so without this the download 404s even though the Worker is holding the
+  // asset. That is exactly what happened on the first 0.16.0 deploy, and it
+  // only shows up in Production: the dev server serves `public/` directly and
+  // never consults this matcher.
+  matcher: ['/((?!_next/static|_next/image|agent/|favicon.svg|og.png).*)'],
 };
