@@ -793,6 +793,11 @@ async function recordFailedAttempt(
       source: 'shield',
       message: 'Scan did not complete. No posture was recorded for this attempt.',
       actor,
+      // A sweep is platform automation, so its activity mirror must not be
+      // filed against a person. `trigger` is a literal in server code -- the
+      // route hard-codes 'manual' and only the scheduler passes 'scheduled'
+      // -- so nothing from a request can reach this.
+      actorType: trigger === 'scheduled' ? 'system' : undefined,
     });
   } catch {
     // See the note above: nothing useful is left to do here.
@@ -881,6 +886,11 @@ export async function runScan(
     message: `Scan complete · score ${report.score} · ${report.findings.length} finding${report.findings.length === 1 ? '' : 's'}`,
     actor,
     resource: scan.id,
+    // A sweep is platform automation, so its activity mirror must not be
+    // filed against a person. `trigger` is a literal in server code -- the
+    // route hard-codes 'manual' and only the scheduler passes 'scheduled'
+    // -- so nothing from a request can reach this.
+    actorType: trigger === 'scheduled' ? 'system' : undefined,
   });
 
   return { ...report, scan };

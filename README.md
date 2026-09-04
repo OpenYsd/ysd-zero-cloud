@@ -44,8 +44,7 @@ token or header. Nothing is built, cloned, or executed, and no deployment or nod
 created by an analysis; a Compute Node stays mandatory for every build, execution, and
 deployment. Migration `0018` adds six nullable columns to `project`, additive only.
 
-The current source tree targets `0.15.0`, Phase 15: **Shield Continuous Posture**. It is
-**local acceptance complete and not yet deployed** — Production remains `0.14.0` until it ships.
+Phase 15, **Shield Continuous Posture**, shipped as `0.15.0`.
 
 `workspace.autoScan` has been stored, defaulted on, and shown in Settings since Phase 10, and
 until now nothing read it: Shield ran only when someone pressed the button, so a workspace whose
@@ -76,7 +75,20 @@ finding has been open, and whether the last attempt failed. Migration `0019` add
 columns to `shield_scan`, additive only, with no backfill: a pre-0.15.0 row reads as "Legacy"
 rather than being guessed at.
 
-**Live:** <https://ysd-zero-cloud.ysd-zero-cloud.workers.dev> — running `0.14.0`.
+The current source tree targets `0.15.1`, a hotfix to how activity is attributed. It is
+**not yet deployed** — Production remains `0.15.0` until it ships.
+
+Phase 15 was the first system caller to hand `writeLog` a readable actor string
+(`system:shield-scheduler`), and the mirror that copies every telemetry line into `audit_event`
+decided the actor kind from that string: anything non-null was a person. So the sweep's companion
+`activity.shield` records were filed as `actorType = user`. The catalogued evidence action was
+always correct; only the generic mirror was wrong. Automation now declares itself at the call
+site instead. That distinction matters: the actor string is usually the signed-in user's email
+address and this app applies no email format validation of its own, so classifying on a `system:`
+prefix would have let a self-registered account file its own activity as the platform. Existing
+rows are left alone — `audit_event` is append-only by design, so this is a forward fix.
+
+**Live:** <https://ysd-zero-cloud.ysd-zero-cloud.workers.dev> — running `0.15.0`.
 
 This is a standalone project intended only for `OpenYsd/ysd-zero-cloud`. It has no dependency on,
 and makes no changes to, `OpenYsd/ysd-ai`.

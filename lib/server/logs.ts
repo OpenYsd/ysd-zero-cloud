@@ -8,6 +8,7 @@ import {
   type LogLevel,
   type LogSource,
 } from '@/lib/domain';
+import { classifyActivityActor, type EvidenceActorType } from '@/lib/audit-actions';
 import { execute, query, queryOne } from './db';
 import { recordAudit } from './audit';
 
@@ -29,6 +30,13 @@ export type LogInput = {
   message: string;
   actor?: string | null;
   resource?: string | null;
+  /**
+   * Declares that the caller is platform automation rather than a person, for
+   * the `audit_event` mirror below. Only server code sets this, and only as a
+   * literal: it is never derived from `actor`, because that string is usually
+   * a user-supplied email address. See `classifyActivityActor`.
+   */
+  actorType?: EvidenceActorType;
 };
 
 export async function writeLog(input: LogInput): Promise<void> {
@@ -50,14 +58,15 @@ export async function writeLog(input: LogInput): Promise<void> {
       input.workspaceId,
     );
     if (workspace?.organizationId) {
-      const serviceAccount = input.actor?.endsWith('.service.ysd.invalid')
-        ? input.actor.slice(0, -'.service.ysd.invalid'.length)
-        : null;
+      const { actorType, actorId } = classifyActivityActor({
+        actor: input.actor,
+        trusted: input.actorType,
+      });
       await recordAudit({
         organizationId: workspace.organizationId,
         workspaceId: input.workspaceId,
-        actorType: serviceAccount ? 'service_account' : input.actor ? 'user' : 'system',
-        actorId: serviceAccount ?? input.actor ?? 'system',
+        actorType,
+        actorId,
         action: `activity.${input.source}`,
         resourceType: input.source,
         resourceId: input.resource ?? null,

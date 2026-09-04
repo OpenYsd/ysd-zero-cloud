@@ -271,6 +271,48 @@ export const EVIDENCE_ACTIONS = [
 
 export type EvidenceActionName = (typeof EVIDENCE_ACTIONS)[number]['action'];
 
+/** The actor kinds an `audit_event` row can carry. */
+export type EvidenceActorType = 'user' | 'service_account' | 'system';
+
+/** Service-account actors arrive as a synthetic address, never a real one. */
+const SERVICE_ACCOUNT_SUFFIX = '.service.ysd.invalid';
+
+/**
+ * Decides who an activity mirror is attributed to.
+ *
+ * `trusted` is the ONLY way to claim `system`, and it is deliberately not
+ * inferred from the actor string. That string is, at most call sites, the
+ * signed-in user's email address; this app applies no email format validation
+ * of its own, so an address such as `system:anything@example.com` cannot be
+ * ruled out. A prefix rule would therefore let a self-registered user file
+ * their own activity as platform automation. Automation has to say so at the
+ * call site, where the value is a literal in server code and nothing from a
+ * request body, query or header can reach it.
+ *
+ * Pure and exported so it can be executed by tests rather than only read:
+ * `lib/server/logs.ts` reaches for `cloudflare:workers` and cannot be imported
+ * into the test runner.
+ */
+export function classifyActivityActor(input: {
+  actor?: string | null;
+  trusted?: EvidenceActorType;
+}): { actorType: EvidenceActorType; actorId: string } {
+  const serviceAccount = input.actor?.endsWith(SERVICE_ACCOUNT_SUFFIX)
+    ? input.actor.slice(0, -SERVICE_ACCOUNT_SUFFIX.length)
+    : null;
+  if (serviceAccount) {
+    return { actorType: 'service_account', actorId: serviceAccount };
+  }
+  if (input.trusted) {
+    // The readable actor is preserved: `system:shield-scheduler` says which
+    // automation did it, which is worth more than a bare "system".
+    return { actorType: input.trusted, actorId: input.actor ?? 'system' };
+  }
+  return input.actor
+    ? { actorType: 'user', actorId: input.actor }
+    : { actorType: 'system', actorId: 'system' };
+}
+
 const BY_ACTION = new Map<string, EvidenceAction>(
   EVIDENCE_ACTIONS.map((entry) => [entry.action, entry]),
 );
