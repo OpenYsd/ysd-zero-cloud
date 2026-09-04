@@ -53,7 +53,11 @@ const TOGGLES: Toggle[] = [
   {
     setting: 'autoScan',
     title: 'Automatic security scans',
-    copy: 'Run YSD Shield after a deployment plan is recorded.',
+    // Until 0.15.0 this claimed a deployment triggered a scan. Nothing ever
+    // read the setting, so the sentence described a feature that did not
+    // exist. The replacement describes eligibility and a queue rather than an
+    // interval, because the bounded sweep cannot guarantee one.
+    copy: 'Let YSD Shield re-scan this workspace on its own, without waiting for someone to press Run. Eligible about 6 hours after the last automatic attempt, then scanned when the queue reaches it.',
   },
   {
     setting: 'sleepIdleServers',

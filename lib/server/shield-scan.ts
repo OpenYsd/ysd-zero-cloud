@@ -7,7 +7,20 @@ import {
   type ShieldReport,
   type ShieldSnapshot,
 } from '@/lib/shield';
-import { count, execute, query, queryOne } from './db';
+import {
+  POSTURE_LIMITS,
+  chunk,
+  planFindingReconciliation,
+  planScanHistoryTrim,
+  type ExistingFinding,
+  type PostureDelta,
+  type ReconciliationPlan,
+  type ScanStatus,
+  type ScanTrigger,
+  type StoredPostureDelta,
+  UNKNOWN_GRADE,
+} from '@/lib/shield-posture';
+import { count, db, execute, query, queryOne } from './db';
 import { emailVerificationRequired } from './auth';
 import { countBillableResources } from './deployments';
 import { emailVerificationStatus, isEmailConfigured } from './email';
@@ -59,11 +72,25 @@ export type StoredFinding = ShieldFinding & {
 export type ScanRecord = {
   id: string;
   score: number;
-  grade: ShieldReport['grade'];
+  /**
+   * `'unknown'` on a failed attempt, which has no posture to grade. Use
+   * `displayGrade` before rendering rather than trusting this to be a grade.
+   */
+  grade: ShieldReport['grade'] | typeof UNKNOWN_GRADE;
   headline: string;
   findingCount: number;
   durationMs: number;
   createdAt: number;
+  /** Where the scan came from. null on rows written before 0.15.0. */
+  trigger: ScanTrigger | null;
+  /**
+   * null on pre-0.15.0 rows, which were only ever written on success.
+   * 'failed' means the attempt did not finish: its score and grade are
+   * placeholders and must never be read as posture.
+   */
+  status: ScanStatus | null;
+  /** What moved since the previous scan. null when it was never recorded. */
+  delta: StoredPostureDelta | null;
 };
 
 async function collectSnapshot(
@@ -467,125 +494,365 @@ async function countExpiredSessions(now: number, organizationId: string): Promis
   }
 }
 
+/**
+ * Applies a scan's findings in a bounded number of round trips.
+ *
+ * The 0.14.0 version read and wrote one finding at a time, so a workspace
+ * reporting N findings cost roughly `2N` sequential round trips plus one more
+ * per resolution. Finding codes are templated per resource
+ * (`table-no-primary-key:<table>`, `secret-overdue:<name>:<env>`,
+ * `public-project:<id>`), so N grows with the tables, secrets and public
+ * projects a workspace has -- it is not capped by the rule catalog. That was
+ * tolerable behind a button a human presses. It is not something to put on a
+ * timer.
+ *
+ * Now: one read of this workspace's findings, a pure plan, then writes sent in
+ * fixed-size `database.batch` chunks. Round trips are
+ * `1 + ceil(writes / POSTURE_LIMITS.writeBatchSize)` -- independent of N
+ * except through that ceiling.
+ *
+ * Events are deliberately NOT batched. `emitWorkflowEvent` re-checks that the
+ * finding really belongs to this workspace before writing, and that check is
+ * worth more than the round trips it costs. They stay bounded because only a
+ * real transition emits one: a finding that has not moved emits nothing, which
+ * is what stops a recurring scan from re-announcing the same problem for ever.
+ */
 async function reconcileFindings(
   workspaceId: string,
   findings: ShieldFinding[],
   now: number,
-): Promise<void> {
-  const codes = new Set(findings.map((finding) => finding.code));
-
-  for (const finding of findings) {
-    const existing = await queryOne<{ id: string; firstSeenAt: number; status: string; severity: string }>(
-      'SELECT id, firstSeenAt, status, severity FROM shield_finding WHERE workspaceId = ? AND code = ?',
-      workspaceId,
-      finding.code,
-    );
-
-    if (existing) {
-      await execute(
-        `UPDATE shield_finding
-         SET title = ?, detail = ?, resource = ?, severity = ?, remediation = ?, status = 'open', lastSeenAt = ?
-         WHERE id = ?`,
-        finding.title,
-        finding.detail,
-        finding.resource,
-        finding.severity,
-        finding.remediation,
-        now,
-        existing.id,
-      );
-      if (existing.status !== 'open') {
-        await emitWorkflowEvent({
-          workspaceId, type: 'shield.finding.opened', resourceType: 'shield_finding',
-          resourceId: existing.id, payload: { findingId: existing.id, status: 'open', severity: finding.severity },
-          dedupeKey: `shield-opened:${existing.id}:${now}`,
-        });
-      }
-      if (existing.severity !== finding.severity) {
-        await emitWorkflowEvent({
-          workspaceId, type: 'shield.finding.severity_changed', resourceType: 'shield_finding',
-          resourceId: existing.id,
-          payload: { findingId: existing.id, previousSeverity: existing.severity, severity: finding.severity },
-          dedupeKey: `shield-severity:${existing.id}:${existing.severity}:${finding.severity}:${now}`,
-        });
-      }
-      continue;
-    }
-
-    const findingId = createId('fnd');
-    await execute(
-      `INSERT INTO shield_finding (id, workspaceId, code, title, detail, resource, severity, remediation, status, firstSeenAt, lastSeenAt)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)`,
-      findingId,
-      workspaceId,
-      finding.code,
-      finding.title,
-      finding.detail,
-      finding.resource,
-      finding.severity,
-      finding.remediation,
-      now,
-      now,
-    );
-    await emitWorkflowEvent({
-      workspaceId, type: 'shield.finding.opened', resourceType: 'shield_finding',
-      resourceId: findingId, payload: { findingId, status: 'open', severity: finding.severity },
-      dedupeKey: `shield-opened:${findingId}:${now}`,
-    });
-  }
-
-  // Anything the rules no longer report has been fixed. It stays in the table
-  // as history rather than disappearing.
-  const open = await query<{ id: string; code: string }>(
-    "SELECT id, code FROM shield_finding WHERE workspaceId = ? AND status = 'open'",
+): Promise<PostureDelta> {
+  const existing = await query<ExistingFinding>(
+    'SELECT id, code, status, severity FROM shield_finding WHERE workspaceId = ?',
     workspaceId,
   );
-  for (const row of open) {
-    if (codes.has(row.code)) continue;
-    await execute(
-      "UPDATE shield_finding SET status = 'resolved', lastSeenAt = ? WHERE id = ?",
-      now,
-      row.id,
+
+  // Minted up front so the plan stays pure and each insert agrees with its
+  // event about the identifier.
+  const newIds = findings.map(() => createId('fnd'));
+  const plan = planFindingReconciliation({ existing, reported: findings, newIds });
+
+  await applyReconciliationPlan(workspaceId, plan, newIds, now);
+  await emitReconciliationEvents(workspaceId, plan, now);
+  return plan.delta;
+}
+
+/** The write half: bounded batches, nothing sequential per finding. */
+async function applyReconciliationPlan(
+  workspaceId: string,
+  plan: ReconciliationPlan,
+  newIds: readonly string[],
+  now: number,
+): Promise<void> {
+  const database = await db();
+  const statements: D1PreparedStatement[] = [];
+
+  const insertSql =
+    'INSERT INTO shield_finding'
+    + ' (id, workspaceId, code, title, detail, resource, severity, remediation, status, firstSeenAt, lastSeenAt)'
+    + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)";
+  const updateSql =
+    "UPDATE shield_finding SET title = ?, detail = ?, resource = ?, severity = ?, remediation = ?, status = 'open', lastSeenAt = ? WHERE id = ? AND workspaceId = ?";
+  const resolveSql =
+    "UPDATE shield_finding SET status = 'resolved', lastSeenAt = ? WHERE id = ? AND workspaceId = ?";
+
+  let index = 0;
+  for (const insert of plan.inserts) {
+    const id = newIds[index] ?? createId('fnd');
+    index += 1;
+    statements.push(
+      database.prepare(insertSql).bind(
+        id,
+        workspaceId,
+        insert.finding.code,
+        insert.finding.title,
+        insert.finding.detail,
+        insert.finding.resource,
+        insert.finding.severity,
+        insert.finding.remediation,
+        now,
+        now,
+      ),
     );
+  }
+
+  for (const update of plan.updates) {
+    statements.push(
+      database.prepare(updateSql).bind(
+        update.finding.title,
+        update.finding.detail,
+        update.finding.resource,
+        update.finding.severity,
+        update.finding.remediation,
+        now,
+        update.id,
+        workspaceId,
+      ),
+    );
+  }
+
+  for (const resolve of plan.resolves) {
+    statements.push(database.prepare(resolveSql).bind(now, resolve.id, workspaceId));
+  }
+
+  // Every write carries `workspaceId` in its predicate as well as its id, so a
+  // planning mistake cannot reach another tenant's row.
+  for (const group of chunk(statements, POSTURE_LIMITS.writeBatchSize)) {
+    if (group.length > 0) await database.batch(group);
+  }
+}
+
+/** The event half: one call per real transition, each tenant-verified. */
+async function emitReconciliationEvents(
+  workspaceId: string,
+  plan: ReconciliationPlan,
+  now: number,
+): Promise<void> {
+  for (const event of plan.events) {
+    if (event.type === 'opened') {
+      await emitWorkflowEvent({
+        workspaceId, type: 'shield.finding.opened', resourceType: 'shield_finding',
+        resourceId: event.findingId,
+        payload: { findingId: event.findingId, status: 'open', severity: event.severity },
+        dedupeKey: `shield-opened:${event.findingId}:${now}`,
+      });
+      continue;
+    }
+    if (event.type === 'severity_changed') {
+      await emitWorkflowEvent({
+        workspaceId, type: 'shield.finding.severity_changed', resourceType: 'shield_finding',
+        resourceId: event.findingId,
+        payload: {
+          findingId: event.findingId,
+          previousSeverity: event.previousSeverity,
+          severity: event.severity,
+        },
+        dedupeKey: `shield-severity:${event.findingId}:${event.previousSeverity}:${event.severity}:${now}`,
+      });
+      continue;
+    }
     await emitWorkflowEvent({
       workspaceId, type: 'shield.finding.resolved', resourceType: 'shield_finding',
-      resourceId: row.id, payload: { findingId: row.id, status: 'resolved' },
-      dedupeKey: `shield-resolved:${row.id}:${now}`,
+      resourceId: event.findingId,
+      payload: { findingId: event.findingId, status: 'resolved' },
+      dedupeKey: `shield-resolved:${event.findingId}:${now}`,
     });
   }
 }
 
+/**
+ * Keeps scan history bounded, oldest first.
+ *
+ * Only `shield_scan` rows are ever removed here. Findings, audit evidence,
+ * workflow events, incidents and retention runs are untouched: this exists so
+ * a recurring sweep cannot grow one table without limit, not as a general
+ * retention mechanism.
+ */
+async function trimScanHistory(workspaceId: string): Promise<number> {
+  const scans = await query<{ id: string; createdAt: number }>(
+    'SELECT id, createdAt FROM shield_scan WHERE workspaceId = ? ORDER BY createdAt DESC',
+    workspaceId,
+  );
+  const doomed = planScanHistoryTrim(scans, POSTURE_LIMITS.historyPerWorkspace);
+  if (doomed.length === 0) return 0;
+
+  const database = await db();
+  const deleteSql = 'DELETE FROM shield_scan WHERE id = ? AND workspaceId = ?';
+  for (const group of chunk(doomed, POSTURE_LIMITS.writeBatchSize)) {
+    await database.batch(
+      group.map((id) => database.prepare(deleteSql).bind(id, workspaceId)),
+    );
+  }
+  return doomed.length;
+}
+
+
 export type ScanOutcome = ShieldReport & { scan: ScanRecord };
 
+const SCAN_COLUMNS =
+  'id, score, grade, headline, checks, findingCount, durationMs, createdAt,'
+  + ' scanTrigger, scanStatus, newFindings, resolvedFindings, reopenedFindings,'
+  + ' severityChangedFindings';
+
+const INSERT_SCAN_SQL =
+  'INSERT INTO shield_scan'
+  + ' (id, workspaceId, score, grade, headline, checks, findingCount, durationMs,'
+  + ' createdAt, scanTrigger, scanStatus, newFindings, resolvedFindings,'
+  + ' reopenedFindings, severityChangedFindings)'
+  + ' VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)';
+
+/** Completed and pre-0.15.0 rows. A failed attempt is never posture. */
+const NOT_FAILED = "(scanStatus IS NULL OR scanStatus <> 'failed')";
+
+/**
+ * What a failed attempt stores in the columns that are NOT NULL.
+ *
+ * A failed attempt still has to occupy a row: it is the only record that the
+ * scheduler tried, and without it a workspace that always fails would stay
+ * permanently at the front of the queue and consume every tick. So the row
+ * exists, and the values below are chosen so no reader can mistake it for a
+ * result -- a score outside the real 0..100 range, and a grade that is not one
+ * of the grades. Every read path filters on `scanStatus` as well.
+ */
+const FAILED_SCAN = {
+  score: -1,
+  grade: 'unknown',
+  headline: 'Scan did not complete.',
+  checks: '[]',
+} as const;
+
+type ScanRow = {
+  id: string;
+  score: number;
+  grade: ShieldReport['grade'] | typeof UNKNOWN_GRADE;
+  headline: string;
+  checks: string;
+  findingCount: number;
+  durationMs: number;
+  createdAt: number;
+  scanTrigger: string | null;
+  scanStatus: string | null;
+  newFindings: number | null;
+  resolvedFindings: number | null;
+  reopenedFindings: number | null;
+  severityChangedFindings: number | null;
+};
+
+/**
+ * A row written before 0.15.0 carries no provenance and no delta. Both stay
+ * null here rather than being filled in: "Legacy" and "not recorded" are true,
+ * and an invented "Manual" or a zeroed delta would not be.
+ */
+function toScanRecord(row: ScanRow): ScanRecord {
+  return {
+    id: row.id,
+    score: row.score,
+    grade: row.grade,
+    headline: row.headline,
+    findingCount: row.findingCount,
+    durationMs: row.durationMs,
+    createdAt: row.createdAt,
+    trigger:
+      row.scanTrigger === 'manual' || row.scanTrigger === 'scheduled'
+        ? row.scanTrigger
+        : null,
+    status:
+      row.scanStatus === 'completed' || row.scanStatus === 'failed'
+        ? row.scanStatus
+        : null,
+    delta:
+      row.newFindings === null
+        ? null
+        : {
+            opened: row.newFindings,
+            resolved: row.resolvedFindings ?? 0,
+            reopened: row.reopenedFindings ?? 0,
+            severityChanged: row.severityChangedFindings ?? 0,
+          },
+  };
+}
+
+/**
+ * Records that an attempt happened and did not finish.
+ *
+ * Deliberately best effort. If this write also fails the database is
+ * unavailable, in which case the scheduler could not have selected the
+ * workspace in the first place, so there is no hot loop left to protect
+ * against. The cause is never written down: an error message can carry SQL, a
+ * resource name or a stack path, and the log table is readable in-app.
+ */
+async function recordFailedAttempt(
+  workspaceId: string,
+  trigger: ScanTrigger,
+  startedAt: number,
+  actor: string,
+): Promise<void> {
+  const now = Date.now();
+  try {
+    await execute(
+      INSERT_SCAN_SQL,
+      createId('scan'),
+      workspaceId,
+      FAILED_SCAN.score,
+      FAILED_SCAN.grade,
+      FAILED_SCAN.headline,
+      FAILED_SCAN.checks,
+      0,
+      Math.max(0, now - startedAt),
+      now,
+      trigger,
+      'failed' satisfies ScanStatus,
+      null,
+      null,
+      null,
+      null,
+    );
+    await writeLog({
+      workspaceId,
+      level: 'ERROR',
+      source: 'shield',
+      message: 'Scan did not complete. No posture was recorded for this attempt.',
+      actor,
+    });
+  } catch {
+    // See the note above: nothing useful is left to do here.
+  }
+}
+
+/**
+ * Runs Shield against a workspace and records the result.
+ *
+ * Ordering matters. Findings are reconciled *before* the scan row is written,
+ * so a reconciliation that dies halfway can never leave behind a completed
+ * scan claiming a score whose findings were only partly applied. The failure
+ * path writes a `failed` row instead, which is what the scheduler reads as
+ * "this workspace was attempted".
+ */
 export async function runScan(
   workspaceId: string,
   userId: string,
   actor: string,
+  trigger: ScanTrigger = 'manual',
 ): Promise<ScanOutcome> {
   const startedAt = Date.now();
-  const snapshot = await collectSnapshot(workspaceId, userId);
-  const report = runShieldRules(snapshot);
 
-  // The scan is the one regular sweep this app has, so it doubles as the
-  // moment stale counters and expired attempt rows are cleared.
-  await Promise.all([pruneRateLimits(), pruneAttempts()]);
+  let report: ShieldReport;
+  let delta: PostureDelta;
+  try {
+    const snapshot = await collectSnapshot(workspaceId, userId);
+    report = runShieldRules(snapshot);
+
+    // The scan is the one regular sweep this app has, so it doubles as the
+    // moment stale counters and expired attempt rows are cleared.
+    await Promise.all([pruneRateLimits(), pruneAttempts()]);
+
+    delta = await reconcileFindings(workspaceId, report.findings, Date.now());
+  } catch (error) {
+    await recordFailedAttempt(workspaceId, trigger, startedAt, actor);
+    throw error;
+  }
+
   const now = Date.now();
-
-  await reconcileFindings(workspaceId, report.findings, now);
-
   const scan: ScanRecord = {
     id: createId('scan'),
     score: report.score,
     grade: report.grade,
     headline: report.headline,
     findingCount: report.findings.length,
-    durationMs: now - startedAt,
+    durationMs: Math.max(0, now - startedAt),
     createdAt: now,
+    trigger,
+    status: 'completed',
+    delta: {
+      opened: delta.opened,
+      resolved: delta.resolved,
+      reopened: delta.reopened,
+      severityChanged: delta.severityChanged,
+    },
   };
 
   await execute(
-    `INSERT INTO shield_scan (id, workspaceId, score, grade, headline, checks, findingCount, durationMs, createdAt)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    INSERT_SCAN_SQL,
     scan.id,
     workspaceId,
     scan.score,
@@ -595,7 +862,17 @@ export async function runScan(
     scan.findingCount,
     scan.durationMs,
     scan.createdAt,
+    trigger,
+    'completed' satisfies ScanStatus,
+    delta.opened,
+    delta.resolved,
+    delta.reopened,
+    delta.severityChanged,
   );
+
+  // Bounded history. Runs after the insert so the scan just written is one of
+  // the rows being kept, never one of the rows being counted out.
+  await trimScanHistory(workspaceId);
 
   await writeLog({
     workspaceId,
@@ -610,7 +887,17 @@ export async function runScan(
 }
 
 export type ShieldState = {
+  /**
+   * The newest scan that actually completed. A failed attempt never becomes
+   * the posture, however recent it is.
+   */
   scan: ScanRecord | null;
+  /** The newest attempt of any kind, so a failed sweep is visible not silent. */
+  lastAttempt: ScanRecord | null;
+  /** The newest scheduled attempt, for the "last automatic scan" line. */
+  lastScheduled: ScanRecord | null;
+  /** Recent attempts, newest first. Bounded by POSTURE_LIMITS.trendWindow. */
+  history: ScanRecord[];
   checks: ShieldReport['checks'];
   findings: StoredFinding[];
 };
@@ -619,39 +906,43 @@ export type ShieldState = {
 export async function readShieldState(
   workspaceId: string,
 ): Promise<ShieldState> {
-  const row = await queryOne<{
-    id: string;
-    score: number;
-    grade: ShieldReport['grade'];
-    headline: string;
-    checks: string;
-    findingCount: number;
-    durationMs: number;
-    createdAt: number;
-  }>(
-    'SELECT * FROM shield_scan WHERE workspaceId = ? ORDER BY createdAt DESC LIMIT 1',
-    workspaceId,
-  );
+  const [completedRow, scheduledRow, historyRows, findings] = await Promise.all([
+    queryOne<ScanRow>(
+      `SELECT ${SCAN_COLUMNS} FROM shield_scan
+       WHERE workspaceId = ? AND ${NOT_FAILED}
+       ORDER BY createdAt DESC LIMIT 1`,
+      workspaceId,
+    ),
+    queryOne<ScanRow>(
+      `SELECT ${SCAN_COLUMNS} FROM shield_scan
+       WHERE workspaceId = ? AND scanTrigger = 'scheduled'
+       ORDER BY createdAt DESC LIMIT 1`,
+      workspaceId,
+    ),
+    query<ScanRow>(
+      `SELECT ${SCAN_COLUMNS} FROM shield_scan
+       WHERE workspaceId = ?
+       ORDER BY createdAt DESC LIMIT ?`,
+      workspaceId,
+      POSTURE_LIMITS.trendWindow,
+    ),
+    query<StoredFinding>(
+      `SELECT id, code, title, detail, resource, severity, remediation, status, firstSeenAt, lastSeenAt
+       FROM shield_finding WHERE workspaceId = ? ORDER BY status ASC, lastSeenAt DESC`,
+      workspaceId,
+    ),
+  ]);
 
-  const findings = await query<StoredFinding>(
-    `SELECT id, code, title, detail, resource, severity, remediation, status, firstSeenAt, lastSeenAt
-     FROM shield_finding WHERE workspaceId = ? ORDER BY status ASC, lastSeenAt DESC`,
-    workspaceId,
-  );
-
-  if (!row) return { scan: null, checks: [], findings };
+  const history = historyRows.map(toScanRecord);
 
   return {
-    scan: {
-      id: row.id,
-      score: row.score,
-      grade: row.grade,
-      headline: row.headline,
-      findingCount: row.findingCount,
-      durationMs: row.durationMs,
-      createdAt: row.createdAt,
-    },
-    checks: JSON.parse(row.checks) as ShieldReport['checks'],
+    scan: completedRow ? toScanRecord(completedRow) : null,
+    lastAttempt: history[0] ?? null,
+    lastScheduled: scheduledRow ? toScanRecord(scheduledRow) : null,
+    history,
+    checks: completedRow
+      ? (JSON.parse(completedRow.checks) as ShieldReport['checks'])
+      : [],
     findings,
   };
 }

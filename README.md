@@ -34,19 +34,49 @@ keeping the browser that made the change signed in, removes a hydration mismatch
 switch a fixed DOM id, fixes an `/audit` render crash caused by the one remaining `next/link`
 import, and states in the Audit table what a position is and what a missing one means.
 
-The current source tree targets `0.14.0`, Phase 14: **Repository Readiness & Deploy Planning**.
-It is **local acceptance complete and not yet deployed** — Production remains `0.13.2` until it
-ships. It gives a project with a public GitHub repository a way to reach a real, truthful verdict
-without owning a Compute Node: `POST /api/projects/{id}/analyze` runs the same hardened,
-GitHub-only reader and analyzer the deployment path already uses, reads a fixed set of files
-(manifest, lockfile, `.nvmrc`, `.env.example`, `.gitattributes`) with every read byte-capped and
-timeout-guarded, and stores a small, versioned, size-capped projection — never the manifest,
-never a dependency list, never a token or header. Nothing is built, cloned, or executed, and no
-deployment or node job is ever created by an analysis; a Compute Node stays mandatory for every
-build, execution, and deployment. Migration `0018` adds six nullable columns to `project`,
-additive only.
+Phase 14, **Repository Readiness & Deploy Planning**, shipped as `0.14.0`. It gives a project
+with a public GitHub repository a way to reach a real, truthful verdict without owning a Compute
+Node: `POST /api/projects/{id}/analyze` runs the same hardened, GitHub-only reader and analyzer
+the deployment path already uses, reads a fixed set of files (manifest, lockfile, `.nvmrc`,
+`.env.example`, `.gitattributes`) with every read byte-capped and timeout-guarded, and stores a
+small, versioned, size-capped projection — never the manifest, never a dependency list, never a
+token or header. Nothing is built, cloned, or executed, and no deployment or node job is ever
+created by an analysis; a Compute Node stays mandatory for every build, execution, and
+deployment. Migration `0018` adds six nullable columns to `project`, additive only.
 
-**Live:** <https://ysd-zero-cloud.ysd-zero-cloud.workers.dev> — still running `0.13.2`.
+The current source tree targets `0.15.0`, Phase 15: **Shield Continuous Posture**. It is
+**local acceptance complete and not yet deployed** — Production remains `0.14.0` until it ships.
+
+`workspace.autoScan` has been stored, defaulted on, and shown in Settings since Phase 10, and
+until now nothing read it: Shield ran only when someone pressed the button, so a workspace whose
+owner stopped signing in had a posture frozen at whatever it was the last time they looked.
+Phase 15 adds a third bounded phase to the existing one-minute tick that scans workspaces on
+their own, and it removes the per-finding round trip that made doing so unwise:
+
+- **Reconciliation is batched.** The old path issued one `SELECT` and one write per reported
+  finding, sequentially — roughly `2N + R` round trips, and `N` is not capped by the rule
+  catalog because finding codes are templated per resource. It is now one read, a pure plan, and
+  writes sent in fixed-size `database.batch` chunks: `1 + ceil(writes / 25)`.
+- **Bounded and fair.** One `LIMIT`-capped statement picks at most
+  `POSTURE_LIMITS.workspacesPerTick` workspaces per tick, ordered by the last scheduled
+  *attempt*, oldest first. Attempt, not success — a workspace that fails every time is pushed to
+  the back exactly like one that succeeds, so it cannot consume every tick.
+- **No invented success.** Findings are reconciled before the scan row is written. A scan that
+  dies partway records a `failed` row instead, which every posture read excludes, and which is
+  also what tells the scheduler the workspace was attempted.
+- **No invented cadence.** Six hours is when a workspace becomes *eligible*, not when it is
+  promised a scan. At two per tick a full sweep takes `ceil(workspaces / 2)` minutes, which
+  passes six hours at about 720 workspaces; past that the system scans less often and never does
+  more work per tick. No surface says otherwise, and a test enforces that.
+
+Every automatic scan is catalogued evidence (`shield.scan.scheduled`) carrying only a score,
+grade, counts, and a duration — no finding text, resource name, rule source, or address. The
+Shield page now shows where a scan came from, what moved since the last one, how long each open
+finding has been open, and whether the last attempt failed. Migration `0019` adds six nullable
+columns to `shield_scan`, additive only, with no backfill: a pre-0.15.0 row reads as "Legacy"
+rather than being guessed at.
+
+**Live:** <https://ysd-zero-cloud.ysd-zero-cloud.workers.dev> — running `0.14.0`.
 
 This is a standalone project intended only for `OpenYsd/ysd-zero-cloud`. It has no dependency on,
 and makes no changes to, `OpenYsd/ysd-ai`.
@@ -69,7 +99,7 @@ deployed Worker's explicit zero-cost configuration.
 | Secrets           | AES-GCM sealed values in `secret`, write-only by design                       |
 | Usage             | Live counts, six-hour snapshots, capacity forecasts, and reviewed retention  |
 | Zero Mode         | A workspace setting the server enforces, not a client preference              |
-| YSD Shield        | Rules scored against a real snapshot of the workspace                         |
+| YSD Shield        | Rules scored against a real snapshot, by hand or on the bounded sweep         |
 | Storage           | Private R2 adapter, D1 authorization index, and hard account/workspace quotas |
 | Networking        | YSD Gateway routes, exposure/domain policy, TLS/health state, and inventory   |
 | Nodes             | Paired user-owned agents, signed job leases, heartbeats, metrics, and audit   |

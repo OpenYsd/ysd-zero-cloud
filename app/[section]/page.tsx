@@ -50,6 +50,7 @@ import { listProjects } from '@/lib/server/projects';
 import { listSecrets } from '@/lib/server/secrets';
 import { requireSession, type WorkspaceSession } from '@/lib/server/session';
 import { readShieldState } from '@/lib/server/shield-scan';
+import { displayGrade } from '@/lib/shield-posture';
 import { databaseBytes, listTables } from '@/lib/server/studio';
 import { listStorage } from '@/lib/server/storage';
 import { summarizeUsage } from '@/lib/server/usage';
@@ -328,13 +329,23 @@ async function SectionBody({
 
     case 'shield': {
       const state = await readShieldState(workspaceId);
+      // `state.scan` is the newest scan that COMPLETED, so the score, grade and
+      // headline can never come from an attempt that died partway. The failed
+      // attempt, if there is one, travels separately as `lastAttempt` and the
+      // view says so above the score.
       return (
         <ShieldView
           data={{
             score: state.scan?.score ?? null,
-            grade: state.scan?.grade ?? null,
+            grade: displayGrade(state.scan?.grade),
             headline: state.scan?.headline ?? null,
             scannedAt: state.scan?.createdAt ?? null,
+            scanTrigger: state.scan?.trigger ?? null,
+            delta: state.scan?.delta ?? null,
+            lastAttempt: state.lastAttempt,
+            lastScheduled: state.lastScheduled,
+            history: state.history,
+            autoScan: workspace.autoScan,
             checks: state.checks,
             findings: state.findings,
             now,

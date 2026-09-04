@@ -253,6 +253,20 @@ export const EVIDENCE_ACTIONS = [
     critical: false,
     why: 'A refused analysis (private repository, policy) is still a privileged action against a real, tenant-scoped project and belongs in the same trail as a successful one.',
   },
+  {
+    action: 'shield.scan.scheduled',
+    resourceType: 'shield_scan',
+    metadataKeys: [
+      'score', 'grade', 'findingCount', 'opened', 'resolved', 'reopened',
+      'severityChanged', 'durationMs',
+    ],
+    // Recorded in the scheduler, not a route: nothing on the request surface
+    // triggers it. `outcome` separates a completed sweep from a failed one, so
+    // one action covers both rather than two that could drift apart.
+    route: 'lib/server/shield-schedule.ts',
+    critical: false,
+    why: 'A scan the platform ran on its own is a privileged read of every table, secret name, and member role in a workspace, performed with no human in the loop. Without evidence, nobody could later show which sweeps ran, what they found, or that a failing workspace was actually being attempted.',
+  },
 ] as const satisfies readonly EvidenceAction[];
 
 export type EvidenceActionName = (typeof EVIDENCE_ACTIONS)[number]['action'];

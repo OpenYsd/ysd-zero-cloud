@@ -507,12 +507,28 @@ void test('evidence writes take tenancy from the session and never from the requ
     // that directly.
     assert.match(
       route,
-      /organizationId: (?:auth\.session\.organization\.id|input\.session\.organization\.id|input\.organizationId)/,
+      /organizationId: (?:auth\.session\.organization\.id|input\.session\.organization\.id|input\.organizationId|workspace\.organizationId)/,
     );
     // A request body must never be able to name the tenant of an audit record.
     assert.doesNotMatch(route, /organizationId: (?:body|parsed\.body)\./);
     assert.doesNotMatch(route, /actorId: (?:body|parsed\.body)\./);
   }
+
+  // `workspace.organizationId` was added to that list for Phase 15, and it is
+  // the one form with no session behind it: the Shield sweep runs on a cron
+  // tick, so there is no session to read and the tenant can only come from the
+  // workspace row the scheduler itself selected. That is safe precisely
+  // because nothing from a request can reach it, which is asserted rather than
+  // assumed -- the file has no request surface at all.
+  const SCHEDULER = 'lib/server/shield-schedule.ts';
+  const scheduler = source(SCHEDULER);
+  assert.doesNotMatch(scheduler, /request/i);
+  assert.doesNotMatch(scheduler, /\bheaders\b/i);
+
+  // The row it takes the tenant from is one it selected itself, from the
+  // `workspace` table, by the workspace's own id -- not a value handed in.
+  assert.match(scheduler, /FROM workspace w/);
+  assert.match(scheduler, /w\.organizationId AS organizationId/);
 });
 
 void test('Phase 13 adds no billable binding and no new database', () => {
@@ -568,10 +584,10 @@ void test('the audit table explains what a position is and what a gap means', ()
 });
 
 void test('Phase 14 catalog grew by exactly the two implemented readiness actions', () => {
-  // Pinned deliberately: 23 (Phase 13 + P0) + 2 (readiness) = 25. A silent
-  // removal or rename of either action must fail this assertion by name, not
-  // just as a shrinking total.
-  assert.equal(EVIDENCE_ACTIONS.length, 25);
+  // Pinned deliberately: 23 (Phase 13 + P0) + 2 (readiness) + 1 (the Phase 15
+  // Shield sweep) = 26. A silent removal or rename of any of them must fail
+  // this assertion by name, not just as a shrinking total.
+  assert.equal(EVIDENCE_ACTIONS.length, 26);
 
   const readinessActions = EVIDENCE_ACTIONS.filter((entry) =>
     entry.action.startsWith('project.readiness.'),

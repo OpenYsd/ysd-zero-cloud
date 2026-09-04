@@ -1,6 +1,7 @@
 import handler from 'vinext/server/fetch-handler';
 
 import { runDataLifecycleMaintenance } from '@/lib/server/retention';
+import { runShieldPostureSweep } from '@/lib/server/shield-schedule';
 import { runWorkflowEngineTick } from '@/lib/server/workflows';
 
 /**
@@ -12,6 +13,11 @@ import { runWorkflowEngineTick } from '@/lib/server/workflows';
  * trigger. It runs after the workflow engine and is isolated from it: the
  * maintenance promise catches its own failures so a retention problem can
  * never stop workflow execution, and every stage inside it is row-capped.
+ *
+ * Phase 15 adds a third phase on the same principle. It is last because it is
+ * the least urgent of the three, it is capped at
+ * `POSTURE_LIMITS.workspacesPerTick` workspaces, and it swallows its own
+ * failures so a Shield problem cannot take down either phase above it.
  */
 export default {
   fetch(request, env, context) {
@@ -52,6 +58,26 @@ export default {
           console.error(JSON.stringify({
             message: 'data lifecycle maintenance failed',
             error: 'maintenance-unavailable',
+          }));
+        }
+
+        // Phase 15. Bounded by workspace count per tick, not by how many
+        // workspaces exist, so this cannot grow into the tick budget as the
+        // platform does.
+        try {
+          const result = await runShieldPostureSweep(controller.scheduledTime);
+          console.log(JSON.stringify({
+            message: 'shield posture sweep complete',
+            cron: controller.cron,
+            ...result,
+          }));
+        } catch {
+          // Same reasoning as the phase above, and one step stronger: a scan
+          // reads a workspace's whole schema, so its failure modes are the
+          // broadest of the three and the least entitled to fail the tick.
+          console.error(JSON.stringify({
+            message: 'shield posture sweep failed',
+            error: 'sweep-unavailable',
           }));
         }
       })(),
