@@ -92,6 +92,64 @@ Production baseline. It was accepted against Production with a real Compute Node
 published bundle was downloaded, checksum-verified, paired, and it built and ran an app
 end to end before the acceptance node was revoked.
 
+`0.17.0`, Phase 17: **Release History & Safe Rollback**, is the current Production
+baseline, with Compute Node agent `0.4.2`. It was accepted against Production with a real
+controlled node: two releases were built onto one service, the rollback reactivated the
+earlier artifact without rebuilding, and the service was confirmed serving the older
+build's bytes again before the acceptance node was revoked.
+
+A deployment had no history worth the name. Every Smart Deploy stood up a *new* service on a
+new port, and the single `rollback` button silently picked the newest verified artifact that
+was not running, with nothing on screen to say what that was. Underneath, the server accepted
+a target artifact belonging to a different deployment entirely — and the node would then look
+for those bytes under the current deployment's directory, where they had never existed.
+
+Phase 17 settles what a release is. A **deployment** is one long-lived service: one node, one
+private port, one directory. An **artifact** is one release of it, and
+`deployment.currentArtifactId` — moved only when the node reports a build verified, started
+and healthy — is what makes a release current. Not the newest row, and not a timestamp.
+
+- **Releases are a real list.** Current, superseded, building, failed, integrity-failed and
+  pruned all appear, with the commit each was built from, when it was verified, and a short
+  artifact fingerprint. A failed release stays visible.
+- **A new release ships onto the same service.** Smart Deploy still means "stand up a new
+  service". Deploying a release keeps the deployment, node and port and builds another commit
+  of the same repository, which is what puts two artifacts in one directory and makes rollback
+  possible at all.
+- **Rollback re-activates; it never rebuilds.** The node verifies the stored manifest
+  signature and recomputes the checksum before starting anything.
+- **You choose the release, and see what you chose.** Selecting one asks the server what would
+  happen, and the confirm button names the release. The answer is recomputed at execute time,
+  and a decision made against a view that has since changed is refused.
+
+Two defects surfaced while proving this end to end, both fixed here.
+
+The first cost the most to find. Builds hung for the full ten-minute timeout and then failed
+with only "The operation was aborted": one core pinned, no output, no network. The agent had
+been pointing the package manager's `TMP` at a directory *inside* the artifact — about two
+hundred and forty characters down, past `workspaces/projects/deployments/artifacts`. The
+package manager creates its own subdirectories under `TMP`, and once those crossed Windows'
+260-character limit it retried the failing path forever. Whether a machine tripped it came
+down to how long the operator's own path happened to be, which is why it looked intermittent.
+Agent `0.4.2` puts build scratch space at `<root>/tmp/<artifactId>` instead — still private,
+still cleaned up, about a hundred and forty characters of headroom reclaimed.
+
+The second: a retry carrying the same idempotency key was answered by the in-progress guard
+rather than resolving to the action already queued, so a client retrying a dropped response
+could not tell that from a real conflict. Idempotency is now checked first; a *different* key
+during a running action still gets the busy refusal.
+
+Known limitations, stated plainly: artifact bytes stay on the node that built them, so a
+rollback needs that same node online — there is no cross-node rollback and no remote artifact
+backup, and a node keeps only a bounded number of artifacts. Agent `0.4.2` still requires a
+Node.js runtime on the operator's machine, and SHA-256 pinning is not a publisher signature.
+
+Rollback here is for applications on Compute Nodes. It is not a way to roll back YSD Zero
+Cloud itself; that remains a release-operator procedure against Cloudflare. There is no
+zero-downtime claim: the node stops the running process before starting the target one, and
+the confirmation says so. Migration `0019` remains the newest — Phase 17 adds no schema and no
+second cron.
+
 Until now, pairing a Compute Node meant cloning this repository and running a TypeScript file
 with an experimental flag, from a PowerShell snippet that had no Linux or macOS equivalent. That
 is not an onboarding path; it is a wall. Phase 16 replaces it with a single self-contained
@@ -121,7 +179,7 @@ certificate and an Apple Developer identity, neither of which exists for this pr
 compromised control plane could replace the artifact and its digest together. Migration `0019`
 remains the newest; Phase 16 adds no schema.
 
-**Live:** <https://ysd-zero-cloud.ysd-zero-cloud.workers.dev> — running `0.16.0`.
+**Live:** <https://ysd-zero-cloud.ysd-zero-cloud.workers.dev> — running `0.17.0`, agent `0.4.2`.
 
 This is a standalone project intended only for `OpenYsd/ysd-zero-cloud`. It has no dependency on,
 and makes no changes to, `OpenYsd/ysd-ai`.

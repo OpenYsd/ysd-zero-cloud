@@ -26,7 +26,17 @@ import {
 } from './app-runtime.ts';
 
 export const NODE_PROTOCOL_VERSION = 1;
-export const CURRENT_AGENT_VERSION = '0.4.0';
+// 0.4.1 reports the artifact directories it pruned so the control plane
+// stops offering releases whose bytes are gone. That is an added, optional
+// field in the job *result*; the job payload and the signing protocol are
+// untouched, so 0.4.0 nodes keep working and stay above the minimum.
+// 0.4.2 stops handing the package manager a TMP directory nested inside the
+// artifact. That path ran ~240 characters deep, and once the package
+// manager's own subdirectories pushed it past the Windows 260-character
+// limit it retried forever -- a pinned core, no output, until the build
+// timeout. Local layout only; the payload and signing protocol are
+// unchanged, so 0.4.0 and 0.4.1 nodes keep working.
+export const CURRENT_AGENT_VERSION = '0.4.2';
 export const MINIMUM_AGENT_VERSION = '0.3.0';
 
 export const NODE_TIMING = {

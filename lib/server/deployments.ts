@@ -22,6 +22,11 @@ import {
   stableJson,
 } from '@/lib/nodes';
 import { deploymentBlockers } from '@/lib/node-preflight';
+import {
+  evaluateRollbackEligibility,
+  rollbackReasonMessage,
+  type RollbackReasonCode,
+} from '@/lib/releases';
 import { createSmartDeployPlan, type SmartDeployPlan } from '@/lib/smart-deploy';
 import { authSecret } from './auth';
 import { count, db, execute, query, queryOne } from './db';
@@ -192,6 +197,50 @@ async function nextPort(nodeId: string): Promise<number | null> {
     if (!used.has(port)) return port;
   }
   return null;
+}
+
+/**
+ * How a new release of an existing service is recorded.
+ *
+ * The wire operation stays `redeploy`, which is exactly what the agent does
+ * here: fetch the commit named in the payload, build it, activate it. Agent
+ * 0.4.0 validates the operation against a fixed allowlist and the payload
+ * against a fixed key allowlist, so inventing a `release` verb or a new field
+ * would make every existing node reject the job. What Phase 17 changes is
+ * which commit the control plane puts in that payload -- and the action row
+ * records the product-level word so history does not have to guess whether a
+ * `redeploy` re-ran the same commit or shipped a new one.
+ */
+export const RELEASE_ACTION_KIND = 'release' as const;
+
+/**
+ * The one lookup allowed to resolve a rollback target.
+ *
+ * Every scope is bound: workspace, project, deployment, node, artifact id. A
+ * probe for another tenant's artifact returns nothing here, which the
+ * evaluator reports as `artifact_missing` -- the same answer a made-up id
+ * gets, so the response cannot be used to discover that a row exists.
+ */
+async function rollbackTarget(input: {
+  workspaceId: string;
+  projectId: string;
+  deploymentId: string;
+  nodeId: string;
+  artifactId: string | null;
+}): Promise<AppArtifact | null> {
+  if (!input.artifactId || !/^art_[a-f0-9]{24}$/.test(input.artifactId)) return null;
+  return queryOne<AppArtifact>(
+    `SELECT id, deploymentId, projectId, nodeId, version, state, checksum,
+            commitSha, sizeBytes, createdAt, verifiedAt, activatedAt
+       FROM app_artifact
+      WHERE workspaceId = ? AND projectId = ? AND deploymentId = ? AND nodeId = ?
+        AND id = ? AND deletedAt IS NULL`,
+    input.workspaceId,
+    input.projectId,
+    input.deploymentId,
+    input.nodeId,
+    input.artifactId,
+  );
 }
 
 export async function listDeployments(
@@ -704,16 +753,27 @@ export async function createDeploymentAction(input: {
   actor: string;
   operation: Exclude<AppRuntimeOperation, 'deploy'>;
   targetArtifactId?: string | null;
+  /**
+   * What the caller believed was running. Supplied by the rollback
+   * confirmation so a decision made against stale history cannot execute.
+   * `undefined` means the caller did not claim to know.
+   */
+  expectedCurrentArtifactId?: string | null;
   idempotencyKey: string | null;
   allowedProjectIds?: readonly string[] | null;
   workflowContext?: WorkflowJobContext;
-}): Promise<{ ok: true; action: AppDeploymentAction; deployment: Deployment; duplicate: boolean } | { ok: false; status: number; error: string }> {
+}): Promise<
+  | { ok: true; action: AppDeploymentAction; deployment: Deployment; duplicate: boolean }
+  | { ok: false; status: number; error: string; reasons?: RollbackReasonCode[] }
+> {
   const detail = await getDeployment(input.workspaceId, input.deploymentId, input.allowedProjectIds);
   if (!detail || !detail.projectId || !detail.nodeId) return { ok: false, status: 404, error: 'Deployment not found.' };
   if (detail.deletedAt !== null || detail.state === 'blocked') return { ok: false, status: 409, error: 'This deployment cannot accept actions.' };
-  if (['queued', 'building', 'starting', 'stopping', 'restarting', 'rolling_back', 'deleting', 'cancelling'].includes(detail.state)) {
-    return { ok: false, status: 409, error: 'A deployment action is already in progress.' };
-  }
+  // Idempotency is answered before the in-progress guard. A retry carrying the
+  // same key is the same request and must resolve to the action already
+  // queued; answering "already in progress" would make a retried request
+  // indistinguishable from a genuine conflict. A different key during a
+  // running action still gets the busy refusal below.
   const key = input.idempotencyKey?.trim().slice(0, 128) || null;
   if (key) {
     const existing = await queryOne<AppDeploymentAction>(
@@ -724,22 +784,97 @@ export async function createDeploymentAction(input: {
     );
     if (existing) return { ok: true, action: existing, deployment: detail, duplicate: true };
   }
+  if (['queued', 'building', 'starting', 'stopping', 'restarting', 'rolling_back', 'deleting', 'cancelling'].includes(detail.state)) {
+    return { ok: false, status: 409, error: 'A deployment action is already in progress.' };
+  }
   const node = await deploymentNode(input.workspaceId, detail.nodeId);
   if (!node.ok) return node;
   const targetArtifactId = input.operation === 'rollback' ? input.targetArtifactId ?? null : null;
   if (input.operation === 'rollback') {
-    const artifact = await queryOne<{ id: string }>(
-      `SELECT id FROM app_artifact WHERE workspaceId = ? AND projectId = ? AND nodeId = ?
-       AND id = ? AND state = 'verified' AND deletedAt IS NULL`,
-      input.workspaceId,
-      detail.projectId,
-      detail.nodeId,
-      targetArtifactId,
-    );
-    if (!artifact) return { ok: false, status: 409, error: 'Rollback requires a previously verified artifact on the same node.' };
+    // The target must agree with this deployment on every axis -- deployment
+    // included. This used to be scoped to workspace, project and node only,
+    // which let a sibling service's artifact through the API. The node would
+    // then look for those bytes under *this* deployment's directory, where
+    // they have never existed, and fail late with an integrity error. The
+    // refusal belongs here, before anything is queued.
+    const artifact = await rollbackTarget({
+      workspaceId: input.workspaceId,
+      projectId: detail.projectId,
+      deploymentId: detail.id,
+      nodeId: detail.nodeId,
+      artifactId: targetArtifactId,
+    });
+    // Node readiness was already proven by `deploymentNode` above, so this
+    // call re-checks the artifact and deployment axes only.
+    const eligibility = evaluateRollbackEligibility({
+      artifact,
+      deployment: {
+        id: detail.id,
+        projectId: detail.projectId,
+        nodeId: detail.nodeId,
+        state: detail.state,
+        currentArtifactId: detail.currentArtifactId,
+        deletedAt: detail.deletedAt,
+      },
+      node: null,
+    });
+    if (!eligibility.eligible) {
+      const [first] = eligibility.reasons;
+      return {
+        ok: false,
+        status: 409,
+        error: rollbackReasonMessage(first ?? 'artifact_missing'),
+        reasons: eligibility.reasons,
+      };
+    }
+    // Optimistic concurrency. The confirmation told us which release the
+    // person was looking at; if something else became current in between,
+    // the decision they made no longer describes this deployment.
+    if (
+      input.expectedCurrentArtifactId !== undefined &&
+      input.expectedCurrentArtifactId !== detail.currentArtifactId
+    ) {
+      return {
+        ok: false,
+        status: 409,
+        error: rollbackReasonMessage('stale_current_release'),
+        reasons: ['stale_current_release'],
+      };
+    }
   }
   let artifactId = detail.currentArtifactId;
-  if (input.operation === 'redeploy') artifactId = createId('art');
+  // A redeploy rebuilds the release that is running, which is not always the
+  // one the deployment was created from: once a newer release has shipped onto
+  // this service, `plan` still describes the original commit. The artifact
+  // records the commit and build contract of its own release, so read them
+  // from there and fall back to the plan for deployments that never moved.
+  let redeploySource = detail.plan.source;
+  let redeployContract = detail.plan.contract;
+  if (input.operation === 'redeploy') {
+    const running = detail.currentArtifactId
+      ? await queryOne<{ manifest: string }>(
+          `SELECT manifest FROM app_artifact
+            WHERE workspaceId = ? AND deploymentId = ? AND id = ? AND deletedAt IS NULL`,
+          input.workspaceId,
+          detail.id,
+          detail.currentArtifactId,
+        )
+      : null;
+    if (running) {
+      try {
+        const recorded = JSON.parse(running.manifest) as {
+          source?: typeof detail.plan.source;
+          contract?: typeof detail.plan.contract;
+        };
+        if (recorded.source) redeploySource = recorded.source;
+        if (recorded.contract) redeployContract = recorded.contract;
+      } catch {
+        // A manifest that will not parse is not a reason to refuse the
+        // action; the stored plan is a truthful, if older, description.
+      }
+    }
+    artifactId = createId('art');
+  }
   if (['start', 'restart', 'rollback', 'status'].includes(input.operation) && !artifactId && !targetArtifactId) {
     return { ok: false, status: 409, error: 'No verified local artifact is available.' };
   }
@@ -759,9 +894,9 @@ export async function createDeploymentAction(input: {
     artifactId,
     targetArtifactId,
     source: input.operation === 'redeploy'
-      ? { owner: detail.plan.source.owner, repository: detail.plan.source.repository, commit: detail.plan.source.commit }
+      ? { owner: redeploySource.owner, repository: redeploySource.repository, commit: redeploySource.commit }
       : null,
-    contract: detail.plan.contract,
+    contract: input.operation === 'redeploy' ? redeployContract : detail.plan.contract,
     environment: detail.environment,
     environmentCiphertext: await sealNodeEnvironment(node.token, environmentValues),
     port: detail.localPort,
@@ -826,7 +961,7 @@ export async function createDeploymentAction(input: {
        (id, workspaceId, deploymentId, projectId, nodeId, commitSha, version,
         state, manifest, checksum, sizeBytes, createdAt, verifiedAt, activatedAt, deletedAt)
        VALUES (?, ?, ?, ?, ?, ?, ?, 'building', ?, NULL, 0, ?, NULL, NULL, NULL)`,
-    ).bind(artifactId, input.workspaceId, detail.id, detail.projectId, detail.nodeId, detail.commitSha, version, stableJson({ contract: detail.plan.contract, source: detail.plan.source }), now));
+    ).bind(artifactId, input.workspaceId, detail.id, detail.projectId, detail.nodeId, redeploySource.commit, version, stableJson({ contract: redeployContract, source: redeploySource }), now));
   }
   await database.batch(statements);
   const action = (await queryOne<AppDeploymentAction>(
@@ -838,6 +973,219 @@ export async function createDeploymentAction(input: {
   return {
     ok: true,
     action,
+    deployment: (await getDeployment(input.workspaceId, detail.id, input.allowedProjectIds))!,
+    duplicate: false,
+  };
+}
+
+/**
+ * Ship a new release of an existing service.
+ *
+ * Smart Deploy still means "stand up a new service", and that stays true --
+ * changing it would silently repoint an established product behaviour. This
+ * is the other half: keep the deployment, the node, and the private port, and
+ * put a newer commit of the same repository on them. That is what turns a
+ * deployment into a release line, and it is the only way two artifacts ever
+ * come to share a directory on the node, which is what rollback needs.
+ *
+ * The repository is read from the stored deployment, never from the caller.
+ * A caller chooses a branch or commit *within* that repository and it goes
+ * through the same inspection Smart Deploy uses, so the Phase 14 source
+ * boundary is unchanged: no arbitrary URL, no caller-supplied build command.
+ */
+export async function createRelease(input: {
+  workspaceId: string;
+  deploymentId: string;
+  actor: string;
+  branch?: string | null;
+  commit?: string | null;
+  idempotencyKey: string | null;
+  allowedProjectIds?: readonly string[] | null;
+}): Promise<
+  | { ok: true; action: AppDeploymentAction; deployment: Deployment; artifactId: string; duplicate: boolean }
+  | { ok: false; status: number; error: string }
+> {
+  const detail = await getDeployment(input.workspaceId, input.deploymentId, input.allowedProjectIds);
+  if (!detail || !detail.projectId || !detail.nodeId || !detail.localPort) {
+    return { ok: false, status: 404, error: 'Deployment not found.' };
+  }
+  if (detail.deletedAt !== null || detail.state === 'blocked') {
+    return { ok: false, status: 409, error: 'This deployment cannot accept actions.' };
+  }
+  // Same ordering as the lifecycle actions: a retry with the same key resolves
+  // to the release already queued rather than a busy refusal.
+  const key = input.idempotencyKey?.trim().slice(0, 128) || null;
+  if (key) {
+    const existing = await queryOne<AppDeploymentAction>(
+      `SELECT id, deploymentId, projectId, nodeId, jobId, kind, state, error, createdAt, updatedAt, completedAt
+       FROM app_deployment_action WHERE workspaceId = ? AND idempotencyKey = ?`,
+      input.workspaceId,
+      key,
+    );
+    if (existing) {
+      return { ok: true, action: existing, deployment: detail, artifactId: '', duplicate: true };
+    }
+  }
+  if (['queued', 'building', 'starting', 'stopping', 'restarting', 'rolling_back', 'deleting', 'cancelling'].includes(detail.state)) {
+    return { ok: false, status: 409, error: 'A deployment action is already in progress.' };
+  }
+  const node = await deploymentNode(input.workspaceId, detail.nodeId);
+  if (!node.ok) return node;
+
+  const token = hasGithubToken(runtimeEnv) ? env.GITHUB_TOKEN : undefined;
+  const inspection = await inspectRepositoryForDeploy({
+    repository: detail.repository,
+    branch: input.branch ?? detail.branch,
+    commit: input.commit ?? null,
+    token,
+  });
+  if (!inspection.ok) return inspection;
+
+  // The contract is rebuilt from the *new* commit. Reusing the stored one
+  // would hand the node a build recipe describing different source.
+  const plan = createSmartDeployPlan({
+    repository: `${inspection.value.source.owner}/${inspection.value.source.repository}`,
+    source: inspection.value.source,
+    nodeId: node.row.id,
+    nodeName: node.row.name,
+    environment: detail.environment,
+    port: detail.localPort,
+    healthPath: detail.healthPath,
+    analysis: inspection.value.analysis,
+    zeroModeEnabled: true,
+  });
+  if (!plan.protection.allowed || !plan.contract) {
+    for (const reason of plan.blockedReasons.slice(0, 8)) {
+      await recordAppRuntimeSecurityEvent({
+        workspaceId: input.workspaceId,
+        nodeId: node.row.id,
+        type: 'app-source-policy',
+        severity: 'high',
+        detail: reason,
+      });
+    }
+    return {
+      ok: false,
+      status: 409,
+      error: plan.blockedReasons[0] ?? 'This commit does not satisfy the safe build contract.',
+    };
+  }
+  if (inspection.value.source.commit === detail.commitSha) {
+    return {
+      ok: false,
+      status: 409,
+      error: 'That commit is already the current release. Use redeploy to rebuild it.',
+    };
+  }
+
+  const actionId = createId('dact');
+  const artifactId = createId('art');
+  const version = (await queryOne<{ version: number }>(
+    `SELECT COALESCE(MAX(version), 0) + 1 AS version FROM app_artifact WHERE workspaceId = ? AND projectId = ? AND nodeId = ?`,
+    input.workspaceId,
+    detail.projectId,
+    node.row.id,
+  ))?.version ?? 1;
+  const environmentValues = await scopedEnvironment({
+    workspaceId: input.workspaceId,
+    projectId: detail.projectId,
+    deploymentId: detail.id,
+    environment: detail.environment,
+    names: plan.contract.envNames,
+  });
+  const queued = await enqueueJob({
+    workspaceId: input.workspaceId,
+    actor: input.actor,
+    type: APP_RUNTIME_JOB_TYPE,
+    payload: {
+      // The verb agent 0.4.0 already speaks: build the commit named in
+      // `source` and activate it. Only the commit differs from a redeploy.
+      operation: 'redeploy',
+      deploymentId: detail.id,
+      projectId: detail.projectId,
+      actionId,
+      artifactId,
+      targetArtifactId: null,
+      source: {
+        owner: plan.source.owner,
+        repository: plan.source.repository,
+        commit: plan.source.commit,
+      },
+      contract: plan.contract,
+      environment: detail.environment,
+      environmentCiphertext: await sealNodeEnvironment(node.token, environmentValues),
+      port: detail.localPort,
+      healthPath: detail.healthPath,
+      memoryMb: APP_RUNTIME_LIMITS.memoryMinimumMb,
+      diskQuotaBytes: APP_RUNTIME_LIMITS.diskMinimumBytes,
+      retainArtifacts: APP_RUNTIME_LIMITS.maximumArtifactsPerProject,
+    },
+    targetNodeId: node.row.id,
+    idempotencyKey: key ? `app:${key}` : `app:release:${actionId}`,
+  });
+  if (!queued.ok) return queued;
+  if (!queued.created && key) {
+    const existing = await queryOne<AppDeploymentAction>(
+      `SELECT id, deploymentId, projectId, nodeId, jobId, kind, state, error, createdAt, updatedAt, completedAt
+       FROM app_deployment_action WHERE workspaceId = ? AND idempotencyKey = ?`,
+      input.workspaceId,
+      key,
+    );
+    return existing
+      ? { ok: true, action: existing, deployment: detail, artifactId: '', duplicate: true }
+      : { ok: false, status: 409, error: 'The original idempotent action is still being finalized.' };
+  }
+
+  const now = Date.now();
+  const database = await db();
+  await database.batch([
+    database.prepare(
+      `INSERT INTO app_deployment_action
+       (id, workspaceId, deploymentId, projectId, nodeId, jobId, kind, state,
+        idempotencyKey, requestedBy, error, createdAt, updatedAt, completedAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, NULL, ?, ?, NULL)`,
+    ).bind(actionId, input.workspaceId, detail.id, detail.projectId, node.row.id, queued.job.id, RELEASE_ACTION_KIND, key, input.actor, now, now),
+    // The artifact carries its own commit and contract from the moment it is
+    // created. That record is immutable per release, so history keeps telling
+    // the truth about what each release was built from even after the
+    // deployment moves on.
+    database.prepare(
+      `INSERT INTO app_artifact
+       (id, workspaceId, deploymentId, projectId, nodeId, commitSha, version,
+        state, manifest, checksum, sizeBytes, createdAt, verifiedAt, activatedAt, deletedAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'building', ?, NULL, 0, ?, NULL, NULL, NULL)`,
+    ).bind(artifactId, input.workspaceId, detail.id, detail.projectId, node.row.id, plan.source.commit, version, stableJson({ contract: plan.contract, source: plan.source }), now),
+    // `currentArtifactId` is deliberately untouched here. It moves only when
+    // the node reports the new release verified, started and healthy, so a
+    // failed release leaves the running one exactly where it was.
+    database.prepare(
+      `UPDATE deployment SET state = 'building', jobId = ?, lastError = NULL, updatedAt = ?
+        WHERE workspaceId = ? AND id = ?`,
+    ).bind(queued.job.id, now, input.workspaceId, detail.id),
+    database.prepare(
+      `UPDATE public_exposure SET healthState = 'stale',
+              status = CASE WHEN mode = 'private' THEN 'disabled' ELSE 'unavailable_zero_mode' END,
+              lastError = 'Deployment lifecycle action is in progress; routing is failed closed.', updatedAt = ?
+        WHERE workspaceId = ? AND deploymentId = ? AND deletedAt IS NULL`,
+    ).bind(now, input.workspaceId, detail.id),
+  ]);
+  const action = (await queryOne<AppDeploymentAction>(
+    `SELECT id, deploymentId, projectId, nodeId, jobId, kind, state, error, createdAt, updatedAt, completedAt
+     FROM app_deployment_action WHERE workspaceId = ? AND id = ?`,
+    input.workspaceId,
+    actionId,
+  ))!;
+  await writeLog({
+    workspaceId: input.workspaceId,
+    source: 'deployment',
+    message: 'Queued a new release',
+    actor: input.actor,
+    resource: detail.id,
+  });
+  return {
+    ok: true,
+    action,
+    artifactId,
     deployment: (await getDeployment(input.workspaceId, detail.id, input.allowedProjectIds))!,
     duplicate: false,
   };

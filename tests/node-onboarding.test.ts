@@ -601,8 +601,10 @@ void test('onboarding evidence carries codes, never secrets', () => {
 });
 
 void test('the catalog grew by exactly the two onboarding actions', () => {
-  // 26 at 0.15.0, +0 in the 0.15.1 hotfix, +2 here.
-  assert.equal(EVIDENCE_ACTIONS.length, 28);
+  // 26 at 0.15.0, +0 in the 0.15.1 hotfix, +2 here, +2 for Phase 17 release
+  // and rollback. The count is the guard against a silent removal; the
+  // assertion below is what pins Phase 16's own contribution.
+  assert.equal(EVIDENCE_ACTIONS.length, 30);
   const added = EVIDENCE_ACTIONS
     .filter((entry) => entry.action.startsWith('node.pairing.') || entry.action === 'node.preflight.run')
     .map((entry) => entry.action)

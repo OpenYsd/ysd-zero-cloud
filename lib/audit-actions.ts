@@ -114,6 +114,25 @@ export const EVIDENCE_ACTIONS = [
     why: 'Revocation removes capacity and invalidates an agent credential.',
   },
   {
+    action: 'deployment.release',
+    resourceType: 'deployment',
+    metadataKeys: ['projectId', 'nodeId', 'artifactId', 'commitSha'],
+    route: 'app/api/deployments/[id]/releases/route.ts',
+    critical: true,
+    why: 'A release changes which build of an application runs on an operator machine.',
+  },
+  {
+    action: 'deployment.rollback',
+    resourceType: 'deployment',
+    // One action, three outcomes. A refusal is evidence too: `reasonCodes`
+    // carries the fixed codes the evaluator returned, never node-supplied
+    // text, and never a path, checksum, manifest or environment value.
+    metadataKeys: ['projectId', 'nodeId', 'fromArtifactId', 'targetArtifactId', 'targetVersion', 'reasonCodes'],
+    route: 'app/api/deployments/[id]/rollback/route.ts',
+    critical: true,
+    why: 'Rollback re-points a running service at an earlier build.',
+  },
+  {
     action: 'node.job.create',
     resourceType: 'node_job',
     metadataKeys: ['kind', 'nodeId'],

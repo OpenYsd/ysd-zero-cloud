@@ -3,7 +3,8 @@
 import { useRouter } from 'next/navigation';
 import { useState } from 'react';
 import { Button } from '@/components/ui/button';
-import type { AppArtifact, Deployment } from '@/lib/domain';
+import { DeploymentReleases } from '@/components/deployment-releases';
+import type { Deployment } from '@/lib/domain';
 
 export function DeploymentActions({ deployment }: { deployment: Deployment }) {
   const router = useRouter();
@@ -16,17 +17,10 @@ export function DeploymentActions({ deployment }: { deployment: Deployment }) {
     setPending(operation);
     setError(null);
     try {
-      let targetArtifactId: string | undefined;
-      if (operation === 'rollback') {
-        const detailResponse = await fetch(`/api/deployments/${deployment.id}`);
-        const detail = (await detailResponse.json()) as { deployment?: { artifacts?: AppArtifact[] }; error?: string };
-        targetArtifactId = detail.deployment?.artifacts?.find((artifact) => artifact.state === 'verified' && artifact.id !== deployment.currentArtifactId)?.id;
-        if (!targetArtifactId) throw new Error('No earlier verified artifact is available on this node.');
-      }
       const response = await fetch(`/api/deployments/${deployment.id}/actions`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Idempotency-Key': `ui:${deployment.id}:${operation}:${deployment.updatedAt}` },
-        body: JSON.stringify({ operation, targetArtifactId }),
+        body: JSON.stringify({ operation }),
       });
       const body = (await response.json()) as { error?: string };
       if (!response.ok) throw new Error(body.error ?? `The ${operation} action was refused.`);
@@ -41,11 +35,16 @@ export function DeploymentActions({ deployment }: { deployment: Deployment }) {
   const actions = busy
     ? ['cancel']
     : deployment.state === 'healthy'
-      ? ['stop', 'restart', 'redeploy', 'rollback', 'delete']
-      : ['start', 'redeploy', 'rollback', 'delete'];
+      ? ['stop', 'restart', 'redeploy', 'delete']
+      : ['start', 'redeploy', 'delete'];
   return (
     <div className="min-w-44">
-      <div className="flex flex-wrap gap-1">{actions.map((action) => <Button key={action} variant="outline" size="sm" className="h-6 px-2 text-[9px]" disabled={pending !== null} onClick={() => void act(action)}>{pending === action ? '…' : action}</Button>)}</div>
+      <div className="flex flex-wrap gap-1">
+        {actions.map((action) => <Button key={action} variant="outline" size="sm" className="h-6 px-2 text-[9px]" disabled={pending !== null} onClick={() => void act(action)}>{pending === action ? '…' : action}</Button>)}
+        {/* Rollback lives in Releases, where a target is chosen and previewed
+            rather than guessed at from the newest verified artifact. */}
+        <DeploymentReleases deployment={deployment} />
+      </div>
       {error && <p className="mt-1 max-w-52 text-[9px] text-red-300">{error}</p>}
     </div>
   );

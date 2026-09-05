@@ -1,3 +1,4 @@
+import { parsePrunedArtifactIds } from '@/lib/releases';
 import {
   APP_RUNTIME_LIMITS,
   parseAppRuntimeSnapshots,
@@ -132,6 +133,9 @@ export async function recordAppRuntimeJobOutcome(input: {
       .prepare(
         `UPDATE deployment
          SET state = ?, currentArtifactId = CASE WHEN ? = 1 THEN COALESCE(?, currentArtifactId) ELSE currentArtifactId END,
+             commitSha = CASE WHEN ? = 1 AND ? IS NOT NULL
+               THEN COALESCE((SELECT commitSha FROM app_artifact WHERE workspaceId = ? AND id = ?), commitSha)
+               ELSE commitSha END,
              localAddress = CASE WHEN ? = 1 THEN COALESCE(?, localAddress) ELSE localAddress END,
              observedBind = ?, buildDurationMs = COALESCE(?, buildDurationMs),
              durationMs = COALESCE(?, durationMs), restartCount = ?, crashLoop = ?,
@@ -143,6 +147,13 @@ export async function recordAppRuntimeJobOutcome(input: {
       .bind(
         deploymentState,
         effectiveSuccess ? 1 : 0,
+        artifactId,
+        // The deployment's commit tracks whichever release is actually
+        // running, so it moves only when one activated. Each artifact keeps
+        // its own immutable commit regardless.
+        effectiveSuccess ? 1 : 0,
+        artifactId,
+        input.job.workspaceId,
         artifactId,
         effectiveSuccess ? 1 : 0,
         localAddress,
@@ -215,6 +226,35 @@ export async function recordAppRuntimeJobOutcome(input: {
           payload.projectId,
           input.job.assignedNodeId,
           artifactId,
+        ),
+    );
+  }
+  // A node keeps only a bounded number of artifact directories per
+  // deployment. When it prunes, D1 would otherwise go on advertising those
+  // releases as restorable long after their bytes were removed -- and a
+  // rollback offered against one could only fail at activation. The node
+  // reports exactly what it deleted; the control plane decides whether to
+  // believe it. Every id is re-scoped to the workspace, project, deployment
+  // and node the job itself belongs to, so a node can only retire its own
+  // artifacts and never touch another tenant's row. The release that just
+  // activated is excluded outright.
+  const pruned = parsePrunedArtifactIds(input.result?.prunedArtifactIds).filter((id) => id !== artifactId);
+  if (pruned.length > 0 && input.job.assignedNodeId) {
+    statements.push(
+      database
+        .prepare(
+          `UPDATE app_artifact SET state = 'deleted', deletedAt = ?
+           WHERE workspaceId = ? AND projectId = ? AND deploymentId = ? AND nodeId = ?
+             AND id IN (${pruned.map(() => '?').join(', ')})
+             AND deletedAt IS NULL`,
+        )
+        .bind(
+          input.now,
+          input.job.workspaceId,
+          payload.projectId,
+          payload.deploymentId,
+          input.job.assignedNodeId,
+          ...pruned,
         ),
     );
   }

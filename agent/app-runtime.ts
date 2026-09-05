@@ -459,17 +459,40 @@ function minimalEnvironment(tempDirectory: string): Record<string, string> {
   return environment;
 }
 
+/**
+ * Scratch space for one build.
+ *
+ * This deliberately does not sit inside the artifact directory. An artifact is
+ * about two hundred characters down --
+ * `workspaces/<ws>/projects/<prj>/deployments/<dpl>/artifacts/<art>` -- and the
+ * package manager creates its own subdirectories beneath whatever `TMP` points
+ * at. On Windows that overruns the 260-character path limit, and npm answers by
+ * retrying the failing path indefinitely: one core pinned, not a single byte of
+ * output, until the build timeout kills it ten minutes later and reports only
+ * "The operation was aborted". Whether a machine tripped it came down to how
+ * long the operator's own agent path happened to be.
+ *
+ * A short temp directory gives the package manager the headroom it assumes it
+ * has. It still lives under the agent root, so it stays private to this node
+ * and is still removed when the build finishes.
+ */
+function buildTempDirectory(root: string, artifactId: string): string {
+  return path.join(safeRoot(root), 'tmp', artifactId);
+}
+
 async function installDependencies(input: {
   contract: SafeBuildContract;
   artifactDirectory: string;
   cacheDirectory: string;
+  tempDirectory: string;
   signal?: AbortSignal;
   onOutput: (phase: string, chunk: Buffer) => void;
 }): Promise<void> {
   const cli = packageManagerCli(input.contract.packageManager);
   if (!cli) throw new Error(`The fixed ${input.contract.packageManager} executable is not installed beside Node.js.`);
-  const temp = path.join(input.artifactDirectory, '.ysd-tmp');
+  const temp = input.tempDirectory;
   const userConfig = path.join(temp, 'empty-user-config');
+  await rm(temp, { recursive: true, force: true });
   await mkdir(temp, { recursive: true });
   await mkdir(input.cacheDirectory, { recursive: true });
   await writeFile(userConfig, '', { flag: 'wx' });
@@ -727,12 +750,20 @@ async function healthCheck(app: ManagedApp, signal?: AbortSignal): Promise<void>
   throw new Error(`The localhost health check failed: ${last}.`);
 }
 
-async function pruneArtifacts(parent: string, retain: number, activeArtifact: string): Promise<void> {
+/**
+ * Drop artifact directories beyond the retention window.
+ *
+ * The removed ids are returned so the control plane can stop advertising them
+ * as restorable. Without that, D1 keeps a row marked `verified` long after
+ * the bytes it describes were deleted here, and a rollback offered against
+ * that row could only ever fail at activation.
+ */
+async function pruneArtifacts(parent: string, retain: number, activeArtifact: string): Promise<string[]> {
   let entries;
   try {
     entries = await readdir(parent, { withFileTypes: true });
   } catch {
-    return;
+    return [];
   }
   const artifacts = await Promise.all(entries.filter((entry) => entry.isDirectory()).map(async (entry) => ({
     name: entry.name,
@@ -741,9 +772,14 @@ async function pruneArtifacts(parent: string, retain: number, activeArtifact: st
   })));
   artifacts.sort((a, b) => b.time - a.time);
   const keep = new Set([activeArtifact, ...artifacts.slice(0, retain).map((entry) => entry.name)]);
+  const pruned: string[] = [];
   for (const artifact of artifacts) {
-    if (!keep.has(artifact.name)) await rm(artifact.directory, { recursive: true, force: true });
+    if (keep.has(artifact.name)) continue;
+    await rm(artifact.directory, { recursive: true, force: true });
+    // Only ids this node actually removed, from a directory it owns.
+    if (/^art_[a-f0-9]{24}$/.test(artifact.name)) pruned.push(artifact.name);
   }
+  return pruned;
 }
 
 function snapshot(app: ManagedApp): AppRuntimeSnapshot {
@@ -865,6 +901,7 @@ export async function executeAppRuntimeJob(input: {
           contract,
           artifactDirectory: artifact,
           cacheDirectory,
+          tempDirectory: buildTempDirectory(root, artifactId),
           signal: input.signal,
           onOutput: (phase, chunk) => appendLogs(logApp!, phase, chunk),
         });
@@ -919,8 +956,13 @@ export async function executeAppRuntimeJob(input: {
         }
         throw error;
       }
-      await pruneArtifacts(path.join(deployDirectory, 'artifacts'), payload.retainArtifacts, artifactId);
+      const prunedArtifactIds = await pruneArtifacts(
+        path.join(deployDirectory, 'artifacts'),
+        payload.retainArtifacts,
+        artifactId,
+      );
       return resultFor(app, {
+        prunedArtifactIds,
         checksum: manifest.checksum,
         sizeBytes: manifest.sizeBytes,
         buildDurationMs: Date.now() - startedAt,
