@@ -23,6 +23,12 @@ import {
 } from '@/lib/nodes';
 import { deploymentBlockers } from '@/lib/node-preflight';
 import {
+  deriveLegacyRuntimeTruth,
+  desiredStateAfterOperation,
+  operationBumpsDesiredRevision,
+  recoveryAgentCompatible,
+} from '@/lib/runtime-recovery';
+import {
   evaluateRollbackEligibility,
   rollbackReasonMessage,
   type RollbackReasonCode,
@@ -54,11 +60,29 @@ export type DeploymentDetail = Deployment & {
   logs: AppDeploymentLog[];
 };
 
-type DeploymentRow = Omit<Deployment, 'zeroModeEnabled' | 'crashLoop' | 'nodeName'> & {
+type DeploymentRow = Omit<Deployment,
+  | 'zeroModeEnabled'
+  | 'crashLoop'
+  | 'nodeName'
+  | 'desiredState'
+  | 'desiredRevision'
+  | 'observedState'
+  | 'lastReconciledAt'
+  | 'recoveryStatus'
+  | 'recoveryReasonCode'
+  | 'recoveryGeneration'
+> & {
   zeroModeEnabled: number;
   crashLoop: number;
   nodeName: string | null;
   plan?: string;
+  desiredState: string | null;
+  desiredRevision: number | null;
+  observedState: string | null;
+  lastReconciledAt: number | null;
+  recoveryStatus: string | null;
+  recoveryReasonCode: string | null;
+  recoveryGeneration: string | null;
 };
 
 type DeployNodeRow = {
@@ -78,9 +102,11 @@ const SELECT = `d.id, d.projectId, d.repository, d.target, d.framework, d.commit
   d.healthPath, d.state, d.durationMs, d.buildDurationMs, d.estimatedMonthlyCost,
   d.zeroModeEnabled, d.restartCount, d.crashLoop, d.lastError, d.createdAt,
   d.startedAt, COALESCE(d.updatedAt, d.createdAt) AS updatedAt, d.finishedAt,
-  d.deletedAt`;
+  d.deletedAt, d.desiredState, d.desiredRevision, d.observedState,
+  d.lastReconciledAt, d.recoveryStatus, d.recoveryReasonCode, d.recoveryGeneration`;
 
 function toDeployment(row: DeploymentRow): Deployment {
+  const legacy = deriveLegacyRuntimeTruth(row.state);
   return {
     ...row,
     target: row.target,
@@ -95,6 +121,21 @@ function toDeployment(row: DeploymentRow): Deployment {
         : 'unknown',
     zeroModeEnabled: row.zeroModeEnabled === 1,
     crashLoop: row.crashLoop === 1,
+    desiredState: row.desiredState === 'running' || row.desiredState === 'stopped'
+      ? row.desiredState
+      : legacy.desiredState,
+    desiredRevision: Number.isSafeInteger(row.desiredRevision) && (row.desiredRevision ?? 0) > 0
+      ? row.desiredRevision!
+      : legacy.desiredRevision,
+    observedState: ['unknown', 'healthy', 'stopped', 'missing', 'recovering', 'unhealthy', 'blocked'].includes(row.observedState ?? '')
+      ? row.observedState as Deployment['observedState']
+      : legacy.observedState,
+    lastReconciledAt: row.lastReconciledAt ?? null,
+    recoveryStatus: ['pending', 'succeeded', 'blocked', 'failed'].includes(row.recoveryStatus ?? '')
+      ? row.recoveryStatus as Deployment['recoveryStatus']
+      : null,
+    recoveryReasonCode: row.recoveryReasonCode ?? null,
+    recoveryGeneration: row.recoveryGeneration ?? null,
   };
 }
 
@@ -231,7 +272,9 @@ async function rollbackTarget(input: {
   if (!input.artifactId || !/^art_[a-f0-9]{24}$/.test(input.artifactId)) return null;
   return queryOne<AppArtifact>(
     `SELECT id, deploymentId, projectId, nodeId, version, state, checksum,
-            commitSha, sizeBytes, createdAt, verifiedAt, activatedAt
+            commitSha, sizeBytes, createdAt, verifiedAt, activatedAt,
+            COALESCE(availabilityState, 'unknown') AS availabilityState,
+            lastVerifiedOnNodeAt
        FROM app_artifact
       WHERE workspaceId = ? AND projectId = ? AND deploymentId = ? AND nodeId = ?
         AND id = ? AND deletedAt IS NULL`,
@@ -293,7 +336,9 @@ export async function getDeployment(
     ),
     query<AppArtifact>(
       `SELECT id, deploymentId, projectId, nodeId, commitSha, version, state,
-              checksum, sizeBytes, createdAt, verifiedAt, activatedAt
+              checksum, sizeBytes, createdAt, verifiedAt, activatedAt,
+              COALESCE(availabilityState, 'unknown') AS availabilityState,
+              lastVerifiedOnNodeAt
        FROM app_artifact WHERE workspaceId = ? AND deploymentId = ? AND deletedAt IS NULL
        ORDER BY version DESC LIMIT 10`,
       workspaceId,
@@ -456,9 +501,11 @@ export async function planDeployment(request: PlanRequest): Promise<PlanOutcome>
         state, durationMs, estimatedMonthlyCost, zeroModeEnabled, plan, createdAt,
         finishedAt, branch, environment, nodeId, localPort, localAddress,
         exposure, observedBind, healthPath, buildDurationMs, startedAt, updatedAt,
-        lastError, restartCount, crashLoop, deletedAt)
+        lastError, restartCount, crashLoop, deletedAt, desiredState, desiredRevision,
+        observedState, recoveryStatus, recoveryReasonCode)
        VALUES (?, ?, ?, ?, 'user-node', ?, ?, 'blocked', ?, 0, 1, ?, ?, ?,
-               ?, ?, ?, ?, ?, 'private', 'unknown', ?, NULL, NULL, ?, ?, 0, 0, NULL)`,
+               ?, ?, ?, ?, ?, 'private', 'unknown', ?, NULL, NULL, ?, ?, 0, 0, NULL,
+               'stopped', 1, 'unknown', 'blocked', 'recovery_not_desired')`,
       deploymentId,
       request.workspaceId,
       scopedProjectId,
@@ -539,9 +586,11 @@ export async function planDeployment(request: PlanRequest): Promise<PlanOutcome>
       state, durationMs, estimatedMonthlyCost, zeroModeEnabled, plan, createdAt,
       finishedAt, branch, environment, nodeId, jobId, currentArtifactId,
       localPort, localAddress, exposure, observedBind, healthPath,
-      buildDurationMs, startedAt, updatedAt, lastError, restartCount, crashLoop, deletedAt)
+      buildDurationMs, startedAt, updatedAt, lastError, restartCount, crashLoop, deletedAt,
+      desiredState, desiredRevision, observedState, recoveryStatus, recoveryReasonCode)
      VALUES (?, ?, ?, ?, 'user-node', ?, ?, 'queued', NULL, 0, 1, ?, ?, NULL,
-             ?, ?, ?, NULL, NULL, ?, ?, 'private', 'unknown', ?, NULL, NULL, ?, NULL, 0, 0, NULL)`,
+             ?, ?, ?, NULL, NULL, ?, ?, 'private', 'unknown', ?, NULL, NULL, ?, NULL, 0, 0, NULL,
+             'running', 1, 'unknown', NULL, NULL)`,
     deploymentId,
     request.workspaceId,
     projectId,
@@ -582,6 +631,9 @@ export async function planDeployment(request: PlanRequest): Promise<PlanOutcome>
       memoryMb: request.memoryMb,
       diskQuotaBytes: request.diskQuotaBytes,
       retainArtifacts: APP_RUNTIME_LIMITS.maximumArtifactsPerProject,
+      ...(recoveryAgentCompatible(node.row.agentVersion ?? '')
+        ? { expectedDesiredRevision: 1, protectedArtifactIds: [] }
+        : {}),
     },
     targetNodeId: node.row.id,
     idempotencyKey: idempotencyKey ? `app:${idempotencyKey}` : `app:deploy:${deploymentId}`,
@@ -622,8 +674,9 @@ export async function planDeployment(request: PlanRequest): Promise<PlanOutcome>
     database.prepare(
       `INSERT INTO app_artifact
        (id, workspaceId, deploymentId, projectId, nodeId, commitSha, version,
-        state, manifest, checksum, sizeBytes, createdAt, verifiedAt, activatedAt, deletedAt)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 'building', ?, NULL, 0, ?, NULL, NULL, NULL)`,
+        state, manifest, checksum, sizeBytes, createdAt, verifiedAt, activatedAt, deletedAt,
+        availabilityState, lastVerifiedOnNodeAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'building', ?, NULL, 0, ?, NULL, NULL, NULL, 'unknown', NULL)`,
     ).bind(artifactId, request.workspaceId, deploymentId, projectId, node.row.id, plan.source.commit, version, stableJson({ contract: plan.contract, source: plan.source }), startedAt),
     database.prepare(
       `INSERT INTO public_exposure
@@ -767,7 +820,7 @@ export async function createDeploymentAction(input: {
   | { ok: false; status: number; error: string; reasons?: RollbackReasonCode[] }
 > {
   const detail = await getDeployment(input.workspaceId, input.deploymentId, input.allowedProjectIds);
-  if (!detail || !detail.projectId || !detail.nodeId) return { ok: false, status: 404, error: 'Deployment not found.' };
+  if (!detail || !detail.projectId || !detail.nodeId || !detail.localPort) return { ok: false, status: 404, error: 'Deployment not found.' };
   if (detail.deletedAt !== null || detail.state === 'blocked') return { ok: false, status: 409, error: 'This deployment cannot accept actions.' };
   // Idempotency is answered before the in-progress guard. A retry carrying the
   // same key is the same request and must resolve to the action already
@@ -784,11 +837,32 @@ export async function createDeploymentAction(input: {
     );
     if (existing) return { ok: true, action: existing, deployment: detail, duplicate: true };
   }
-  if (['queued', 'building', 'starting', 'stopping', 'restarting', 'rolling_back', 'deleting', 'cancelling'].includes(detail.state)) {
+  if (['queued', 'building', 'starting', 'stopping', 'restarting', 'rolling_back', 'deleting', 'cancelling', 'recovering'].includes(detail.state) &&
+      !(input.operation === 'stop' && detail.state === 'recovering')) {
     return { ok: false, status: 409, error: 'A deployment action is already in progress.' };
+  }
+  if (input.operation === 'stop' && detail.state === 'recovering' && detail.jobId) {
+    const now = Date.now();
+    const database = await db();
+    await database.batch([
+      database.prepare(
+        `UPDATE deployment SET desiredState = 'stopped',
+                desiredRevision = COALESCE(desiredRevision, 0) + 1,
+                observedState = 'recovering', updatedAt = ?
+          WHERE workspaceId = ? AND id = ? AND jobId = ?`,
+      ).bind(now, input.workspaceId, detail.id, detail.jobId),
+      database.prepare(
+        `UPDATE node_job SET state = 'cancelling',
+                lastError = 'Recovery superseded by intentional Stop.', updatedAt = ?
+          WHERE workspaceId = ? AND id = ? AND state = 'leased'`,
+      ).bind(now, input.workspaceId, detail.jobId),
+    ]);
   }
   const node = await deploymentNode(input.workspaceId, detail.nodeId);
   if (!node.ok) return node;
+  if (input.operation === 'recover' && !recoveryAgentCompatible(node.row.agentVersion ?? '')) {
+    return { ok: false, status: 426, error: 'Recovery requires YSD Node Agent 0.5.0 or newer.' };
+  }
   const targetArtifactId = input.operation === 'rollback' ? input.targetArtifactId ?? null : null;
   if (input.operation === 'rollback') {
     // The target must agree with this deployment on every axis -- deployment
@@ -850,16 +924,21 @@ export async function createDeploymentAction(input: {
   // from there and fall back to the plan for deployments that never moved.
   let redeploySource = detail.plan.source;
   let redeployContract = detail.plan.contract;
+  let currentArtifact: { manifest: string; state: string; availabilityState: string | null } | null = null;
+  if (detail.currentArtifactId) {
+    currentArtifact = await queryOne(
+      `SELECT manifest, state, availabilityState FROM app_artifact
+       WHERE workspaceId = ? AND projectId = ? AND deploymentId = ? AND nodeId = ?
+         AND id = ? AND deletedAt IS NULL`,
+      input.workspaceId,
+      detail.projectId,
+      detail.id,
+      detail.nodeId,
+      detail.currentArtifactId,
+    );
+  }
   if (input.operation === 'redeploy') {
-    const running = detail.currentArtifactId
-      ? await queryOne<{ manifest: string }>(
-          `SELECT manifest FROM app_artifact
-            WHERE workspaceId = ? AND deploymentId = ? AND id = ? AND deletedAt IS NULL`,
-          input.workspaceId,
-          detail.id,
-          detail.currentArtifactId,
-        )
-      : null;
+    const running = currentArtifact;
     if (running) {
       try {
         const recorded = JSON.parse(running.manifest) as {
@@ -875,9 +954,36 @@ export async function createDeploymentAction(input: {
     }
     artifactId = createId('art');
   }
-  if (['start', 'restart', 'rollback', 'status'].includes(input.operation) && !artifactId && !targetArtifactId) {
+  if (input.operation === 'recover') {
+    if (detail.desiredState !== 'running') {
+      return { ok: false, status: 409, error: 'Recovery is not available for an intentionally stopped deployment.' };
+    }
+    if (detail.observedState === 'healthy') {
+      return { ok: false, status: 409, error: 'The deployment is already healthy.' };
+    }
+    if (!currentArtifact || currentArtifact.state !== 'verified' ||
+        currentArtifact.availabilityState === 'missing' || currentArtifact.availabilityState === 'corrupted') {
+      return { ok: false, status: 409, error: 'The current artifact is not verified as available on this node.' };
+    }
+    try {
+      const recorded = JSON.parse(currentArtifact.manifest) as { contract?: typeof detail.plan.contract };
+      if (recorded.contract) redeployContract = recorded.contract;
+    } catch {
+      return { ok: false, status: 409, error: 'The current artifact manifest is invalid.' };
+    }
+  }
+  if (['start', 'restart', 'rollback', 'status', 'recover'].includes(input.operation) && !artifactId && !targetArtifactId) {
     return { ok: false, status: 409, error: 'No verified local artifact is available.' };
   }
+  const protectedArtifactIds = (await query<{ id: string }>(
+    `SELECT id FROM app_artifact WHERE workspaceId = ? AND projectId = ? AND deploymentId = ?
+       AND nodeId = ? AND state = 'verified' AND deletedAt IS NULL
+       AND id <> COALESCE(?, '') AND availabilityState NOT IN ('missing','corrupted')
+     ORDER BY version DESC LIMIT 1`,
+    input.workspaceId, detail.projectId, detail.id, detail.nodeId, detail.currentArtifactId,
+  )).map((row) => row.id);
+  if (detail.currentArtifactId) protectedArtifactIds.unshift(detail.currentArtifactId);
+  const nextDesiredRevision = detail.desiredRevision + (operationBumpsDesiredRevision(input.operation) ? 1 : 0);
   const actionId = createId('dact');
   const environmentValues = await scopedEnvironment({
     workspaceId: input.workspaceId,
@@ -896,7 +1002,9 @@ export async function createDeploymentAction(input: {
     source: input.operation === 'redeploy'
       ? { owner: redeploySource.owner, repository: redeploySource.repository, commit: redeploySource.commit }
       : null,
-    contract: input.operation === 'redeploy' ? redeployContract : detail.plan.contract,
+    contract: input.operation === 'redeploy' || input.operation === 'recover'
+      ? redeployContract
+      : detail.plan.contract,
     environment: detail.environment,
     environmentCiphertext: await sealNodeEnvironment(node.token, environmentValues),
     port: detail.localPort,
@@ -904,6 +1012,9 @@ export async function createDeploymentAction(input: {
     memoryMb: APP_RUNTIME_LIMITS.memoryMinimumMb,
     diskQuotaBytes: APP_RUNTIME_LIMITS.diskMinimumBytes,
     retainArtifacts: APP_RUNTIME_LIMITS.maximumArtifactsPerProject,
+    ...(recoveryAgentCompatible(node.row.agentVersion ?? '')
+      ? { expectedDesiredRevision: nextDesiredRevision, protectedArtifactIds }
+      : {}),
   };
   const queued = await enqueueJob({
     workspaceId: input.workspaceId,
@@ -934,7 +1045,9 @@ export async function createDeploymentAction(input: {
           : input.operation === 'delete' ? 'deleting'
             : input.operation === 'redeploy' ? 'building'
               : input.operation === 'start' ? 'starting'
-                : detail.state;
+                : input.operation === 'recover' ? 'recovering'
+                  : detail.state;
+  const desiredRuntimeState = desiredStateAfterOperation(detail.desiredState, input.operation);
   const database = await db();
   const statements: D1PreparedStatement[] = [
     database.prepare(
@@ -943,7 +1056,19 @@ export async function createDeploymentAction(input: {
         idempotencyKey, requestedBy, error, createdAt, updatedAt, completedAt)
        VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, NULL, ?, ?, NULL)`,
     ).bind(actionId, input.workspaceId, detail.id, detail.projectId, detail.nodeId, queued.job.id, input.operation, key, input.actor, now, now),
-    database.prepare(`UPDATE deployment SET state = ?, jobId = ?, lastError = NULL, updatedAt = ? WHERE workspaceId = ? AND id = ?`).bind(desiredState, queued.job.id, now, input.workspaceId, detail.id),
+    database.prepare(
+      `UPDATE deployment SET state = ?, jobId = ?, lastError = NULL, updatedAt = ?,
+              desiredState = ?, desiredRevision = ?,
+              observedState = CASE WHEN ? = 'recover' THEN 'recovering' ELSE observedState END,
+              recoveryStatus = CASE WHEN ? = 'recover' THEN 'pending' ELSE recoveryStatus END,
+              recoveryReasonCode = CASE WHEN ? = 'recover' THEN 'recovery_started' ELSE recoveryReasonCode END,
+              recoveryRevision = CASE WHEN ? = 'recover' THEN ? ELSE recoveryRevision END
+        WHERE workspaceId = ? AND id = ?`,
+    ).bind(
+      desiredState, queued.job.id, now, desiredRuntimeState, nextDesiredRevision,
+      input.operation, input.operation, input.operation, input.operation, nextDesiredRevision,
+      input.workspaceId, detail.id,
+    ),
     database.prepare(
       `UPDATE public_exposure SET healthState = 'stale',
               status = CASE WHEN mode = 'private' THEN 'disabled' ELSE 'unavailable_zero_mode' END,
@@ -959,8 +1084,9 @@ export async function createDeploymentAction(input: {
     statements.push(database.prepare(
       `INSERT INTO app_artifact
        (id, workspaceId, deploymentId, projectId, nodeId, commitSha, version,
-        state, manifest, checksum, sizeBytes, createdAt, verifiedAt, activatedAt, deletedAt)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 'building', ?, NULL, 0, ?, NULL, NULL, NULL)`,
+        state, manifest, checksum, sizeBytes, createdAt, verifiedAt, activatedAt, deletedAt,
+        availabilityState, lastVerifiedOnNodeAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'building', ?, NULL, 0, ?, NULL, NULL, NULL, 'unknown', NULL)`,
     ).bind(artifactId, input.workspaceId, detail.id, detail.projectId, detail.nodeId, redeploySource.commit, version, stableJson({ contract: redeployContract, source: redeploySource }), now));
   }
   await database.batch(statements);
@@ -1119,6 +1245,12 @@ export async function createRelease(input: {
       memoryMb: APP_RUNTIME_LIMITS.memoryMinimumMb,
       diskQuotaBytes: APP_RUNTIME_LIMITS.diskMinimumBytes,
       retainArtifacts: APP_RUNTIME_LIMITS.maximumArtifactsPerProject,
+      ...(recoveryAgentCompatible(node.row.agentVersion ?? '')
+        ? {
+            expectedDesiredRevision: detail.desiredRevision + 1,
+            protectedArtifactIds: detail.currentArtifactId ? [detail.currentArtifactId] : [],
+          }
+        : {}),
     },
     targetNodeId: node.row.id,
     idempotencyKey: key ? `app:${key}` : `app:release:${actionId}`,
@@ -1152,14 +1284,16 @@ export async function createRelease(input: {
     database.prepare(
       `INSERT INTO app_artifact
        (id, workspaceId, deploymentId, projectId, nodeId, commitSha, version,
-        state, manifest, checksum, sizeBytes, createdAt, verifiedAt, activatedAt, deletedAt)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 'building', ?, NULL, 0, ?, NULL, NULL, NULL)`,
+        state, manifest, checksum, sizeBytes, createdAt, verifiedAt, activatedAt, deletedAt,
+        availabilityState, lastVerifiedOnNodeAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'building', ?, NULL, 0, ?, NULL, NULL, NULL, 'unknown', NULL)`,
     ).bind(artifactId, input.workspaceId, detail.id, detail.projectId, node.row.id, plan.source.commit, version, stableJson({ contract: plan.contract, source: plan.source }), now),
     // `currentArtifactId` is deliberately untouched here. It moves only when
     // the node reports the new release verified, started and healthy, so a
     // failed release leaves the running one exactly where it was.
     database.prepare(
-      `UPDATE deployment SET state = 'building', jobId = ?, lastError = NULL, updatedAt = ?
+      `UPDATE deployment SET state = 'building', jobId = ?, lastError = NULL, updatedAt = ?,
+              desiredState = 'running', desiredRevision = COALESCE(desiredRevision, 0) + 1
         WHERE workspaceId = ? AND id = ?`,
     ).bind(queued.job.id, now, input.workspaceId, detail.id),
     database.prepare(

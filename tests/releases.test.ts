@@ -109,10 +109,10 @@ void test('deployment.rollback is a single catalogued action carrying outcome, n
   }
 });
 
-void test('Phase 17 adds no migration and no second cron', () => {
+void test('Phase 17 release history keeps the single cron after Phase 18', () => {
   const ledger = source('lib/server/db.ts');
   const migrations = source('wrangler.jsonc');
-  assert.ok(!ledger.includes('0020_'), 'Phase 17 introduces no migration 0020');
+  assert.match(ledger, /0020_runtime_recovery/);
   assert.equal(
     (migrations.match(/\* \* \* \* \*/g) ?? []).length,
     1,
@@ -140,6 +140,8 @@ function artifact(overrides: Partial<AppArtifact> = {}): AppArtifact {
     commitSha: 'a'.repeat(40),
     version: 2,
     state: 'verified',
+    availabilityState: 'present',
+    lastVerifiedOnNodeAt: 2,
     checksum: `sha256:${'b'.repeat(64)}`,
     sizeBytes: 1_024,
     createdAt: 1,
@@ -416,7 +418,7 @@ void test('a redeploy rebuilds the release that is running, not the one first de
   const server = source('lib/server/deployments.ts');
   assert.ok(server.includes('let redeploySource = detail.plan.source;'), 'redeploy resolves its own source');
   assert.ok(
-    server.includes('SELECT manifest FROM app_artifact'),
+    server.includes('SELECT manifest, state, availabilityState FROM app_artifact'),
     'redeploy reads the running artifact manifest',
   );
   assert.ok(

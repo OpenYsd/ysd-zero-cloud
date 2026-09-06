@@ -104,8 +104,8 @@ export function collectMetrics(runningJobs = 0): NodeMetrics {
 
 export type AgentJobResult =
   | { status: 'succeeded'; result: Record<string, unknown> }
-  | { status: 'failed'; error: string; retryable: boolean }
-  | { status: 'cancelled'; error: string; retryable: false };
+  | { status: 'failed'; error: string; retryable: boolean; result?: Record<string, unknown> }
+  | { status: 'cancelled'; error: string; retryable: false; result?: Record<string, unknown> };
 
 export async function executeSignedJob(input: {
   token: string;

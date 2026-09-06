@@ -55,7 +55,7 @@ ALTER = "AL" + "TER"
 
 # A repository with a safe, pinned Node lock contract, and one without. Both
 # are public and are the same pair `app-runtime-acceptance.py` relies on.
-DEPLOYABLE_REPOSITORY = "heroku/node-js-getting-started"
+DEPLOYABLE_REPOSITORY = "heroku/nodejs-getting-started"
 UNDEPLOYABLE_REPOSITORY = "OpenYsd/ysd-zero-cloud"
 
 PASSED: list[str] = []
@@ -263,10 +263,11 @@ def pair_acceptance_node(operator: Client, agent: Client):
     return node_id, token, ""
 
 
-anon = Client("anonymous", "203.0.113.10")
-one = Client("operator-1", "203.0.113.11")
-two = Client("operator-2", "203.0.113.12")
-agent = Client("agent", "203.0.113.13")
+address_base = 100 + int(RUN[:2], 16) % 100
+anon = Client("anonymous", f"203.0.113.{address_base}")
+one = Client("operator-1", f"203.0.113.{address_base + 1}")
+two = Client("operator-2", f"203.0.113.{address_base + 2}")
+agent = Client("agent", f"203.0.113.{address_base + 3}")
 
 section("anonymous access is closed")
 for path in ("/api/projects", "/api/secrets", "/api/usage", "/api/logs", "/api/shield",
@@ -607,7 +608,7 @@ if not (OWNER_EMAIL and OWNER_PASSWORD):
     unavailable("SQL Editor owner guard cases",
                 "YSD_ACCEPTANCE_OWNER_EMAIL / YSD_ACCEPTANCE_OWNER_PASSWORD for the instance owner")
 else:
-    owner = Client("owner", "203.0.113.14")
+    owner = Client("owner", f"203.0.113.{address_base + 4}")
     status, _ = owner.request("POST", "/api/auth/sign-in/email",
                               {"email": OWNER_EMAIL, "password": OWNER_PASSWORD})
     check("owner sign-in", status == 200, f"got {status}")

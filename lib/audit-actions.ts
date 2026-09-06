@@ -98,6 +98,14 @@ export const EVIDENCE_ACTIONS = [
     why: 'Redeploy, rollback, and stop are the highest blast-radius runtime actions.',
   },
   {
+    action: 'deployment.recovery',
+    resourceType: 'deployment',
+    metadataKeys: ['artifactId', 'nodeId', 'reasonCode', 'phase', 'restarted'],
+    route: 'lib/server/app-runtime-control.ts',
+    critical: true,
+    why: 'Runtime recovery proves who restored an existing artifact and why it succeeded or stopped.',
+  },
+  {
     action: 'node.register',
     resourceType: 'compute_node',
     metadataKeys: ['label'],

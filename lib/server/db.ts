@@ -20,6 +20,7 @@ import auditIntegritySchema from '../../db/migrations/0016_audit_integrity.sql?r
 import accountExperienceSchema from '../../db/migrations/0017_account_experience.sql?raw';
 import projectReadinessSchema from '../../db/migrations/0018_project_readiness.sql?raw';
 import shieldPostureSchema from '../../db/migrations/0019_shield_posture.sql?raw';
+import runtimeRecoverySchema from '../../db/migrations/0020_runtime_recovery.sql?raw';
 
 /**
  * D1 access and schema management.
@@ -50,6 +51,7 @@ const MIGRATIONS: { name: string; sql: string }[] = [
   { name: '0017_account_experience', sql: accountExperienceSchema },
   { name: '0018_project_readiness', sql: projectReadinessSchema },
   { name: '0019_shield_posture', sql: shieldPostureSchema },
+  { name: '0020_runtime_recovery', sql: runtimeRecoverySchema },
 ];
 
 const LEDGER = `CREATE TABLE IF NOT EXISTS ysd_migration (

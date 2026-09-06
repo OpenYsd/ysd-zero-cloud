@@ -37,6 +37,11 @@ import {
 } from '@/lib/domain';
 import { formatBytes, formatUsage, type UsageReading } from '@/lib/free-tier';
 import { money, relativeTime } from '@/lib/format';
+import {
+  RECOVERY_REASON_CODES,
+  recoveryReasonMessage,
+  type RecoveryReasonCode,
+} from '@/lib/runtime-recovery';
 import { DeploymentActions } from '@/components/deployment-actions';
 import type { CollaborationLimits } from '@/lib/server/organization-limits';
 
@@ -194,7 +199,7 @@ export function DeploymentsList({
               'Repository',
               'Commit',
               'Node',
-              'State',
+              'Desired / runtime',
               'Private address',
               'Created',
               'Actions',
@@ -238,8 +243,15 @@ export function DeploymentsList({
                       : 'border-amber-400/20 bg-amber-400/5 text-amber-300'
                   }
                 >
-                  {deployment.state}
+                  {deployment.desiredState} / {deployment.observedState}
                 </Badge>
+                {deployment.recoveryReasonCode && RECOVERY_REASON_CODES.includes(
+                  deployment.recoveryReasonCode as RecoveryReasonCode,
+                ) ? (
+                  <p className="mt-1 max-w-44 text-[9px] text-amber-200/70">
+                    {recoveryReasonMessage(deployment.recoveryReasonCode as RecoveryReasonCode)}
+                  </p>
+                ) : null}
               </TableCell>
               <TableCell className="px-4 py-3 font-mono text-[10px] text-white/42">
                 {deployment.localAddress ?? '—'}

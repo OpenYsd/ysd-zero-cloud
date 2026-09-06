@@ -1,24 +1,30 @@
 import assert from 'node:assert/strict';
 import { Buffer } from 'node:buffer';
+import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
 import {
   access,
   mkdir,
   mkdtemp,
   readFile,
+  readdir,
   rm,
   symlink,
   writeFile,
 } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import test from 'node:test';
 import { gzipSync } from 'node:zlib';
 
 import {
   assertAppRuntimePathInside,
+  collectAppRuntimeSnapshots,
   discoverAppRuntimeCapabilities,
   extractAppRuntimeArchive,
+  isAppProcessRunning,
+  pruneArtifacts,
   redactAppRuntimeLog,
   shutdownManagedApps,
 } from '../agent/app-runtime.ts';
@@ -51,6 +57,52 @@ const ARTIFACT_ID = `art_${'4'.repeat(24)}`;
 const TARGET_ARTIFACT_ID = `art_${'5'.repeat(24)}`;
 const ACTION_ID = `dact_${'6'.repeat(24)}`;
 const GiB = 1024 ** 3;
+
+void test('signal-terminated Windows child is not reported as a running runtime', () => {
+  assert.equal(isAppProcessRunning({ exitCode: null, signalCode: null }), true);
+  assert.equal(isAppProcessRunning({ exitCode: 0, signalCode: null }), false);
+  assert.equal(isAppProcessRunning({ exitCode: null, signalCode: 'SIGTERM' }), false);
+  assert.equal(isAppProcessRunning({ exitCode: null, signalCode: 'SIGKILL' }), false);
+});
+
+async function runInFreshAgentProcess(input: {
+  root: string;
+  payload: AppRuntimeJobPayload;
+  capabilities: NodeCapabilities['appRuntime'];
+}): Promise<{ status: string; result?: Record<string, unknown>; error?: string; marker?: string }> {
+  const moduleUrl = new URL('../agent/app-runtime.ts', import.meta.url).href;
+  const program = `
+    import { executeAppRuntimeJob, shutdownManagedApps } from ${JSON.stringify(moduleUrl)};
+    const chunks = [];
+    for await (const chunk of process.stdin) chunks.push(chunk);
+    const input = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    const output = await executeAppRuntimeJob(input);
+    const marker = output.status === 'succeeded' && input.payload.operation === 'recover'
+      ? await (await fetch('http://127.0.0.1:' + input.payload.port + '/')).text()
+      : undefined;
+    await shutdownManagedApps();
+    process.stdout.write(JSON.stringify({ ...output, marker }));
+  `;
+  const child = spawn(process.execPath, ['--experimental-strip-types', '--input-type=module', '--eval', program], {
+    stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true,
+  });
+  const stdout: Buffer[] = [];
+  const stderr: Buffer[] = [];
+  child.stdout.on('data', (chunk: Buffer) => stdout.push(chunk));
+  child.stderr.on('data', (chunk: Buffer) => stderr.push(chunk));
+  child.stdin.end(JSON.stringify({
+    payload: input.payload,
+    workspaceId: WORKSPACE_ID,
+    token: TOKEN,
+    capabilities: input.capabilities,
+    rootDirectory: input.root,
+  }));
+  const code = await new Promise<number | null>((resolve) => child.once('exit', resolve));
+  assert.equal(code, 0, Buffer.concat(stderr).toString('utf8'));
+  return JSON.parse(Buffer.concat(stdout).toString('utf8')) as {
+    status: string; result?: Record<string, unknown>; error?: string; marker?: string;
+  };
+}
 
 const CONTRACT: SafeBuildContract = {
   version: 1,
@@ -112,6 +164,8 @@ function payload(overrides: Partial<AppRuntimeJobPayload> = {}): AppRuntimeJobPa
     memoryMb: 256,
     diskQuotaBytes: APP_RUNTIME_LIMITS.diskMinimumBytes,
     retainArtifacts: 3,
+    expectedDesiredRevision: null,
+    protectedArtifactIds: [],
     ...overrides,
   };
 }
@@ -201,7 +255,8 @@ function safeFixture(serverSource?: string): Uint8Array {
   const server = serverSource ?? [
     "const http = require('node:http');",
     "console.log('token=' + process.env.API_TOKEN);",
-    "http.createServer((request, response) => { response.statusCode = 200; response.end('ok'); })",
+    "http.createServer((request, response) => { response.statusCode = 200; response.end('ok');",
+    "  if (request.url === '/crash') setTimeout(() => process.exit(23), 25); })",
     "  .listen(Number(process.env.PORT), process.env.HOST);",
   ].join('\n');
   return tarball([
@@ -485,6 +540,30 @@ void test('App Runtime D1 metadata is tenant-scoped, idempotent, private, and ad
   assert.match(cli, /status === 401[\s\S]*status === 403[\s\S]*shutdownManagedApps/);
 });
 
+void test('real artifact retention keeps exactly five physical releases and protects current plus previous', async () => {
+  const parent = await mkdtemp(path.join(os.tmpdir(), 'ysd-retention-'));
+  const current = `art_${'1'.repeat(24)}`;
+  const previous = `art_${'2'.repeat(24)}`;
+  const ids = [current, previous, ...['3', '4', '5', '6', '7'].map((digit) => `art_${digit.repeat(24)}`), 'junk-cache'];
+  try {
+    for (const id of ids) {
+      await mkdir(path.join(parent, id));
+      await writeFile(path.join(parent, id, 'marker'), id);
+    }
+    const pruned = await pruneArtifacts(parent, 5, current, [current, previous]);
+    const kept = await readdir(parent);
+    assert.equal(kept.length, 5);
+    assert.ok(kept.includes(current));
+    assert.ok(kept.includes(previous));
+    assert.ok(!kept.includes('junk-cache'));
+    assert.equal(pruned.length, 2);
+    assert.ok(!pruned.includes(current));
+    assert.ok(!pruned.includes(previous));
+  } finally {
+    await rm(parent, { recursive: true, force: true });
+  }
+});
+
 void test('real safe deploy, lifecycle, rollback integrity, port conflict, and cancellation run on Node 25/26', async (context) => {
   const discovered = await discoverAppRuntimeCapabilities();
   if (!discovered.available || discovered.nodeMajor !== 26 || !discovered.packageManagers.includes('npm')) {
@@ -508,12 +587,30 @@ void test('real safe deploy, lifecycle, rollback integrity, port conflict, and c
       fetcher: archiveFetcher(safeFixture()),
     });
     assert.equal(deployed.status, 'succeeded');
+    let deployedChecksum = '';
     if (deployed.status === 'succeeded') {
       assert.match(String(deployed.result.checksum), /^sha256:[a-f0-9]{64}$/);
+      deployedChecksum = String(deployed.result.checksum);
       assert.equal(deployed.result.localAddress, 'http://127.0.0.1:41321');
       assert.doesNotMatch(JSON.stringify(deployed.result), new RegExp(secret));
       assert.match(JSON.stringify(deployed.result), /Environment leak indicator/);
     }
+    assert.equal(await (await fetch(`http://127.0.0.1:${livePayload.port}/`)).text(), 'ok');
+    const artifactParent = path.join(
+      root, 'workspaces', WORKSPACE_ID, 'projects', PROJECT_ID, 'deployments',
+      DEPLOYMENT_ID, 'artifacts',
+    );
+    const artifactCountBeforeRecovery = (await readdir(artifactParent)).length;
+
+    await fetch(`http://127.0.0.1:${livePayload.port}/crash`);
+    await delay(2_500);
+    const restarted = collectAppRuntimeSnapshots().find((item) => item.deploymentId === DEPLOYMENT_ID);
+    assert.equal(restarted?.state, 'running');
+    assert.equal(restarted?.healthState, 'healthy');
+    assert.equal(restarted?.restartCount, 1);
+
+    await fetch(`http://127.0.0.1:${livePayload.port}/crash`);
+    await delay(100);
 
     const stopped = await signedRun({
       root,
@@ -521,9 +618,56 @@ void test('real safe deploy, lifecycle, rollback integrity, port conflict, and c
       payload: payload({
         operation: 'stop', source: null, contract: CONTRACT,
         environmentCiphertext, artifactId: ARTIFACT_ID,
+        expectedDesiredRevision: 2,
       }),
     });
     assert.equal(stopped.status, 'succeeded');
+    await delay(1_500);
+    const afterStopRace = collectAppRuntimeSnapshots().find((item) => item.deploymentId === DEPLOYMENT_ID);
+    assert.equal(afterStopRace?.state, 'stopped');
+    assert.equal(afterStopRace?.pid, null, 'the delayed crash callback must not respawn after Stop');
+
+    // Real reboot simulation: the recovery executes in a fresh Node process,
+    // whose supervisor map starts empty, against the exact on-disk artifact.
+    // No source fetcher is supplied, so any accidental rebuild fails the test.
+    const recovered = await runInFreshAgentProcess({
+      root,
+      capabilities: discovered,
+      payload: payload({
+        operation: 'recover', source: null, contract: CONTRACT,
+        environmentCiphertext, artifactId: ARTIFACT_ID,
+        expectedDesiredRevision: 2,
+        protectedArtifactIds: [ARTIFACT_ID],
+      }),
+    });
+    assert.equal(recovered.status, 'succeeded');
+    assert.equal(recovered.result?.reasonCode, 'recovery_succeeded');
+    assert.equal(recovered.result?.observedState, 'healthy');
+    assert.equal(recovered.result?.availabilityState, 'present');
+    assert.equal(recovered.result?.restarted, true);
+    assert.equal(recovered.result?.checksum, deployedChecksum);
+    assert.equal(recovered.marker, 'ok');
+    const artifactCount = (await readdir(artifactParent)).length;
+    assert.equal(artifactCount, artifactCountBeforeRecovery);
+    const occupied = createServer();
+    await new Promise<void>((resolve, reject) => {
+      occupied.once('error', reject);
+      occupied.listen(livePayload.port, '127.0.0.1', resolve);
+    });
+    const portBlocked = await runInFreshAgentProcess({
+      root,
+      capabilities: discovered,
+      payload: payload({
+        operation: 'recover', source: null, contract: CONTRACT,
+        environmentCiphertext, artifactId: ARTIFACT_ID,
+        expectedDesiredRevision: 2,
+        protectedArtifactIds: [ARTIFACT_ID],
+      }),
+    });
+    assert.equal(portBlocked.status, 'failed');
+    assert.equal(portBlocked.result?.reasonCode, 'port_in_use');
+    assert.equal((await readdir(artifactParent)).length, artifactCount);
+    await new Promise<void>((resolve) => occupied.close(() => resolve()));
 
     const rolledBack = await signedRun({
       root,
@@ -557,6 +701,36 @@ void test('real safe deploy, lifecycle, rollback integrity, port conflict, and c
     });
     assert.equal(refusedRollback.status, 'failed');
     if (refusedRollback.status === 'failed') assert.match(refusedRollback.error, /checksum/);
+
+    const corruptRecovery = await signedRun({
+      root,
+      capabilities: actualCapabilities,
+      payload: payload({
+        operation: 'recover', source: null, contract: CONTRACT,
+        environmentCiphertext, artifactId: ARTIFACT_ID,
+        expectedDesiredRevision: 3,
+      }),
+    });
+    assert.equal(corruptRecovery.status, 'failed');
+    if (corruptRecovery.status === 'failed') {
+      assert.equal(corruptRecovery.result?.reasonCode, 'artifact_corrupted');
+      assert.equal(corruptRecovery.result?.availabilityState, 'corrupted');
+    }
+    await rm(path.dirname(artifactPath), { recursive: true, force: true });
+    const missingRecovery = await signedRun({
+      root,
+      capabilities: actualCapabilities,
+      payload: payload({
+        operation: 'recover', source: null, contract: CONTRACT,
+        environmentCiphertext, artifactId: ARTIFACT_ID,
+        expectedDesiredRevision: 3,
+      }),
+    });
+    assert.equal(missingRecovery.status, 'failed');
+    if (missingRecovery.status === 'failed') {
+      assert.equal(missingRecovery.result?.reasonCode, 'artifact_missing');
+      assert.equal(missingRecovery.result?.availabilityState, 'missing');
+    }
 
     const conflictServer = createServer();
     await new Promise<void>((resolve, reject) => {

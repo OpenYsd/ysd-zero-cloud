@@ -7,6 +7,17 @@ import {
 } from '@/lib/app-runtime';
 import { createId } from '@/lib/crypto';
 import { type NodeJobState } from '@/lib/nodes';
+import {
+  ARTIFACT_AVAILABILITY_STATES,
+  DEPLOYMENT_OBSERVED_STATES,
+  RECOVERY_PHASES,
+  RECOVERY_REASON_CODES,
+  recoveryReasonMessage,
+  type ArtifactAvailabilityState,
+  type DeploymentObservedState,
+  type RecoveryReasonCode,
+} from '@/lib/runtime-recovery';
+import { recordEvidence } from './audit';
 import { db, execute, queryOne } from './db';
 import { writeLog } from './logs';
 import { emitWorkflowEvent } from './workflow-events';
@@ -83,8 +94,19 @@ export async function recordAppRuntimeJobOutcome(input: {
     typeof input.result?.checksum === 'string' && /^sha256:[a-f0-9]{64}$/.test(input.result.checksum)
       ? input.result.checksum
       : null;
-  const integrityRequired = ['deploy', 'redeploy', 'rollback'].includes(payload.operation);
-  const effectiveSuccess = successful && (!integrityRequired || checksum !== null);
+  const integrityRequired = ['deploy', 'redeploy', 'rollback', 'recover'].includes(payload.operation);
+  let effectiveSuccess = successful && (!integrityRequired || checksum !== null);
+  const recoveryIntent = payload.operation === 'recover'
+    ? await queryOne<{ desiredState: string | null; desiredRevision: number | null }>(
+        `SELECT desiredState, desiredRevision FROM deployment
+         WHERE workspaceId = ? AND id = ? AND nodeId = ? AND deletedAt IS NULL`,
+        input.job.workspaceId, payload.deploymentId, input.job.assignedNodeId,
+      )
+    : null;
+  if (payload.operation === 'recover' && (
+    recoveryIntent?.desiredState !== 'running' ||
+    recoveryIntent.desiredRevision !== payload.expectedDesiredRevision
+  )) effectiveSuccess = false;
   const outcomeState: NodeJobState = successful && !effectiveSuccess ? 'failed' : input.state;
   const outcomeError = successful && !effectiveSuccess
     ? 'The App Runtime artifact completion was unsigned.'
@@ -119,6 +141,26 @@ export async function recordAppRuntimeJobOutcome(input: {
     input.result.localAddress === `http://127.0.0.1:${payload.port}`
       ? input.result.localAddress
       : null;
+  const reportedReason = RECOVERY_REASON_CODES.includes(input.result?.reasonCode as RecoveryReasonCode)
+    ? input.result!.reasonCode as RecoveryReasonCode
+    : effectiveSuccess ? 'recovery_succeeded' : 'reconciliation_failed';
+  const diagnosticPhases = [...RECOVERY_PHASES, 'source_fetch', 'extract', 'dependency_install', 'build'] as const;
+  const reportedPhase = diagnosticPhases.includes(input.result?.phase as (typeof diagnosticPhases)[number])
+    ? input.result!.phase as (typeof diagnosticPhases)[number]
+    : 'reconcile';
+  const reportedObserved = DEPLOYMENT_OBSERVED_STATES.includes(input.result?.observedState as DeploymentObservedState)
+    ? input.result!.observedState as DeploymentObservedState
+    : effectiveSuccess ? 'healthy' : reportedReason === 'artifact_missing' ? 'missing' : 'blocked';
+  const reportedAvailability = ARTIFACT_AVAILABILITY_STATES.includes(input.result?.availabilityState as ArtifactAvailabilityState)
+    ? input.result!.availabilityState as ArtifactAvailabilityState
+    : null;
+  const recoveryError = payload.operation === 'recover' && !effectiveSuccess
+    ? recoveryReasonMessage(
+        recoveryIntent?.desiredState !== 'running' || recoveryIntent?.desiredRevision !== payload.expectedDesiredRevision
+          ? 'stale_desired_revision'
+          : reportedReason,
+      )
+    : outcomeError;
 
   const database = await db();
   const statements: D1PreparedStatement[] = [
@@ -141,7 +183,14 @@ export async function recordAppRuntimeJobOutcome(input: {
              durationMs = COALESCE(?, durationMs), restartCount = ?, crashLoop = ?,
              lastError = ?, startedAt = CASE WHEN ? = 'healthy' THEN COALESCE(startedAt, ?) ELSE startedAt END,
              finishedAt = CASE WHEN ? IN ('failed','cancelled','timed_out','deleted') THEN ? ELSE finishedAt END,
-             deletedAt = CASE WHEN ? = 'deleted' THEN ? ELSE deletedAt END, updatedAt = ?
+             deletedAt = CASE WHEN ? = 'deleted' THEN ? ELSE deletedAt END, updatedAt = ?,
+             observedState = CASE WHEN ? = 'recover' THEN ?
+               WHEN ? = 'stop' AND ? = 1 THEN 'stopped'
+               WHEN ? = 1 AND ? = 'healthy' THEN 'healthy'
+               WHEN ? = 0 THEN 'blocked' ELSE observedState END,
+             lastReconciledAt = CASE WHEN ? = 'recover' THEN ? ELSE lastReconciledAt END,
+             recoveryStatus = CASE WHEN ? = 'recover' THEN ? ELSE recoveryStatus END,
+             recoveryReasonCode = CASE WHEN ? = 'recover' THEN ? ELSE recoveryReasonCode END
          WHERE workspaceId = ? AND id = ? AND jobId = ?`,
       )
       .bind(
@@ -162,7 +211,7 @@ export async function recordAppRuntimeJobOutcome(input: {
         durationMs,
         restartCount,
         crashLoop ? 1 : 0,
-        outcomeError,
+        recoveryError,
         deploymentState,
         input.now,
         deploymentState,
@@ -170,6 +219,21 @@ export async function recordAppRuntimeJobOutcome(input: {
         deploymentState,
         input.now,
         input.now,
+        payload.operation,
+        reportedObserved,
+        payload.operation,
+        effectiveSuccess ? 1 : 0,
+        effectiveSuccess ? 1 : 0,
+        deploymentState,
+        effectiveSuccess ? 1 : 0,
+        payload.operation,
+        input.now,
+        payload.operation,
+        effectiveSuccess ? 'succeeded' : reportedReason === 'artifact_missing' || reportedReason === 'artifact_corrupted' || reportedReason === 'port_in_use' || reportedReason === 'runtime_incompatible' || reportedReason === 'node_revoked' || reportedReason === 'disk_low' || reportedReason === 'recovery_busy' || reportedReason === 'stale_desired_revision' ? 'blocked' : 'failed',
+        payload.operation,
+        recoveryIntent?.desiredState !== 'running' || recoveryIntent?.desiredRevision !== payload.expectedDesiredRevision
+          ? 'stale_desired_revision'
+          : reportedReason,
         input.job.workspaceId,
         payload.deploymentId,
         input.job.id,
@@ -204,23 +268,30 @@ export async function recordAppRuntimeJobOutcome(input: {
         payload.deploymentId,
       ),
   ];
-  if (artifactId && (payload.operation === 'deploy' || payload.operation === 'redeploy' || payload.operation === 'rollback')) {
+  if (artifactId && ['deploy', 'redeploy', 'rollback', 'recover'].includes(payload.operation)) {
     statements.push(
       database
         .prepare(
           `UPDATE app_artifact
            SET state = ?, checksum = COALESCE(?, checksum), sizeBytes = COALESCE(?, sizeBytes),
                verifiedAt = CASE WHEN ? = 1 THEN COALESCE(verifiedAt, ?) ELSE verifiedAt END,
-               activatedAt = CASE WHEN ? = 1 THEN ? ELSE activatedAt END
+               activatedAt = CASE WHEN ? = 1 THEN ? ELSE activatedAt END,
+               availabilityState = COALESCE(?, availabilityState),
+               lastVerifiedOnNodeAt = CASE WHEN ? IS NOT NULL THEN ? ELSE lastVerifiedOnNodeAt END
            WHERE workspaceId = ? AND projectId = ? AND nodeId = ? AND id = ? AND deletedAt IS NULL`,
         )
         .bind(
-          effectiveSuccess && checksum ? 'verified' : successful ? 'corrupted' : 'failed',
+          payload.operation === 'recover'
+            ? reportedAvailability === 'corrupted' ? 'corrupted' : 'verified'
+            : effectiveSuccess && checksum ? 'verified' : successful ? 'corrupted' : 'failed',
           checksum,
           integer(input.result?.sizeBytes, APP_RUNTIME_LIMITS.diskMaximumBytes),
           effectiveSuccess && checksum ? 1 : 0,
           input.now,
           effectiveSuccess && checksum ? 1 : 0,
+          input.now,
+          reportedAvailability ?? (effectiveSuccess ? 'present' : null),
+          reportedAvailability ?? (effectiveSuccess ? 'present' : null),
           input.now,
           input.job.workspaceId,
           payload.projectId,
@@ -243,7 +314,7 @@ export async function recordAppRuntimeJobOutcome(input: {
     statements.push(
       database
         .prepare(
-          `UPDATE app_artifact SET state = 'deleted', deletedAt = ?
+          `UPDATE app_artifact SET state = 'deleted', availabilityState = 'missing', deletedAt = ?
            WHERE workspaceId = ? AND projectId = ? AND deploymentId = ? AND nodeId = ?
              AND id IN (${pruned.map(() => '?').join(', ')})
              AND deletedAt IS NULL`,
@@ -262,7 +333,7 @@ export async function recordAppRuntimeJobOutcome(input: {
     statements.push(
       database
         .prepare(
-          `UPDATE app_artifact SET state = 'deleted', deletedAt = ?
+          `UPDATE app_artifact SET state = 'deleted', availabilityState = 'missing', deletedAt = ?
            WHERE workspaceId = ? AND deploymentId = ? AND deletedAt IS NULL`,
         )
         .bind(input.now, input.job.workspaceId, payload.deploymentId),
@@ -289,6 +360,22 @@ export async function recordAppRuntimeJobOutcome(input: {
   const logs = Array.isArray(input.result?.logs)
     ? input.result.logs.map(cleanLog).filter((line): line is string => Boolean(line)).slice(-APP_RUNTIME_LIMITS.maximumResultLogLines)
     : [];
+  if (!effectiveSuccess) {
+    statements.push(
+      database.prepare(
+        `INSERT INTO app_deployment_log
+         (id, workspaceId, deploymentId, nodeId, level, phase, message, createdAt)
+         VALUES (?, ?, ?, ?, 'WARN', ?, ?, ?)`,
+      ).bind(
+        createId('alog'), input.job.workspaceId, payload.deploymentId,
+        input.job.assignedNodeId, reportedPhase,
+        payload.operation === 'recover'
+          ? `Runtime recovery blocked · ${reportedReason}`
+          : `App Runtime failed during ${reportedPhase}`,
+        input.now,
+      ),
+    );
+  }
   for (const message of logs) {
     statements.push(
       database
@@ -305,6 +392,41 @@ export async function recordAppRuntimeJobOutcome(input: {
     );
   }
   await database.batch(statements);
+  if (payload.operation === 'recover') {
+    const action = await queryOne<{ requestedBy: string }>(
+      `SELECT requestedBy FROM app_deployment_action
+       WHERE workspaceId = ? AND id = ? AND jobId = ?`,
+      input.job.workspaceId, payload.actionId, input.job.id,
+    );
+    const automatic = action?.requestedBy === 'system:runtime-recovery';
+    const tenant = await queryOne<{ organizationId: string | null }>(
+      'SELECT organizationId FROM workspace WHERE id = ?', input.job.workspaceId,
+    );
+    const workspace = { organizationId: tenant?.organizationId ?? '' };
+    if (!workspace.organizationId) throw new Error('Recovery evidence tenant is unavailable.');
+    await recordEvidence({
+      organizationId: workspace.organizationId,
+      workspaceId: input.job.workspaceId,
+      actorType: automatic ? 'system' : 'user',
+      actorId: automatic ? 'runtime-recovery' : action?.requestedBy ?? 'unknown',
+      action: 'deployment.recovery',
+      resourceId: payload.deploymentId,
+      outcome: effectiveSuccess
+        ? 'success'
+        : ['artifact_missing', 'artifact_corrupted', 'artifact_unavailable', 'port_in_use',
+            'runtime_incompatible', 'node_revoked', 'disk_low', 'recovery_busy',
+            'stale_desired_revision', 'desired_stopped'].includes(reportedReason)
+          ? 'denied'
+          : 'failed',
+      metadata: {
+        artifactId: artifactId ?? '', nodeId: input.job.assignedNodeId ?? '',
+        reasonCode: recoveryIntent?.desiredState !== 'running' || recoveryIntent?.desiredRevision !== payload.expectedDesiredRevision
+          ? 'stale_desired_revision' : reportedReason,
+        phase: reportedPhase,
+        restarted: input.result?.restarted === true,
+      },
+    });
+  }
   await execute(
     `DELETE FROM app_deployment_log
      WHERE workspaceId = ? AND deploymentId = ? AND id NOT IN (
@@ -452,8 +574,8 @@ export async function syncAppRuntimeSnapshots(input: {
   const statements: D1PreparedStatement[] = [];
   for (const snapshot of snapshots) {
     if (Math.abs(snapshot.observedAt - input.now) > 60_000) continue;
-    const known = await queryOne<{ ok: number }>(
-      `SELECT 1 AS ok FROM deployment WHERE workspaceId = ? AND id = ? AND projectId = ? AND nodeId = ?`,
+    const known = await queryOne<{ ok: number; desiredState: string | null }>(
+      `SELECT 1 AS ok, desiredState FROM deployment WHERE workspaceId = ? AND id = ? AND projectId = ? AND nodeId = ?`,
       input.workspaceId, snapshot.deploymentId, snapshot.projectId, input.nodeId,
     );
     if (!known) {
@@ -470,11 +592,16 @@ export async function syncAppRuntimeSnapshots(input: {
       database.prepare(
         `UPDATE deployment SET state = ?, currentArtifactId = COALESCE(?, currentArtifactId),
              observedBind = ?, restartCount = ?, crashLoop = ?, startedAt = CASE WHEN ? = 'healthy' THEN COALESCE(startedAt, ?) ELSE startedAt END,
+             observedState = ?, lastReconciledAt = ?,
              updatedAt = ? WHERE workspaceId = ? AND id = ? AND nodeId = ? AND deletedAt IS NULL`,
       ).bind(
         snapshot.crashLoop ? 'crash_loop' : snapshot.state === 'running' ? 'healthy' : 'stopped',
         snapshot.artifactId, snapshot.bind, snapshot.restartCount, snapshot.crashLoop ? 1 : 0,
-        snapshot.state === 'running' ? 'healthy' : 'stopped', input.now, input.now,
+        snapshot.state === 'running' && snapshot.healthState === 'healthy' ? 'healthy' : 'stopped', input.now,
+        snapshot.crashLoop ? 'blocked'
+          : snapshot.state === 'running' ? snapshot.healthState
+            : known.desiredState === 'running' ? 'missing' : 'stopped',
+        input.now, input.now,
         input.workspaceId, snapshot.deploymentId, input.nodeId,
       ),
       database.prepare(

@@ -402,6 +402,7 @@ export type DeploymentState =
   | 'stopping'
   | 'stopped'
   | 'restarting'
+  | 'recovering'
   | 'rolling_back'
   | 'deleting'
   | 'cancelling'
@@ -432,6 +433,13 @@ export type Deployment = {
   observedBind: '127.0.0.1' | '0.0.0.0' | 'unknown';
   healthPath: string;
   state: DeploymentState;
+  desiredState: 'running' | 'stopped';
+  desiredRevision: number;
+  observedState: 'unknown' | 'healthy' | 'stopped' | 'missing' | 'recovering' | 'unhealthy' | 'blocked';
+  lastReconciledAt: number | null;
+  recoveryStatus: 'pending' | 'succeeded' | 'blocked' | 'failed' | null;
+  recoveryReasonCode: string | null;
+  recoveryGeneration: string | null;
   durationMs: number | null;
   buildDurationMs: number | null;
   estimatedMonthlyCost: number;
@@ -468,6 +476,8 @@ export type AppArtifact = {
   commitSha: string;
   version: number;
   state: 'building' | 'verified' | 'failed' | 'corrupted' | 'deleted';
+  availabilityState: 'unknown' | 'present' | 'missing' | 'corrupted';
+  lastVerifiedOnNodeAt: number | null;
   checksum: string | null;
   sizeBytes: number;
   createdAt: number;

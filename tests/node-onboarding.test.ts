@@ -604,7 +604,7 @@ void test('the catalog grew by exactly the two onboarding actions', () => {
   // 26 at 0.15.0, +0 in the 0.15.1 hotfix, +2 here, +2 for Phase 17 release
   // and rollback. The count is the guard against a silent removal; the
   // assertion below is what pins Phase 16's own contribution.
-  assert.equal(EVIDENCE_ACTIONS.length, 30);
+  assert.equal(EVIDENCE_ACTIONS.length, 31);
   const added = EVIDENCE_ACTIONS
     .filter((entry) => entry.action.startsWith('node.pairing.') || entry.action === 'node.preflight.run')
     .map((entry) => entry.action)
@@ -616,10 +616,10 @@ void test('the catalog grew by exactly the two onboarding actions', () => {
 // Schema and Zero Mode.
 // ---------------------------------------------------------------------------
 
-void test('Phase 16 adds no migration', () => {
+void test('Phase 16 onboarding remains independent of the Phase 18 migration', () => {
   const db = code('lib/server/db.ts');
   assert.match(db, /\{ name: '0019_shield_posture', sql: shieldPostureSchema \}/);
-  assert.doesNotMatch(db, /0020/);
+  assert.doesNotMatch(source('db/migrations/0020_runtime_recovery.sql'), /ALTER TABLE compute_node/);
 
   // Everything preflight reads already exists on compute_node.
   const schema = source('db/migrations/0006_compute_nodes.sql');

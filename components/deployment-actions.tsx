@@ -11,7 +11,7 @@ export function DeploymentActions({ deployment }: { deployment: Deployment }) {
   const [pending, setPending] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   if (deployment.target !== 'user-node' || deployment.state === 'blocked' || deployment.state === 'deleted') return null;
-  const busy = ['queued', 'building', 'starting', 'restarting', 'rolling_back', 'stopping', 'deleting', 'cancelling'].includes(deployment.state);
+  const busy = ['queued', 'building', 'starting', 'restarting', 'recovering', 'rolling_back', 'stopping', 'deleting', 'cancelling'].includes(deployment.state);
 
   async function act(operation: string) {
     setPending(operation);
@@ -32,11 +32,14 @@ export function DeploymentActions({ deployment }: { deployment: Deployment }) {
     }
   }
 
+  const recoverable = deployment.desiredState === 'running' &&
+    ['missing', 'unhealthy', 'blocked'].includes(deployment.observedState);
   const actions = busy
     ? ['cancel']
     : deployment.state === 'healthy'
       ? ['stop', 'restart', 'redeploy', 'delete']
-      : ['start', 'redeploy', 'delete'];
+      : recoverable ? ['recover', 'start', 'redeploy', 'delete']
+        : ['start', 'redeploy', 'delete'];
   return (
     <div className="min-w-44">
       <div className="flex flex-wrap gap-1">

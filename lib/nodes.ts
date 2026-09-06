@@ -36,7 +36,7 @@ export const NODE_PROTOCOL_VERSION = 1;
 // limit it retried forever -- a pinned core, no output, until the build
 // timeout. Local layout only; the payload and signing protocol are
 // unchanged, so 0.4.0 and 0.4.1 nodes keep working.
-export const CURRENT_AGENT_VERSION = '0.4.2';
+export const CURRENT_AGENT_VERSION = '0.5.0';
 export const MINIMUM_AGENT_VERSION = '0.3.0';
 
 export const NODE_TIMING = {

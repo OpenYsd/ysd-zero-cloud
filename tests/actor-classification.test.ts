@@ -154,9 +154,8 @@ void test('the fix changes attribution only, and nothing else about the record',
   }
 });
 
-void test('0.15.1 adds no migration and no schema change', () => {
+void test('0.15.1 actor classification remains schema-free', () => {
   const db = code('lib/server/db.ts');
-  // The ledger still ends at 0019. A classification fix needs no column.
   assert.match(db, /\{ name: '0019_shield_posture', sql: shieldPostureSchema \}/);
-  assert.doesNotMatch(db, /0020/);
+  assert.doesNotMatch(code('db/migrations/0020_runtime_recovery.sql'), /actorType|requestedActor/);
 });

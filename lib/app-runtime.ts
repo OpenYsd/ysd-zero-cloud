@@ -15,6 +15,7 @@ export const APP_RUNTIME_OPERATIONS = [
   'restart',
   'redeploy',
   'rollback',
+  'recover',
   'delete',
   'status',
 ] as const;
@@ -132,6 +133,8 @@ export type AppRuntimeJobPayload = {
   memoryMb: number;
   diskQuotaBytes: number;
   retainArtifacts: number;
+  expectedDesiredRevision: number | null;
+  protectedArtifactIds: string[];
 };
 
 export type AppRuntimeSnapshot = {
@@ -147,6 +150,7 @@ export type AppRuntimeSnapshot = {
   crashLoop: boolean;
   memoryUsedBytes: number | null;
   observedAt: number;
+  healthState: 'unknown' | 'healthy' | 'unhealthy';
 };
 
 type JsonRecord = Record<string, unknown>;
@@ -473,7 +477,8 @@ export function validateAppRuntimeJobPayload(value: unknown):
     'operation', 'deploymentId', 'projectId', 'actionId', 'artifactId',
     'targetArtifactId', 'source', 'contract', 'environment',
     'environmentCiphertext', 'port', 'healthPath', 'memoryMb',
-    'diskQuotaBytes', 'retainArtifacts',
+    'diskQuotaBytes', 'retainArtifacts', 'expectedDesiredRevision',
+    'protectedArtifactIds',
   ])) return { ok: false, error: 'The App Runtime payload shape is invalid.' };
   if (!(APP_RUNTIME_OPERATIONS as readonly unknown[]).includes(value.operation)) {
     return { ok: false, error: 'The App Runtime operation is not allowlisted.' };
@@ -492,7 +497,18 @@ export function validateAppRuntimeJobPayload(value: unknown):
   const memoryMb = integer(value.memoryMb, APP_RUNTIME_LIMITS.memoryMinimumMb, APP_RUNTIME_LIMITS.memoryMaximumMb);
   const diskQuotaBytes = integer(value.diskQuotaBytes, APP_RUNTIME_LIMITS.diskMinimumBytes, APP_RUNTIME_LIMITS.diskMaximumBytes);
   const retainArtifacts = integer(value.retainArtifacts, 1, APP_RUNTIME_LIMITS.maximumArtifactsPerProject);
+  const expectedDesiredRevision = value.expectedDesiredRevision === undefined || value.expectedDesiredRevision === null
+    ? null
+    : integer(value.expectedDesiredRevision, 1, Number.MAX_SAFE_INTEGER);
+  const protectedArtifactIds = value.protectedArtifactIds === undefined
+    ? []
+    : Array.isArray(value.protectedArtifactIds) && value.protectedArtifactIds.length <= 2 &&
+        value.protectedArtifactIds.every((id) => validIdentifier(id, 'art'))
+      ? [...new Set(value.protectedArtifactIds)] as string[]
+      : null;
   if (!port || !memoryMb || !diskQuotaBytes || !retainArtifacts ||
+      (expectedDesiredRevision === null && value.expectedDesiredRevision !== undefined && value.expectedDesiredRevision !== null) ||
+      protectedArtifactIds === null ||
       typeof value.healthPath !== 'string' || !/^\/[A-Za-z0-9._~!$&'()*+,;=:@%/-]{0,127}$/.test(value.healthPath)) {
     return { ok: false, error: 'Port, resource, retention, or health policy is invalid.' };
   }
@@ -527,6 +543,9 @@ export function validateAppRuntimeJobPayload(value: unknown):
   if (['start', 'restart'].includes(operation) && (!artifactId || !contract)) {
     return { ok: false, error: 'Start and restart require a verified artifact contract.' };
   }
+  if (operation === 'recover' && (!artifactId || !contract || expectedDesiredRevision === null)) {
+    return { ok: false, error: 'Recovery requires the current artifact and desired revision.' };
+  }
   if (operation === 'rollback' && !contract) {
     return { ok: false, error: 'Rollback requires the signed deployment contract.' };
   }
@@ -551,6 +570,8 @@ export function validateAppRuntimeJobPayload(value: unknown):
       memoryMb,
       diskQuotaBytes,
       retainArtifacts,
+      expectedDesiredRevision,
+      protectedArtifactIds,
     },
   };
 }
@@ -591,7 +612,9 @@ export function parseAppRuntimeSnapshots(value: unknown): AppRuntimeSnapshot[] |
         integer(item.uptimeSeconds, 0, Number.MAX_SAFE_INTEGER) === null ||
         integer(item.restartCount, 0, 1000) === null || typeof item.crashLoop !== 'boolean' ||
         !(item.memoryUsedBytes === null || integer(item.memoryUsedBytes, 0, Number.MAX_SAFE_INTEGER) !== null) ||
-        integer(item.observedAt, 0, Number.MAX_SAFE_INTEGER) === null) return null;
+        integer(item.observedAt, 0, Number.MAX_SAFE_INTEGER) === null ||
+        !(item.healthState === undefined ||
+          (typeof item.healthState === 'string' && ['unknown', 'healthy', 'unhealthy'].includes(item.healthState)))) return null;
     snapshots.push({
       deploymentId: item.deploymentId,
       projectId: item.projectId,
@@ -605,6 +628,9 @@ export function parseAppRuntimeSnapshots(value: unknown): AppRuntimeSnapshot[] |
       crashLoop: item.crashLoop,
       memoryUsedBytes: item.memoryUsedBytes as number | null,
       observedAt: item.observedAt as number,
+      healthState: item.healthState === 'healthy' || item.healthState === 'unhealthy'
+        ? item.healthState
+        : 'unknown',
     });
   }
   return snapshots;

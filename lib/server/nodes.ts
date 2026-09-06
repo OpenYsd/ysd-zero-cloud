@@ -32,7 +32,13 @@ import {
   appRuntimeLeaseDuration,
   parseAppRuntimeSnapshots,
   validateAppRuntimeJobPayload,
+  type AppRuntimeJobPayload,
 } from '@/lib/app-runtime';
+import {
+  planRuntimeReconciliation,
+  recoveryAgentCompatible,
+  type ReconciliationDeployment,
+} from '@/lib/runtime-recovery';
 import {
   CURRENT_AGENT_VERSION,
   MINIMUM_AGENT_VERSION,
@@ -1002,6 +1008,158 @@ async function syncGameServerSnapshots(input: {
   return true;
 }
 
+type RecoveryDeploymentRow = ReconciliationDeployment & {
+  projectId: string;
+  nodeId: string;
+  localPort: number;
+  healthPath: string;
+  environment: 'Production' | 'Preview' | 'Development';
+};
+
+async function reconcileAppRuntimes(input: {
+  context: AgentContext;
+  agentVersion: string;
+  generation: string;
+  managedDeploymentIds: string[];
+  now: number;
+}): Promise<void> {
+  if (!recoveryAgentCompatible(input.agentVersion)) return;
+  const rows = await query<RecoveryDeploymentRow>(
+    `SELECT d.id AS deploymentId, d.projectId, d.nodeId, d.localPort, d.healthPath,
+            d.environment, COALESCE(d.desiredState, 'running') AS desiredState,
+            COALESCE(d.desiredRevision, 1) AS desiredRevision,
+            d.currentArtifactId, d.recoveryStatus, d.recoveryRevision,
+            d.recoveryGeneration,
+            CASE WHEN d.state IN ('queued','building','starting','stopping','restarting',
+                 'rolling_back','deleting','cancelling','recovering') THEN 1 ELSE 0 END AS busy
+       FROM deployment d
+      WHERE d.workspaceId = ? AND d.nodeId = ? AND d.deletedAt IS NULL
+        AND d.projectId IS NOT NULL AND d.localPort IS NOT NULL
+        AND COALESCE(d.desiredState, 'running') = 'running'
+      ORDER BY d.updatedAt ASC LIMIT 12`,
+    input.context.node.workspaceId,
+    input.context.node.id,
+  );
+  const plans = planRuntimeReconciliation({
+    agentVersion: input.agentVersion,
+    managedDeploymentIds: input.managedDeploymentIds,
+    deployments: rows.map((row) => ({ ...row, busy: Boolean(row.busy) })),
+    runtimeGeneration: input.generation,
+  });
+  for (const plan of plans) {
+    const deployment = rows.find((row) => row.deploymentId === plan.deploymentId);
+    if (!deployment) continue;
+    const artifact = await queryOne<{
+      id: string; state: string; availabilityState: string | null;
+    }>(
+      `SELECT id, state, availabilityState FROM app_artifact
+       WHERE workspaceId = ? AND projectId = ? AND deploymentId = ? AND nodeId = ?
+         AND id = ? AND deletedAt IS NULL`,
+      input.context.node.workspaceId, deployment.projectId, deployment.deploymentId,
+      deployment.nodeId, plan.artifactId,
+    );
+    if (!artifact || artifact.state !== 'verified' ||
+        artifact.availabilityState === 'missing' || artifact.availabilityState === 'corrupted') {
+      await execute(
+        `UPDATE deployment SET observedState = 'blocked', recoveryStatus = 'blocked',
+                recoveryReasonCode = ?, recoveryRevision = ?, recoveryGeneration = ?,
+                lastReconciledAt = ?, updatedAt = ?
+          WHERE workspaceId = ? AND id = ? AND desiredState = 'running' AND desiredRevision = ?`,
+        artifact?.availabilityState === 'corrupted' ? 'artifact_corrupted' :
+          artifact?.availabilityState === 'missing' || !artifact ? 'artifact_missing' : 'artifact_unavailable',
+        plan.expectedDesiredRevision, input.generation, input.now, input.now,
+        input.context.node.workspaceId, deployment.deploymentId, plan.expectedDesiredRevision,
+      );
+      continue;
+    }
+    const history = await query<{ payload: string }>(
+      `SELECT j.payload FROM node_job j
+       JOIN app_deployment_action a ON a.jobId = j.id AND a.workspaceId = j.workspaceId
+       WHERE a.workspaceId = ? AND a.deploymentId = ? AND a.nodeId = ?
+         AND j.type = ? AND j.state = 'succeeded'
+       ORDER BY j.completedAt DESC LIMIT 10`,
+      input.context.node.workspaceId, deployment.deploymentId, deployment.nodeId,
+      APP_RUNTIME_JOB_TYPE,
+    );
+    let prior: AppRuntimeJobPayload | null = null;
+    for (const item of history) {
+      try {
+        const candidate = validateAppRuntimeJobPayload(JSON.parse(item.payload));
+        if (candidate.ok &&
+            (candidate.payload.artifactId === plan.artifactId || candidate.payload.targetArtifactId === plan.artifactId) &&
+            candidate.payload.contract) {
+          prior = candidate.payload;
+          break;
+        }
+      } catch {
+        // Invalid historical payloads are never replayed.
+      }
+    }
+    if (!prior) {
+      await execute(
+        `UPDATE deployment SET observedState = 'blocked', recoveryStatus = 'blocked',
+                recoveryReasonCode = 'artifact_unavailable', recoveryRevision = ?,
+                recoveryGeneration = ?, lastReconciledAt = ?, updatedAt = ?
+          WHERE workspaceId = ? AND id = ? AND desiredState = 'running' AND desiredRevision = ?`,
+        plan.expectedDesiredRevision, input.generation, input.now, input.now,
+        input.context.node.workspaceId, deployment.deploymentId, plan.expectedDesiredRevision,
+      );
+      continue;
+    }
+    const previous = await queryOne<{ id: string }>(
+      `SELECT id FROM app_artifact WHERE workspaceId = ? AND projectId = ? AND deploymentId = ?
+         AND nodeId = ? AND state = 'verified' AND deletedAt IS NULL AND id <> ?
+         AND availabilityState NOT IN ('missing','corrupted')
+       ORDER BY version DESC LIMIT 1`,
+      input.context.node.workspaceId, deployment.projectId, deployment.deploymentId,
+      deployment.nodeId, plan.artifactId,
+    );
+    const actionId = createId('dact');
+    const queued = await enqueueJob({
+      workspaceId: input.context.node.workspaceId,
+      actor: 'system:runtime-recovery',
+      type: APP_RUNTIME_JOB_TYPE,
+      payload: {
+        operation: 'recover', deploymentId: deployment.deploymentId,
+        projectId: deployment.projectId, actionId, artifactId: plan.artifactId,
+        targetArtifactId: null, source: null, contract: prior.contract,
+        environment: deployment.environment,
+        environmentCiphertext: prior.environmentCiphertext,
+        port: deployment.localPort, healthPath: deployment.healthPath,
+        memoryMb: prior.memoryMb, diskQuotaBytes: prior.diskQuotaBytes,
+        retainArtifacts: APP_RUNTIME_LIMITS.maximumArtifactsPerProject,
+        expectedDesiredRevision: plan.expectedDesiredRevision,
+        protectedArtifactIds: [plan.artifactId, ...(previous ? [previous.id] : [])],
+      },
+      targetNodeId: deployment.nodeId,
+      idempotencyKey: `recover:${deployment.deploymentId}:${plan.expectedDesiredRevision}:${input.generation}`,
+    });
+    if (!queued.ok || !queued.created) continue;
+    const database = await db();
+    await database.batch([
+      database.prepare(
+        `INSERT INTO app_deployment_action
+         (id, workspaceId, deploymentId, projectId, nodeId, jobId, kind, state,
+          idempotencyKey, requestedBy, error, createdAt, updatedAt, completedAt)
+         VALUES (?, ?, ?, ?, ?, ?, 'recover', 'queued', ?, 'system:runtime-recovery', NULL, ?, ?, NULL)`,
+      ).bind(actionId, input.context.node.workspaceId, deployment.deploymentId,
+        deployment.projectId, deployment.nodeId, queued.job.id,
+        `recover:${deployment.deploymentId}:${plan.expectedDesiredRevision}:${input.generation}`,
+        input.now, input.now),
+      database.prepare(
+        `UPDATE deployment SET state = 'recovering', observedState = 'recovering',
+                recoveryStatus = 'pending', recoveryReasonCode = 'process_missing',
+                recoveryRevision = ?, recoveryGeneration = ?, lastReconciledAt = ?,
+                jobId = ?, updatedAt = ?
+          WHERE workspaceId = ? AND id = ? AND desiredState = 'running'
+            AND desiredRevision = ?`,
+      ).bind(plan.expectedDesiredRevision, input.generation, input.now, queued.job.id,
+        input.now, input.context.node.workspaceId, deployment.deploymentId,
+        plan.expectedDesiredRevision),
+    ]);
+  }
+}
+
 export async function recordHeartbeat(input: {
   context: AgentContext;
   capabilities: unknown;
@@ -1009,6 +1167,7 @@ export async function recordHeartbeat(input: {
   agentVersion: unknown;
   gameServers?: unknown;
   appDeployments?: unknown;
+  runtimeGeneration?: unknown;
 }): Promise<
   | { ok: true; status: 'online'; serverTime: number }
   | { ok: false; status: number; error: string }
@@ -1027,6 +1186,10 @@ export async function recordHeartbeat(input: {
   const metrics = parseMetrics(input.metrics);
   const snapshots = parseGameServerSnapshots(input.gameServers ?? []);
   const appSnapshots = parseAppRuntimeSnapshots(input.appDeployments ?? []);
+  const runtimeGeneration = typeof input.runtimeGeneration === 'string' &&
+    /^[A-Za-z0-9_-]{16,64}$/.test(input.runtimeGeneration)
+    ? input.runtimeGeneration
+    : null;
   if (!capabilities || !metrics || !snapshots || !appSnapshots) {
     return {
       ok: false,
@@ -1084,6 +1247,15 @@ export async function recordHeartbeat(input: {
     memoryUsedBytes: metrics.memoryUsedBytes,
     now,
   });
+  if (runtimeGeneration) {
+    await reconcileAppRuntimes({
+      context: input.context,
+      agentVersion: input.agentVersion,
+      generation: runtimeGeneration,
+      managedDeploymentIds: appSnapshots.map((snapshot) => snapshot.deploymentId),
+      now,
+    });
+  }
   await pruneNodeHistory(input.context.node.id, now);
   return { ok: true, status: 'online', serverTime: now };
 }
@@ -1229,6 +1401,41 @@ export async function claimNextJob(
     const appPayload = job.type === APP_RUNTIME_JOB_TYPE
       ? validateAppRuntimeJobPayload(payload)
       : null;
+    if (appPayload?.ok && appPayload.payload.operation === 'recover') {
+      const intent = await queryOne<{
+        desiredState: string | null; desiredRevision: number | null;
+        currentArtifactId: string | null; nodeId: string | null;
+      }>(
+        `SELECT desiredState, desiredRevision, currentArtifactId, nodeId
+           FROM deployment WHERE workspaceId = ? AND id = ? AND deletedAt IS NULL`,
+        context.node.workspaceId, appPayload.payload.deploymentId,
+      );
+      const compatible = recoveryAgentCompatible(context.node.agentVersion);
+      const current = compatible && intent?.desiredState === 'running' &&
+        intent.desiredRevision === appPayload.payload.expectedDesiredRevision &&
+        intent.currentArtifactId === appPayload.payload.artifactId &&
+        intent.nodeId === context.node.id;
+      if (!current) {
+        const reason = compatible ? 'stale_desired_revision' : 'runtime_incompatible';
+        const database = await db();
+        await database.batch([
+          database.prepare(
+            `UPDATE node_job SET state = 'failed', lastError = ?, completedAt = ?, updatedAt = ?
+             WHERE workspaceId = ? AND id = ? AND state = 'queued'`,
+          ).bind(reason, now, now, context.node.workspaceId, job.id),
+          database.prepare(
+            `UPDATE app_deployment_action SET state = 'failed', error = ?, completedAt = ?, updatedAt = ?
+             WHERE workspaceId = ? AND jobId = ? AND state = 'queued'`,
+          ).bind(reason, now, now, context.node.workspaceId, job.id),
+          database.prepare(
+            `UPDATE deployment SET observedState = 'blocked', recoveryStatus = 'blocked',
+                    recoveryReasonCode = ?, lastReconciledAt = ?, updatedAt = ?
+             WHERE workspaceId = ? AND id = ? AND jobId = ?`,
+          ).bind(reason, now, now, context.node.workspaceId, appPayload.payload.deploymentId, job.id),
+        ]);
+        continue;
+      }
+    }
     const leaseExpiresAt = now + (
       job.type.startsWith('game-server.')
         ? gameServerLeaseDuration(job.type, payload)
@@ -1902,6 +2109,21 @@ export async function completeJob(
     }
     nextState = 'succeeded';
   } else {
+    // App Runtime failures carry the same bounded, allowlisted diagnostic
+    // object as successful completions. Preserve it so recovery can report a
+    // fixed phase/reason/availability state instead of collapsing every
+    // failure to a generic reconciliation error. Other job types retain their
+    // established failure contract.
+    if (job.type === APP_RUNTIME_JOB_TYPE && input.result !== undefined && input.result !== null) {
+      result = sanitizeJobResult(input.result, 192 * 1024);
+      if (!result) {
+        return {
+          ok: false,
+          status: 400,
+          error: 'The job result is invalid, too large, or contains a forbidden field.',
+        };
+      }
+    }
     error =
       typeof input.error === 'string'
         ? safeError(input.error)
@@ -2232,7 +2454,10 @@ export async function revokeNode(input: {
     database
       .prepare(
         `UPDATE deployment
-         SET state = 'node_revoked',
+         SET state = 'node_revoked', desiredState = 'stopped',
+             desiredRevision = COALESCE(desiredRevision, 0) + 1,
+             observedState = 'blocked', recoveryStatus = 'blocked',
+             recoveryReasonCode = 'node_revoked',
              lastError = 'The assigned node was revoked. The local App Runtime is stopped when the agent observes the rejected credential.',
              finishedAt = ?, updatedAt = ?
          WHERE workspaceId = ? AND nodeId = ? AND deletedAt IS NULL

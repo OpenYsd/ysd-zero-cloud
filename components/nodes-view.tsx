@@ -46,6 +46,7 @@ import {
 } from '@/lib/agent-release';
 import { compatibilityLabel } from '@/lib/node-preflight';
 import { agentVersionSupported } from '@/lib/nodes';
+import { recoveryAgentCompatible } from '@/lib/runtime-recovery';
 import { cn } from '@/lib/utils';
 
 type PairingWatch = {
@@ -500,6 +501,11 @@ export function NodesView({ state, now }: { state: NodesState; now: number }) {
                     <p className="mt-1 text-[9px] text-white/22">
                       protocol {node.protocolVersion}
                     </p>
+                    {!recoveryAgentCompatible(node.agentVersion) ? (
+                      <p className="mt-1 text-[9px] text-amber-300">
+                        Recovery upgrade required
+                      </p>
+                    ) : null}
                   </TableCell>
                   <TableCell className="px-4 py-3 text-white/38">
                     {node.lastHeartbeatAt

@@ -1,6 +1,7 @@
 # YSD Zero Cloud
 
-YSD Zero Cloud is a zero-cost-first cloud operating system. Production runs `0.13.2` today: authentication,
+YSD Zero Cloud is a zero-cost-first cloud operating system. The source tree is `0.18.0` and
+Phase 18 production acceptance is complete on `0.18.0`. Production includes authentication,
 persistence, security scanning, the cost guard, private-object storage policy, network inventory,
 an outbound-only user-owned compute control plane, a private Node.js App Runtime, local AI
 scheduling, private Minecraft Java server orchestration, organization collaboration, and a
@@ -87,16 +88,49 @@ address and this app applies no email format validation of its own, so classifyi
 prefix would have let a self-registered account file its own activity as the platform. Existing
 rows are left alone — `audit_event` is append-only by design, so this is a forward fix.
 
-`0.16.0`, Phase 16: **Compute Node Onboarding & First Deployment**, is the current
+`0.16.0`, Phase 16: **Compute Node Onboarding & First Deployment**, was an earlier
 Production baseline. It was accepted against Production with a real Compute Node: the
 published bundle was downloaded, checksum-verified, paired, and it built and ran an app
 end to end before the acceptance node was revoked.
 
-`0.17.0`, Phase 17: **Release History & Safe Rollback**, is the current Production
+`0.17.0`, Phase 17: **Release History & Safe Rollback**, was the previous Production
 baseline, with Compute Node agent `0.4.2`. It was accepted against Production with a real
 controlled node: two releases were built onto one service, the rollback reactivated the
 earlier artifact without rebuilding, and the service was confirmed serving the older
 build's bytes again before the acceptance node was revoked.
+
+`0.18.0`, Phase 18: **Production Runtime Reliability & Same-Node Recovery**, is the
+current source and Production release. The Production Agent is `0.5.0`, and Protocol `1`
+is unchanged. A compatible Agent startup sends one
+bounded runtime generation plus at most 12 managed runtime summaries. The control plane
+compares those summaries with its own desired state and can recover a missing runtime from
+the exact current artifact on the same node and port. Recovery verifies the signed manifest,
+recomputes SHA-256, starts no source acquisition or build, and records Healthy only after the
+localhost health check passes. Intentional Stop and node revocation set desired state to
+Stopped and supersede recovery through the desired revision.
+
+Migration `0020_runtime_recovery.sql` is additive. It separates desired intent from observed
+runtime truth and tracks local artifact availability without claiming historical rows are
+currently healthy. Automatic recovery is limited to one attempt for a desired revision and
+Agent startup generation; there is no recovery polling loop and no new cron or Cloudflare
+resource. Agent `0.4.2` remains valid for its legacy operations and never receives 0.5.0-only
+payload fields, while the Nodes UI reports that a recovery upgrade is required.
+
+Production acceptance used a real Windows Compute Node and exercised reboot recovery without
+fetching source, installing dependencies, rebuilding, changing the artifact, port, deployment,
+or node. It also proved intentional Stop, Stop during a restart delay, post-crash supervision and
+health checking, port-conflict blocking, revoked-node rejection, and bounded structured failure
+diagnostics. A final Windows-specific correction treats a signal-terminated child as exited even
+when Node.js leaves `exitCode` null; the regression prevents a later heartbeat from overwriting a
+completed Stop with a false Healthy observation. The acceptance node was revoked afterward and
+its old credential was rejected by Production.
+
+Phase 18 keeps the physical artifact cap at exactly five, protecting the current release and
+the most recent previous verified rollback candidate. Artifacts remain node-local. A surviving
+or unrelated process on the assigned port is never adopted or killed; recovery blocks with a
+fixed `port_in_use` reason instead. Starting the Agent after machine reboot is still manual:
+there is no Windows Service, systemd, launchd, cross-node recovery, remote backup, or
+zero-downtime claim.
 
 A deployment had no history worth the name. Every Smart Deploy stood up a *new* service on a
 new port, and the single `rollback` button silently picked the newest verified artifact that
@@ -179,7 +213,8 @@ certificate and an Apple Developer identity, neither of which exists for this pr
 compromised control plane could replace the artifact and its digest together. Migration `0019`
 remains the newest; Phase 16 adds no schema.
 
-**Live:** <https://ysd-zero-cloud.ysd-zero-cloud.workers.dev> — running `0.17.0`, agent `0.4.2`.
+**Live:** <https://ysd-zero-cloud.ysd-zero-cloud.workers.dev> — running `0.18.0`, agent `0.5.0`,
+Protocol `1`.
 
 This is a standalone project intended only for `OpenYsd/ysd-zero-cloud`. It has no dependency on,
 and makes no changes to, `OpenYsd/ysd-ai`.

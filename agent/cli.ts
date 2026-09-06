@@ -235,6 +235,7 @@ async function heartbeat(
   workspaceId: string,
   gameRootDirectory: string,
   appRootDirectory: string,
+  runtimeGeneration: string,
   runningJobs = 0,
 ): Promise<void> {
   await signedPost({
@@ -250,6 +251,7 @@ async function heartbeat(
         workspaceId,
       ),
       appDeployments: collectAppRuntimeSnapshots(),
+      runtimeGeneration,
     },
   });
 }
@@ -263,6 +265,7 @@ async function monitorClaim(input: {
   workspaceId: string;
   gameRootDirectory: string;
   appRootDirectory: string;
+  runtimeGeneration: string;
 }): Promise<void> {
   let lastHeartbeat = Date.now();
   while (!input.signal.aborted && !input.execution.signal.aborted) {
@@ -288,6 +291,7 @@ async function monitorClaim(input: {
           input.workspaceId,
           input.gameRootDirectory,
           input.appRootDirectory,
+          input.runtimeGeneration,
           1,
         );
         lastHeartbeat = Date.now();
@@ -308,6 +312,7 @@ async function poll(
   workspaceId: string,
   gameRootDirectory: string,
   appRootDirectory: string,
+  runtimeGeneration: string,
 ): Promise<boolean> {
   const response = await signedPost<{
     job: { claim: SignedJobClaim; signature: string } | null;
@@ -330,6 +335,7 @@ async function poll(
     workspaceId,
     gameRootDirectory,
     appRootDirectory,
+    runtimeGeneration,
   });
   let completed: Awaited<ReturnType<typeof executeSignedJob>>;
   try {
@@ -386,6 +392,7 @@ async function run(arguments_: Arguments): Promise<never> {
   );
   let lastHeartbeat = 0;
   let backoff = 2_000;
+  const runtimeGeneration = randomToken(18);
   for (;;) {
     try {
       const now = Date.now();
@@ -396,6 +403,7 @@ async function run(arguments_: Arguments): Promise<never> {
           credentials.workspaceId,
           gameRootDirectory,
           appRootDirectory,
+          runtimeGeneration,
         );
         lastHeartbeat = Date.now();
       }
@@ -405,6 +413,7 @@ async function run(arguments_: Arguments): Promise<never> {
         credentials.workspaceId,
         gameRootDirectory,
         appRootDirectory,
+        runtimeGeneration,
       );
       backoff = 2_000;
       if (!worked) await delay(5_000);

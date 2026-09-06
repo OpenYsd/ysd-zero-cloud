@@ -31,6 +31,14 @@ import {
   type SafeBuildContract,
 } from '../lib/app-runtime.ts';
 import {
+  availabilityFromVerificationFailure,
+  selectRetainedArtifacts,
+  shouldSpawnCrashReplacement,
+  type RecoveryPhase,
+  type RecoveryReasonCode,
+  type RuntimeHealthState,
+} from '../lib/runtime-recovery.ts';
+import {
   constantTimeEqual,
   openNodeEnvironment,
   signText,
@@ -58,6 +66,8 @@ type ManagedApp = {
   crashLoop: boolean;
   desiredRunning: boolean;
   intentionalStop: boolean;
+  desiredRevision: number;
+  healthState: RuntimeHealthState;
   bind: AppRuntimeSnapshot['bind'];
   logLines: string[];
   logBytes: number;
@@ -80,6 +90,18 @@ type ArtifactManifest = {
 const managedApps = new Map<string, ManagedApp>();
 const MANIFEST = '.ysd-artifact.json';
 const SAFE_REGISTRY = 'https://registry.npmjs.org';
+
+/**
+ * Node leaves exitCode as null when a child exits because of a signal (the
+ * normal stop path on Windows) and records the termination in signalCode.
+ * Treating exitCode alone as liveness makes an intentionally stopped runtime
+ * reappear as healthy on the next heartbeat.
+ */
+export function isAppProcessRunning(
+  child: Pick<ChildProcess, 'exitCode' | 'signalCode'>,
+): boolean {
+  return child.exitCode === null && (child.signalCode === null || child.signalCode === undefined);
+}
 
 function safeRoot(rootDirectory: string): string {
   return path.resolve(rootDirectory);
@@ -216,7 +238,7 @@ export async function discoverAppRuntimeCapabilities(): Promise<AppRuntimeCapabi
     permissionModel,
     networkGuard,
     packageManagers: managers,
-    activeDeployments: [...managedApps.values()].filter((app) => app.process.exitCode === null).length,
+    activeDeployments: [...managedApps.values()].filter((app) => isAppProcessRunning(app.process)).length,
     maxDeployments: APP_RUNTIME_LIMITS.maximumDeploymentsPerNode,
   };
 }
@@ -604,7 +626,7 @@ async function assertPortAvailable(port: number): Promise<void> {
   });
 }
 
-function runtimeEnvironment(app: Omit<ManagedApp, 'process' | 'startedAt' | 'restartTimes' | 'restartCount' | 'crashLoop' | 'desiredRunning' | 'intentionalStop' | 'bind' | 'logLines' | 'logBytes'>): Record<string, string> {
+function runtimeEnvironment(app: Omit<ManagedApp, 'process' | 'startedAt' | 'restartTimes' | 'restartCount' | 'crashLoop' | 'desiredRunning' | 'intentionalStop' | 'desiredRevision' | 'healthState' | 'bind' | 'logLines' | 'logBytes'>): Record<string, string> {
   const temp = path.join(app.dataDirectory, 'tmp');
   return {
     ...minimalEnvironment(temp),
@@ -628,12 +650,13 @@ async function spawnManagedApp(input: {
   memoryMb: number;
   environment: Record<string, string>;
   previousRestarts?: number;
+  desiredRevision?: number;
 }): Promise<ManagedApp> {
   await assertPortAvailable(input.port);
   await mkdir(input.dataDirectory, { recursive: true });
   await mkdir(path.join(input.dataDirectory, 'tmp'), { recursive: true });
   const values = Object.values(input.environment).filter((value) => value.length >= 4);
-  const shell: Omit<ManagedApp, 'process' | 'startedAt' | 'restartTimes' | 'restartCount' | 'crashLoop' | 'desiredRunning' | 'intentionalStop' | 'bind' | 'logLines' | 'logBytes'> = {
+  const shell: Omit<ManagedApp, 'process' | 'startedAt' | 'restartTimes' | 'restartCount' | 'crashLoop' | 'desiredRunning' | 'intentionalStop' | 'desiredRevision' | 'healthState' | 'bind' | 'logLines' | 'logBytes'> = {
     ...input,
     secrets: values,
   };
@@ -661,6 +684,8 @@ async function spawnManagedApp(input: {
     crashLoop: false,
     desiredRunning: true,
     intentionalStop: false,
+    desiredRevision: input.desiredRevision ?? 1,
+    healthState: 'unknown',
     bind: '127.0.0.1',
     logLines: [],
     logBytes: 0,
@@ -686,13 +711,20 @@ async function restartAfterCrash(app: ManagedApp): Promise<void> {
   const decision = appCrashRecoveryDecision(app.restartTimes.length);
   if (!decision.restart || decision.delayMs === null) {
     app.crashLoop = true;
-    app.desiredRunning = false;
     appendLogs(app, 'runtime', Buffer.from('Crash-loop protection stopped automatic restarts.'));
     return;
   }
   app.restartTimes.push(now);
   app.restartCount += 1;
+  const scheduledRevision = app.desiredRevision;
   await delay(decision.delayMs);
+  if (!shouldSpawnCrashReplacement({
+    scheduledRevision,
+    currentRevision: app.desiredRevision,
+    desiredRunning: app.desiredRunning,
+    intentionalStop: app.intentionalStop,
+    sameRuntime: managedApps.get(app.deploymentId) === app,
+  })) return;
   const replacement = await spawnManagedApp({
     deploymentId: app.deploymentId,
     projectId: app.projectId,
@@ -705,22 +737,46 @@ async function restartAfterCrash(app: ManagedApp): Promise<void> {
     memoryMb: app.memoryMb,
     environment: app.environment,
     previousRestarts: app.restartCount,
+    desiredRevision: scheduledRevision,
   });
   replacement.restartTimes = app.restartTimes;
+  try {
+    await healthCheck(replacement);
+    appendLogs(replacement, 'runtime', Buffer.from('Crash replacement health check passed.'));
+  } catch {
+    replacement.healthState = 'unhealthy';
+    appendLogs(replacement, 'runtime', Buffer.from('Crash replacement health check failed.'));
+    const stillCurrent = managedApps.get(replacement.deploymentId) === replacement &&
+      replacement.desiredRunning && !replacement.intentionalStop &&
+      replacement.desiredRevision === scheduledRevision;
+    replacement.intentionalStop = true;
+    await terminateProcess(replacement);
+    if (stillCurrent) {
+      replacement.intentionalStop = false;
+      replacement.desiredRunning = true;
+      await restartAfterCrash(replacement);
+    }
+  }
 }
 
-async function stopManagedApp(deploymentId: string): Promise<ManagedApp | null> {
-  const app = managedApps.get(deploymentId) ?? null;
-  if (!app || app.process.exitCode !== null) return app;
-  app.intentionalStop = true;
-  app.desiredRunning = false;
+async function terminateProcess(app: ManagedApp): Promise<void> {
+  if (!isAppProcessRunning(app.process)) return;
   const exited = new Promise<void>((resolve) => app.process.once('exit', () => resolve()));
   app.process.kill('SIGTERM');
   await Promise.race([exited, delay(8_000)]);
-  if (app.process.exitCode === null) {
+  if (isAppProcessRunning(app.process)) {
     app.process.kill('SIGKILL');
     await Promise.race([exited, delay(2_000)]);
   }
+}
+
+async function stopManagedApp(deploymentId: string, desiredRevision?: number): Promise<ManagedApp | null> {
+  const app = managedApps.get(deploymentId) ?? null;
+  if (!app) return null;
+  app.intentionalStop = true;
+  app.desiredRunning = false;
+  if (desiredRevision) app.desiredRevision = desiredRevision;
+  await terminateProcess(app);
   return app;
 }
 
@@ -732,7 +788,7 @@ async function healthCheck(app: ManagedApp, signal?: AbortSignal): Promise<void>
   let last = 'no response';
   for (let attempt = 0; attempt < APP_RUNTIME_LIMITS.healthAttempts; attempt += 1) {
     if (signal?.aborted) throw new Error('The health check was cancelled.');
-    if (app.process.exitCode !== null) throw new Error('The application exited before becoming healthy.');
+    if (!isAppProcessRunning(app.process)) throw new Error('The application exited before becoming healthy.');
     try {
       const response = await fetch(`http://127.0.0.1:${app.port}${app.healthPath}`, {
         redirect: 'manual',
@@ -740,13 +796,17 @@ async function healthCheck(app: ManagedApp, signal?: AbortSignal): Promise<void>
           ? AbortSignal.any([signal, AbortSignal.timeout(APP_RUNTIME_LIMITS.healthTimeoutMs)])
           : AbortSignal.timeout(APP_RUNTIME_LIMITS.healthTimeoutMs),
       });
-      if (response.status >= 200 && response.status < 400) return;
+      if (response.status >= 200 && response.status < 400) {
+        app.healthState = 'healthy';
+        return;
+      }
       last = `HTTP ${response.status}`;
     } catch (error) {
       last = error instanceof Error ? error.message : 'connection failed';
     }
     await delay(APP_RUNTIME_LIMITS.healthBackoffMs * Math.min(4, attempt + 1), undefined, { signal });
   }
+  app.healthState = 'unhealthy';
   throw new Error(`The localhost health check failed: ${last}.`);
 }
 
@@ -758,7 +818,12 @@ async function healthCheck(app: ManagedApp, signal?: AbortSignal): Promise<void>
  * the bytes it describes were deleted here, and a rollback offered against
  * that row could only ever fail at activation.
  */
-async function pruneArtifacts(parent: string, retain: number, activeArtifact: string): Promise<string[]> {
+export async function pruneArtifacts(
+  parent: string,
+  retain: number,
+  activeArtifact: string,
+  protectedArtifactIds: readonly string[] = [],
+): Promise<string[]> {
   let entries;
   try {
     entries = await readdir(parent, { withFileTypes: true });
@@ -771,7 +836,16 @@ async function pruneArtifacts(parent: string, retain: number, activeArtifact: st
     time: (await lstat(path.join(parent, entry.name))).mtimeMs,
   })));
   artifacts.sort((a, b) => b.time - a.time);
-  const keep = new Set([activeArtifact, ...artifacts.slice(0, retain).map((entry) => entry.name)]);
+  const keep = selectRetainedArtifacts({
+    currentArtifactId: activeArtifact,
+    previousVerifiedArtifactId: protectedArtifactIds.find((id) => id !== activeArtifact) ?? null,
+    cap: retain,
+    artifacts: artifacts.map((entry) => ({
+      id: entry.name,
+      modifiedAt: entry.time,
+      verified: /^art_[a-f0-9]{24}$/.test(entry.name),
+    })),
+  });
   const pruned: string[] = [];
   for (const artifact of artifacts) {
     if (keep.has(artifact.name)) continue;
@@ -783,7 +857,7 @@ async function pruneArtifacts(parent: string, retain: number, activeArtifact: st
 }
 
 function snapshot(app: ManagedApp): AppRuntimeSnapshot {
-  const running = app.process.exitCode === null && !app.crashLoop;
+  const running = isAppProcessRunning(app.process) && !app.crashLoop;
   return {
     deploymentId: app.deploymentId,
     projectId: app.projectId,
@@ -797,6 +871,7 @@ function snapshot(app: ManagedApp): AppRuntimeSnapshot {
     crashLoop: app.crashLoop,
     memoryUsedBytes: null,
     observedAt: Date.now(),
+    healthState: app.healthState,
   };
 }
 
@@ -835,20 +910,30 @@ export async function executeAppRuntimeJob(input: {
   const validated = validateAppRuntimeJobPayload(input.payload);
   if (!validated.ok) return { status: 'failed', error: validated.error, retryable: false };
   const payload = validated.payload;
+  let phase: RecoveryPhase | 'source_fetch' | 'extract' | 'dependency_install' | 'build' = 'reconcile';
+  const started = Date.now();
+  const refuse = (error: string, reasonCode: RecoveryReasonCode): AgentJobResult => ({
+    status: 'failed', error, retryable: false,
+    result: {
+      phase, reasonCode, elapsedMs: Date.now() - started,
+      observedState: 'blocked', artifactId: payload.artifactId,
+      restarted: false, availabilityState: 'unknown',
+    },
+  });
   if (input.signal?.aborted) {
     return { status: 'cancelled', error: 'The App Runtime action was cancelled.', retryable: false };
   }
   if (!/^ws_[a-f0-9]{24}$/.test(input.workspaceId)) {
-    return { status: 'failed', error: 'The signed workspace scope is invalid.', retryable: false };
+    return refuse('The signed workspace scope is invalid.', 'reconciliation_failed');
   }
   if (!input.capabilities.available || !input.capabilities.networkGuard || !input.capabilities.permissionModel) {
-    return { status: 'failed', error: 'Node.js 25/26 with enforced filesystem and network permissions is required.', retryable: false };
+    return refuse('Node.js 25/26 with enforced filesystem and network permissions is required.', 'runtime_incompatible');
   }
   if (payload.contract && payload.contract.nodeMajor !== input.capabilities.nodeMajor) {
-    return { status: 'failed', error: 'The node version does not match the signed build contract.', retryable: false };
+    return refuse('The node version does not match the signed build contract.', 'runtime_incompatible');
   }
   if (payload.contract && !input.capabilities.packageManagers.includes(payload.contract.packageManager)) {
-    return { status: 'failed', error: 'The fixed package manager is unavailable on this node.', retryable: false };
+    return refuse('The fixed package manager is unavailable on this node.', 'runtime_incompatible');
   }
   try {
     const requestedRoot = safeRoot(input.rootDirectory);
@@ -882,7 +967,9 @@ export async function executeAppRuntimeJob(input: {
       } catch {
         await rm(artifact, { recursive: true, force: true });
         await ensurePrivateDirectory(artifacts, [artifactId]);
+        phase = 'source_fetch';
         const archive = await downloadGithubArchive(source, input.fetcher ?? fetch, input.signal);
+        phase = 'extract';
         await extractAppRuntimeArchive(archive, artifact);
         await verifyExtractedContract(artifact, contract);
         const fakeProcess = { exitCode: 0 } as ChildProcess;
@@ -893,10 +980,12 @@ export async function executeAppRuntimeJob(input: {
           memoryMb: payload.memoryMb, environment: allowedEnvironment,
           secrets: Object.values(allowedEnvironment), process: fakeProcess,
           startedAt, restartTimes: [], restartCount: 0, crashLoop: false,
-          desiredRunning: false, intentionalStop: true, bind: '127.0.0.1',
+          desiredRunning: false, intentionalStop: true, desiredRevision: 1,
+          healthState: 'unknown', bind: '127.0.0.1',
           logLines: [], logBytes: 0,
         };
         const cacheDirectory = await ensurePrivateDirectory(root, ['cache', contract.packageManager]);
+        phase = 'dependency_install';
         await installDependencies({
           contract,
           artifactDirectory: artifact,
@@ -905,6 +994,7 @@ export async function executeAppRuntimeJob(input: {
           signal: input.signal,
           onOutput: (phase, chunk) => appendLogs(logApp!, phase, chunk),
         });
+        phase = 'build';
         await walkFiles(artifact);
         const verified = await artifactHash(artifact, payload.diskQuotaBytes);
         const unsigned: Omit<ArtifactManifest, 'signature'> = {
@@ -928,6 +1018,7 @@ export async function executeAppRuntimeJob(input: {
         };
         await writeFile(path.join(artifact, MANIFEST), stableJson(manifest), { flag: 'wx' });
       }
+      phase = 'artifact_verify';
       const manifest = await verifyArtifact(artifact, input.token, artifactId);
       await stopManagedApp(payload.deploymentId);
       const dataDirectory = await ensurePrivateDirectory(deployDirectory, ['data']);
@@ -942,12 +1033,14 @@ export async function executeAppRuntimeJob(input: {
         healthPath: payload.healthPath,
         memoryMb: payload.memoryMb,
         environment: allowedEnvironment,
+        desiredRevision: payload.expectedDesiredRevision ?? 1,
       });
       if (logApp) {
         app.logLines.unshift(...logApp.logLines.slice(-APP_RUNTIME_LIMITS.maximumResultLogLines));
         app.logBytes = app.logLines.reduce((total, line) => total + Buffer.byteLength(line), 0);
       }
       try {
+        phase = 'health';
         await healthCheck(app, input.signal);
       } catch (error) {
         await stopManagedApp(payload.deploymentId);
@@ -960,6 +1053,7 @@ export async function executeAppRuntimeJob(input: {
         path.join(deployDirectory, 'artifacts'),
         payload.retainArtifacts,
         artifactId,
+        payload.protectedArtifactIds,
       );
       return resultFor(app, {
         prunedArtifactIds,
@@ -972,7 +1066,7 @@ export async function executeAppRuntimeJob(input: {
     }
 
     if (payload.operation === 'stop') {
-      const app = await stopManagedApp(payload.deploymentId);
+      const app = await stopManagedApp(payload.deploymentId, payload.expectedDesiredRevision ?? undefined);
       if (!app) return { status: 'succeeded', result: { deploymentId: payload.deploymentId, state: 'stopped', logs: [] } };
       return resultFor(app, { state: 'stopped' });
     }
@@ -992,9 +1086,12 @@ export async function executeAppRuntimeJob(input: {
     const selectedArtifact = payload.operation === 'rollback' ? payload.targetArtifactId : payload.artifactId;
     if (!selectedArtifact) throw new Error('The action has no verified local artifact.');
     const artifact = artifactDirectory(root, input.workspaceId, payload, selectedArtifact);
+    phase = 'artifact_verify';
     const manifest = await verifyArtifact(artifact, input.token, selectedArtifact);
+    phase = 'activate';
     await stopManagedApp(payload.deploymentId);
     const dataDirectory = await ensurePrivateDirectory(deployDirectory, ['data']);
+    phase = 'start';
     const app = await spawnManagedApp({
       deploymentId: payload.deploymentId,
       projectId: payload.projectId,
@@ -1006,18 +1103,55 @@ export async function executeAppRuntimeJob(input: {
       healthPath: payload.healthPath,
       memoryMb: payload.memoryMb,
       environment: allowedEnvironment,
+      desiredRevision: payload.expectedDesiredRevision ?? 1,
     });
-    await healthCheck(app, input.signal);
+    phase = 'health';
+    try {
+      await healthCheck(app, input.signal);
+    } catch (error) {
+      if (payload.operation === 'recover') await stopManagedApp(payload.deploymentId);
+      throw error;
+    }
     return resultFor(app, {
       checksum: manifest.checksum,
       sizeBytes: manifest.sizeBytes,
       rolledBack: payload.operation === 'rollback',
+      phase: payload.operation === 'recover' ? 'health' : undefined,
+      reasonCode: payload.operation === 'recover' ? 'recovery_succeeded' : undefined,
+      elapsedMs: Date.now() - started,
+      observedState: 'healthy',
+      restarted: payload.operation === 'recover',
+      availabilityState: 'present',
+      lastVerifiedOnNodeAt: Date.now(),
     });
   } catch (error) {
+    const message = error instanceof Error ? error.message : 'The App Runtime action failed.';
+    const code = error instanceof Error && 'code' in error && typeof error.code === 'string' ? error.code : null;
+    const integrityFailure = /manifest|checksum|integrity|unsigned/i.test(message);
+    const availability = availabilityFromVerificationFailure({ code, integrityFailure });
+    const reasonCode: RecoveryReasonCode =
+      code === 'ENOENT' ? 'artifact_missing'
+        : integrityFailure ? 'artifact_corrupted'
+          : /port.*use/i.test(message) ? 'port_in_use'
+            : /health/i.test(message) ? 'health_failed'
+              : /insufficient disk|disk quota/i.test(message) ? 'disk_low'
+                : /node version|package manager|permission/i.test(message) ? 'runtime_incompatible'
+                  : 'reconciliation_failed';
     return {
       status: input.signal?.aborted ? 'cancelled' : 'failed',
-      error: redactAppRuntimeLog(error instanceof Error ? error.message : 'The App Runtime action failed.', []),
+      error: payload.operation === 'recover'
+        ? 'Runtime recovery could not complete safely.'
+        : redactAppRuntimeLog(message, []),
       retryable: false,
+      result: payload.operation === 'recover' ? {
+        phase,
+        reasonCode,
+        elapsedMs: Date.now() - started,
+        observedState: reasonCode === 'health_failed' ? 'unhealthy' : 'blocked',
+        artifactId: payload.artifactId,
+        restarted: false,
+        availabilityState: availability,
+      } : { phase, elapsedMs: Date.now() - started },
     };
   }
 }

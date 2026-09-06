@@ -180,7 +180,7 @@ node_id = paired.get("nodeId") if isinstance(paired, dict) else None
 check("Node 26 App Runtime agent paired", status == 201 and token and node_id, f"got {status}")
 
 deploy_request = {
-    "repository": "heroku/node-js-getting-started",
+    "repository": "heroku/nodejs-getting-started",
     "branch": "main",
     "nodeId": node_id,
     "environment": "Production",
@@ -339,12 +339,17 @@ status, rollback = operator.request(
     {"operation": "rollback", "targetArtifactId": artifact_id},
     {"Idempotency-Key": f"rollback-{RUN}"},
 )
-check("rollback to verified local artifact queued", status == 202, f"got {status}")
-status, rollback_job = claim(token)
-status, rollback_done, _ = complete(token, rollback_job, result={
-    **success_result, "checksum": "sha256:" + "a" * 64, "rolledBack": True,
+check("current artifact is not misrepresented as rollback history", status == 409, f"got {status}")
+status, resumed = operator.request(
+    "POST", f"/api/deployments/{deployment_id}/actions", {"operation": "start"},
+    {"Idempotency-Key": f"resume-{RUN}"},
+)
+check("verified current artifact start queued", status == 202, f"got {status}")
+status, resume_job = claim(token)
+status, resume_done, _ = complete(token, resume_job, result={
+    **success_result, "checksum": "sha256:" + "a" * 64,
 })
-check("verified rollback succeeds", status == 200 and rollback_done["state"] == "succeeded")
+check("verified current artifact start succeeds", status == 200 and resume_done["state"] == "succeeded")
 
 status, restart = operator.request(
     "POST", f"/api/deployments/{deployment_id}/actions", {"operation": "restart"},
