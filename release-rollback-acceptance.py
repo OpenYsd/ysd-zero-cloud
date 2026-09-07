@@ -74,7 +74,8 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 class Client:
-    def __init__(self, address="198.51.100.90"):
+    def __init__(self, address=None):
+        address = address or f"198.51.100.{20 + (int(RUN[:6], 16) % 220)}"
         self.address = address
         self.opener = urllib.request.build_opener(
             urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()), NoRedirect()

@@ -36,7 +36,11 @@ export const NODE_PROTOCOL_VERSION = 1;
 // limit it retried forever -- a pinned core, no output, until the build
 // timeout. Local layout only; the payload and signing protocol are
 // unchanged, so 0.4.0 and 0.4.1 nodes keep working.
-export const CURRENT_AGENT_VERSION = '0.5.0';
+// 0.6.0 adds a local-only managed installation, user-session native
+// auto-start, bounded headless diagnostics, and duplicate-Agent ownership.
+// The heartbeat extension is optional and Protocol 1 remains unchanged, so
+// 0.5.0 stays valid for every capability it already supports.
+export const CURRENT_AGENT_VERSION = '0.6.0';
 export const MINIMUM_AGENT_VERSION = '0.3.0';
 
 export const NODE_TIMING = {
@@ -73,7 +77,37 @@ export type NodeCapabilities = {
   ai: AiCapabilities;
   gameServers: GameServerCapabilities;
   appRuntime?: AppRuntimeCapabilities;
-  contracts: { ai: boolean; gameServers: boolean; appRuntime?: boolean };
+  autostart?: AutostartCapability;
+  contracts: {
+    ai: boolean;
+    gameServers: boolean;
+    appRuntime?: boolean;
+    autostart?: boolean;
+  };
+};
+
+export type AutostartCapability = {
+  version: 1;
+  supported: boolean;
+  enabled: boolean;
+  manager:
+    | 'windows-task-scheduler'
+    | 'systemd-user'
+    | 'launchagent'
+    | null;
+  scope: 'user-session' | 'none';
+  state:
+    | 'enabled'
+    | 'disabled'
+    | 'manager_missing'
+    | 'agent_missing'
+    | 'node_runtime_missing'
+    | 'registration_invalid'
+    | 'upgrade_required'
+    | 'credential_key_unavailable'
+    | 'restart_limited'
+    | 'authorization_rejected'
+    | 'unsupported';
 };
 
 export type NodeMetrics = {
@@ -243,6 +277,7 @@ export function parseCapabilities(value: unknown): NodeCapabilities | null {
           maxDeployments: 1,
         }
       : parseAppRuntimeCapabilities(value.appRuntime);
+  const autostart = parseAutostartCapability(value.autostart);
   if (
     cores === null ||
     totalBytes === null ||
@@ -254,7 +289,8 @@ export function parseCapabilities(value: unknown): NodeCapabilities | null {
       gpu.vramBytes !== undefined) ||
     !ai ||
     !gameServers ||
-    !appRuntime
+    !appRuntime ||
+    (value.autostart !== undefined && !autostart)
   ) {
     return null;
   }
@@ -263,7 +299,8 @@ export function parseCapabilities(value: unknown): NodeCapabilities | null {
     typeof docker.available !== 'boolean' ||
     typeof contracts.ai !== 'boolean' ||
     typeof contracts.gameServers !== 'boolean' ||
-    (contracts.appRuntime !== undefined && typeof contracts.appRuntime !== 'boolean')
+    (contracts.appRuntime !== undefined && typeof contracts.appRuntime !== 'boolean') ||
+    (contracts.autostart !== undefined && typeof contracts.autostart !== 'boolean')
   ) {
     return null;
   }
@@ -282,13 +319,55 @@ export function parseCapabilities(value: unknown): NodeCapabilities | null {
     ai,
     gameServers,
     appRuntime,
+    ...(autostart ? { autostart } : {}),
     contracts: {
       ai: contracts.ai && ai.runtimes.some((runtime) => runtime.available),
       gameServers:
         contracts.gameServers && gameServers.minecraftJavaAvailable,
       appRuntime: contracts.appRuntime === true && appRuntime.available,
+      ...(contracts.autostart !== undefined || autostart
+        ? { autostart: contracts.autostart === true && autostart?.supported === true }
+        : {}),
     },
   };
+}
+
+const AUTOSTART_MANAGERS = [
+  'windows-task-scheduler',
+  'systemd-user',
+  'launchagent',
+] as const;
+
+const AUTOSTART_STATES = [
+  'enabled',
+  'disabled',
+  'manager_missing',
+  'agent_missing',
+  'node_runtime_missing',
+  'registration_invalid',
+  'upgrade_required',
+  'credential_key_unavailable',
+  'restart_limited',
+  'authorization_rejected',
+  'unsupported',
+] as const;
+
+export function parseAutostartCapability(value: unknown): AutostartCapability | null {
+  if (value === undefined) return null;
+  if (!isRecord(value)) return null;
+  const expected = ['enabled', 'manager', 'scope', 'state', 'supported', 'version'];
+  if (Object.keys(value).sort().join('\0') !== expected.sort().join('\0')) return null;
+  if (
+    value.version !== 1 ||
+    typeof value.supported !== 'boolean' ||
+    typeof value.enabled !== 'boolean' ||
+    !(value.manager === null || AUTOSTART_MANAGERS.includes(value.manager as (typeof AUTOSTART_MANAGERS)[number])) ||
+    !(value.scope === 'user-session' || value.scope === 'none') ||
+    !AUTOSTART_STATES.includes(value.state as (typeof AUTOSTART_STATES)[number])
+  ) return null;
+  if (!value.supported && (value.enabled || value.manager !== null || value.scope !== 'none' || value.state !== 'unsupported')) return null;
+  if (value.supported && (value.manager === null || value.scope !== 'user-session' || value.state === 'unsupported')) return null;
+  return value as AutostartCapability;
 }
 
 export function parseMetrics(value: unknown): NodeMetrics | null {

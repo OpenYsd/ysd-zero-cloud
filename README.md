@@ -1,7 +1,7 @@
 # YSD Zero Cloud
 
-YSD Zero Cloud is a zero-cost-first cloud operating system. The source tree is `0.18.0` and
-Phase 18 production acceptance is complete on `0.18.0`. Production includes authentication,
+YSD Zero Cloud is a zero-cost-first cloud operating system. The source tree and Production
+baseline are `0.19.0`, with Compute Node Agent `0.6.0` and Protocol `1`. Production includes authentication,
 persistence, security scanning, the cost guard, private-object storage policy, network inventory,
 an outbound-only user-owned compute control plane, a private Node.js App Runtime, local AI
 scheduling, private Minecraft Java server orchestration, organization collaboration, and a
@@ -99,8 +99,8 @@ controlled node: two releases were built onto one service, the rollback reactiva
 earlier artifact without rebuilding, and the service was confirmed serving the older
 build's bytes again before the acceptance node was revoked.
 
-`0.18.0`, Phase 18: **Production Runtime Reliability & Same-Node Recovery**, is the
-current source and Production release. The Production Agent is `0.5.0`, and Protocol `1`
+`0.18.0`, Phase 18: **Production Runtime Reliability & Same-Node Recovery**, was the
+previous Production release. Its Production Agent was `0.5.0`, and Protocol `1`
 is unchanged. A compatible Agent startup sends one
 bounded runtime generation plus at most 12 managed runtime summaries. The control plane
 compares those summaries with its own desired state and can recover a missing runtime from
@@ -210,10 +210,29 @@ local key instead of asking a person to invent a passphrase.
 On integrity, plainly: this is a pinned version, a published SHA-256, and HTTPS, with a build
 that fails closed on mismatch. It is **not** a code-signed binary — that needs a Windows signing
 certificate and an Apple Developer identity, neither of which exists for this project — and a
-compromised control plane could replace the artifact and its digest together. Migration `0019`
-remains the newest; Phase 16 adds no schema.
+compromised control plane could replace the artifact and its digest together. Migration
+`0020_runtime_recovery.sql` remains the newest; Phase 19 adds no schema.
 
-**Live:** <https://ysd-zero-cloud.ysd-zero-cloud.workers.dev> — running `0.18.0`, agent `0.5.0`,
+`0.19.0`, Phase 19: **Managed Compute Node Auto-Start**, is the current source and Production
+release. Agent `0.6.0` keeps Protocol `1` and adds an owner-scoped managed installation,
+single-Agent ownership, bounded headless diagnostics, and native user-session auto-start:
+Windows Task Scheduler at logon, systemd user units, and macOS LaunchAgents. It starts only after
+the same user signs in; it is not a Windows Service, system service, LaunchDaemon, pre-login
+process, always-on server, or 24/7 guarantee. Once the Agent reconnects, the existing Phase 18
+same-node reconciliation performs exact-artifact recovery without fetching source, installing
+dependencies, or rebuilding. No migration, Worker, D1, cron, R2, Queue, Durable Object, paid
+service, remote enable endpoint, silent updater, administrator password, or privileged helper is
+added.
+
+Production acceptance used a controlled Windows Compute Node and its real Task Scheduler path.
+It proved a single managed Agent owner, same-artifact recovery after two distinct Agent-loss
+events without duplicate recovery storms, an intentional Stop that stayed stopped after a fresh
+managed start, and bounded redacted headless diagnostics. The task registration and temporary
+Agent home were removed afterward, the local port was closed, and the acceptance node was revoked.
+The production database finished with no active acceptance node, no non-zero deployment cost, and
+no orphaned audit evidence.
+
+**Live:** <https://ysd-zero-cloud.ysd-zero-cloud.workers.dev> — running `0.19.0`, agent `0.6.0`,
 Protocol `1`.
 
 This is a standalone project intended only for `OpenYsd/ysd-zero-cloud`. It has no dependency on,

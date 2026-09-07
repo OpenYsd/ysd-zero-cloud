@@ -23,17 +23,30 @@ import {
   shutdownManagedApps,
 } from './app-runtime.ts';
 import {
+  AGENT_EXIT,
+  disableAutostart,
+  enableAutostart,
+  readAutostartCapability,
+  repairAutostart,
+  statusAutostart,
+  uninstallAutostart,
+} from './autostart.ts';
+import { acquireAgentOwnership } from './instance-lock.ts';
+import {
   collectCapabilities,
   collectMetrics,
   executeSignedJob,
 } from './runtime.ts';
 
-type Command = 'pair' | 'run';
+type Command = 'pair' | 'run' | 'autostart';
+type AutostartAction = 'enable' | 'status' | 'disable' | 'repair' | 'uninstall';
 
 type Arguments = {
   command: Command;
   origin: string;
   configPath: string;
+  autostartAction: AutostartAction | null;
+  stop: boolean;
 };
 
 function argument(name: string): string | null {
@@ -63,6 +76,11 @@ const USAGE = [
   'Usage:',
   '  node ysd-node-agent-<version>.mjs pair --url <https://control-plane>',
   '  node ysd-node-agent-<version>.mjs run  --url <https://control-plane>',
+  '  node ysd-node-agent-<version>.mjs autostart enable  --url <https://control-plane>',
+  '  node ysd-node-agent-<version>.mjs autostart status  [--config <path>]',
+  '  node ysd-node-agent-<version>.mjs autostart disable [--config <path>] [--stop]',
+  '  node ysd-node-agent-<version>.mjs autostart repair  --url <https://control-plane>',
+  '  node ysd-node-agent-<version>.mjs autostart uninstall [--config <path>]',
   '',
   'Options:',
   '  --url <origin>     Control plane origin. HTTPS, or HTTP on localhost.',
@@ -73,12 +91,17 @@ const USAGE = [
 
 function parseArguments(): Arguments {
   const candidate = process.argv[2] ?? 'run';
-  if (candidate !== 'pair' && candidate !== 'run') {
+  if (candidate !== 'pair' && candidate !== 'run' && candidate !== 'autostart') {
     throw new Error(USAGE);
   }
-  const origin = safeOrigin(
-    argument('--url') ?? process.env.YSD_NODE_URL ?? '',
-  );
+  const action = candidate === 'autostart' ? process.argv[3] : null;
+  if (candidate === 'autostart' && !['enable', 'status', 'disable', 'repair', 'uninstall'].includes(action ?? '')) {
+    throw new Error(USAGE);
+  }
+  const rawOrigin = argument('--url') ?? process.env.YSD_NODE_URL ?? '';
+  const needsOrigin = candidate !== 'autostart' || action === 'enable' || action === 'repair';
+  const origin = rawOrigin ? safeOrigin(rawOrigin) : '';
+  if (needsOrigin && !origin) throw new Error(USAGE);
   return {
     command: candidate,
     origin,
@@ -86,7 +109,15 @@ function parseArguments(): Arguments {
       argument('--config') ??
       process.env.YSD_NODE_CONFIG ??
       defaultCredentialPath(),
+    autostartAction: action as AutostartAction | null,
+    stop: process.argv.includes('--stop'),
   };
+}
+
+class AgentTerminalError extends Error {
+  constructor(readonly reasonCode: string, readonly exitCode: number) {
+    super(reasonCode);
+  }
 }
 
 class ControlPlaneError extends Error {
@@ -104,14 +135,13 @@ async function jsonRequest<T>(url: string, init: RequestInit): Promise<T> {
     ...init,
     signal: init.signal ? AbortSignal.any([init.signal, timeout]) : timeout,
   });
-  const body = (await response.json()) as T & { error?: string };
   if (!response.ok) {
     throw new ControlPlaneError(
       response.status,
-      body.error ?? `Control plane answered ${response.status}.`,
+      `Control plane answered ${response.status}.`,
     );
   }
-  return body;
+  return (await response.json()) as T;
 }
 
 const PAIRING_CODE_PATTERN = /^ysdp_[A-Za-z0-9_-]{32}$/;
@@ -236,15 +266,19 @@ async function heartbeat(
   gameRootDirectory: string,
   appRootDirectory: string,
   runtimeGeneration: string,
+  configPath: string,
+  nodeId: string,
+  signal?: AbortSignal,
   runningJobs = 0,
 ): Promise<void> {
+  const autostart = await readAutostartCapability(configPath, nodeId);
   await signedPost({
     origin,
     token,
     pathname: '/api/nodes/agent/heartbeat',
     body: {
       agentVersion: CURRENT_AGENT_VERSION,
-      capabilities: await collectCapabilities(),
+      capabilities: await collectCapabilities(fetch, autostart),
       metrics: collectMetrics(runningJobs),
       gameServers: await collectGameServerSnapshots(
         gameRootDirectory,
@@ -253,6 +287,7 @@ async function heartbeat(
       appDeployments: collectAppRuntimeSnapshots(),
       runtimeGeneration,
     },
+    signal,
   });
 }
 
@@ -266,6 +301,8 @@ async function monitorClaim(input: {
   gameRootDirectory: string;
   appRootDirectory: string;
   runtimeGeneration: string;
+  configPath: string;
+  nodeId: string;
 }): Promise<void> {
   let lastHeartbeat = Date.now();
   while (!input.signal.aborted && !input.execution.signal.aborted) {
@@ -292,6 +329,9 @@ async function monitorClaim(input: {
           input.gameRootDirectory,
           input.appRootDirectory,
           input.runtimeGeneration,
+          input.configPath,
+          input.nodeId,
+          input.signal,
           1,
         );
         lastHeartbeat = Date.now();
@@ -313,6 +353,9 @@ async function poll(
   gameRootDirectory: string,
   appRootDirectory: string,
   runtimeGeneration: string,
+  configPath: string,
+  nodeId: string,
+  signal: AbortSignal,
 ): Promise<boolean> {
   const response = await signedPost<{
     job: { claim: SignedJobClaim; signature: string } | null;
@@ -321,9 +364,13 @@ async function poll(
     token,
     pathname: '/api/nodes/agent/claim',
     body: {},
+    signal,
   });
   if (!response.job) return false;
-  const capabilities = await collectCapabilities();
+  const capabilities = await collectCapabilities(
+    fetch,
+    await readAutostartCapability(configPath, nodeId),
+  );
   const execution = new AbortController();
   const monitor = new AbortController();
   const monitorPromise = monitorClaim({
@@ -336,6 +383,8 @@ async function poll(
     gameRootDirectory,
     appRootDirectory,
     runtimeGeneration,
+    configPath,
+    nodeId,
   });
   let completed: Awaited<ReturnType<typeof executeSignedJob>>;
   try {
@@ -362,6 +411,7 @@ async function poll(
       claimSignature: response.job.signature,
       ...completed,
     },
+    signal,
   });
   console.log(
     `Completed ${response.job.claim.type} (${response.job.claim.jobId}).`,
@@ -369,13 +419,33 @@ async function poll(
   return true;
 }
 
-async function run(arguments_: Arguments): Promise<never> {
-  const credentials = await loadCredentials(arguments_.configPath);
-  if (credentials.origin !== arguments_.origin) {
-    throw new Error(
-      'The encrypted credential belongs to a different control-plane origin.',
-    );
+async function run(arguments_: Arguments): Promise<void> {
+  let credentials: Awaited<ReturnType<typeof loadCredentials>>;
+  try {
+    credentials = await loadCredentials(arguments_.configPath);
+  } catch {
+    throw new AgentTerminalError('credential_invalid', AGENT_EXIT.credentialInvalid);
   }
+  if (credentials.origin !== arguments_.origin) {
+    throw new AgentTerminalError('credential_origin_mismatch', AGENT_EXIT.credentialInvalid);
+  }
+  let ownership: Awaited<ReturnType<typeof acquireAgentOwnership>>;
+  try {
+    ownership = await acquireAgentOwnership(arguments_.configPath, credentials.nodeId);
+  } catch (error) {
+    if (error instanceof Error && error.message === 'already_running') {
+      throw new AgentTerminalError('already_running', AGENT_EXIT.alreadyRunning);
+    }
+    throw new AgentTerminalError('ownership_lock_invalid', AGENT_EXIT.credentialInvalid);
+  }
+  const shutdown = new AbortController();
+  let controlledShutdown = false;
+  const onSignal = () => {
+    controlledShutdown = true;
+    shutdown.abort('controlled-shutdown');
+  };
+  process.once('SIGINT', onSignal);
+  process.once('SIGTERM', onSignal);
   console.log(
     `YSD Node Agent ${CURRENT_AGENT_VERSION} started in outbound-only mode.`,
   );
@@ -393,8 +463,9 @@ async function run(arguments_: Arguments): Promise<never> {
   let lastHeartbeat = 0;
   let backoff = 2_000;
   const runtimeGeneration = randomToken(18);
-  for (;;) {
-    try {
+  try {
+    while (!shutdown.signal.aborted) {
+      try {
       const now = Date.now();
       if (now - lastHeartbeat >= NODE_TIMING.heartbeatMs) {
         await heartbeat(
@@ -404,6 +475,9 @@ async function run(arguments_: Arguments): Promise<never> {
           gameRootDirectory,
           appRootDirectory,
           runtimeGeneration,
+          arguments_.configPath,
+          credentials.nodeId,
+          shutdown.signal,
         );
         lastHeartbeat = Date.now();
       }
@@ -414,10 +488,14 @@ async function run(arguments_: Arguments): Promise<never> {
         gameRootDirectory,
         appRootDirectory,
         runtimeGeneration,
+        arguments_.configPath,
+        credentials.nodeId,
+        shutdown.signal,
       );
       backoff = 2_000;
-      if (!worked) await delay(5_000);
-    } catch (error) {
+      if (!worked) await delay(5_000, undefined, { signal: shutdown.signal });
+      } catch (error) {
+      if (shutdown.signal.aborted) break;
       const message =
         error instanceof Error ? error.message : 'Unknown agent error.';
       console.error(`Control-plane connection failed: ${message}`);
@@ -427,14 +505,20 @@ async function run(arguments_: Arguments): Promise<never> {
       ) {
         await shutdownManagedGameServers();
         await shutdownManagedApps();
-        throw new Error(
-          'Node authorization was rejected; managed Game Servers were stopped locally.',
-          { cause: error },
-        );
+        throw new AgentTerminalError('authorization_rejected', AGENT_EXIT.authorizationRejected);
       }
-      await delay(backoff);
+      await delay(backoff, undefined, { signal: shutdown.signal });
       backoff = Math.min(30_000, backoff * 2);
+      }
     }
+    if (controlledShutdown) {
+      await shutdownManagedGameServers();
+      await shutdownManagedApps();
+    }
+  } finally {
+    process.off('SIGINT', onSignal);
+    process.off('SIGTERM', onSignal);
+    await ownership.release();
   }
 }
 
@@ -452,6 +536,37 @@ if (flags.has('--help') || flags.has('-h') || flags.has('help')) {
   process.exit(0);
 }
 
-const arguments_ = parseArguments();
-if (arguments_.command === 'pair') await pair(arguments_);
-else await run(arguments_);
+try {
+  const arguments_ = parseArguments();
+  if (arguments_.command === 'pair') {
+    await pair(arguments_);
+  } else if (arguments_.command === 'run') {
+    await run(arguments_);
+  } else if (arguments_.autostartAction === 'enable') {
+    console.log(JSON.stringify(await enableAutostart({
+      credentialPath: arguments_.configPath,
+      origin: arguments_.origin,
+    })));
+  } else if (arguments_.autostartAction === 'status') {
+    console.log(JSON.stringify(await statusAutostart(arguments_.configPath)));
+  } else if (arguments_.autostartAction === 'disable') {
+    console.log(JSON.stringify(await disableAutostart(arguments_.configPath, arguments_.stop)));
+  } else if (arguments_.autostartAction === 'repair') {
+    console.log(JSON.stringify(await repairAutostart({
+      credentialPath: arguments_.configPath,
+      origin: arguments_.origin,
+    })));
+  } else if (arguments_.autostartAction === 'uninstall') {
+    await uninstallAutostart(arguments_.configPath);
+    console.log(JSON.stringify({ state: 'uninstalled' }));
+  }
+} catch (error) {
+  if (error instanceof AgentTerminalError) {
+    console.error(error.reasonCode);
+    process.exitCode = error.exitCode;
+  } else {
+    const reason = error instanceof Error ? error.message : 'agent_failed';
+    console.error(reason.replace(/[\r\n][\s\S]*/u, '').slice(0, 160));
+    process.exitCode = AGENT_EXIT.credentialInvalid;
+  }
+}

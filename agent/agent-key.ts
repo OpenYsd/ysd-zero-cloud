@@ -29,6 +29,13 @@ const DIRECTORY_NAME = 'ysd-node-agent';
 
 /** A per-user directory. Never the working directory, never the repository. */
 export function agentHomeDirectory(): string {
+  const override = process.env.YSD_NODE_AGENT_HOME?.trim() ?? '';
+  if (override) {
+    if (!path.isAbsolute(override) || override.includes(String.fromCharCode(0)) || /[\r\n]/u.test(override)) {
+      throw new Error('YSD_NODE_AGENT_HOME must be an absolute local path.');
+    }
+    return path.resolve(override);
+  }
   if (process.platform === 'win32') {
     const base = process.env.LOCALAPPDATA
       ?? process.env.APPDATA

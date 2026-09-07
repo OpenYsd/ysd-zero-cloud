@@ -24,6 +24,7 @@ import {
   stableJson,
   verifyJobClaim,
   type NodeCapabilities,
+  type AutostartCapability,
   type NodeMetrics,
   type SignedJobClaim,
 } from '../lib/nodes.ts';
@@ -45,6 +46,7 @@ function nonNegativeEnvironmentBytes(name: string): number | null {
 
 export async function collectCapabilities(
   fetcher: LocalFetch = fetch,
+  autostart?: AutostartCapability,
 ): Promise<NodeCapabilities> {
   const processors = os.cpus();
   const gpuModel = process.env.YSD_NODE_GPU?.trim().slice(0, 128) || null;
@@ -81,10 +83,12 @@ export async function collectCapabilities(
     ai,
     gameServers,
     appRuntime,
+    ...(autostart ? { autostart } : {}),
     contracts: {
       ai: ai.runtimes.some((runtime) => runtime.available),
       gameServers: gameServers.minecraftJavaAvailable,
       appRuntime: appRuntime.available,
+      ...(autostart ? { autostart: autostart.supported } : {}),
     },
   };
 }

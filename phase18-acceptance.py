@@ -151,8 +151,9 @@ def heartbeat(token: str, generation: str | None, deployments=None, *, agent="0.
     return agent_request(token, "/api/nodes/agent/heartbeat", body)
 
 
-operator = Client("198.51.100.31")
-anonymous = Client("198.51.100.32")
+client_octet = 20 + (int(RUN[:6], 16) % 220)
+operator = Client(f"198.51.100.{client_octet}")
+anonymous = Client(f"203.0.113.{client_octet}")
 email = f"phase18-{RUN}@ysd.test"
 password = f"Phase18-local-{RUN}!"
 
@@ -177,7 +178,8 @@ check("generation-aware heartbeat accepted", status == 200, f"got {status}")
 
 section("initial deployment")
 request = {
-    "repository": "heroku/nodejs-getting-started", "branch": "main",
+    "repository": "cyclic-software/express-hello-world", "branch": "main",
+    "commit": "1b5eeb79b757a8cd496e58518aa1711889fa7253",
     "nodeId": node_id, "environment": "Production", "healthPath": "/",
     "memoryMb": 256, "diskQuotaBytes": 256 * 1024**2, "target": "user-node",
 }

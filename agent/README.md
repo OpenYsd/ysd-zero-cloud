@@ -1,8 +1,9 @@
 # YSD Node Agent
 
-The agent turns a machine you own into a YSD Compute Node. It opens no port and
-runs no listener: heartbeat, job polling, claims, and completion all travel as
-outbound HTTPS requests to the existing Worker.
+The agent turns a machine you own into a YSD Compute Node. Control-plane traffic
+is outbound HTTPS. Agent `0.6.0` also uses a local named pipe on Windows or a
+protected Unix-domain socket on Linux/macOS solely to prevent a second Agent
+from owning the same node identity; it is not a network listener.
 
 Phase 5 executes diagnostics, reviewed `ai.inference` and `ai.model.acquire`
 jobs, and narrow Minecraft Java Game Server actions. AI speaks only to Ollama on
@@ -13,27 +14,40 @@ filesystem path, JVM argument, provider, tunnel, or network destination.
 
 ## Pair
 
-Create a one-time ticket on the Nodes page. In PowerShell, from this repository:
+Create a one-time ticket on the Nodes page, download the published Agent, verify
+the displayed SHA-256, and run:
 
 ```powershell
 $env:YSD_NODE_URL = 'https://ysd-zero-cloud.ysd-zero-cloud.workers.dev'
-$env:YSD_NODE_PAIRING_CODE = '<one-time code>'
-$env:YSD_NODE_AGENT_KEY = '<a local passphrase with at least 16 characters>'
-node --experimental-strip-types agent/cli.ts pair --url $env:YSD_NODE_URL
+node ysd-node-agent-0.6.0.mjs pair --url $env:YSD_NODE_URL
 ```
 
-The bearer credential is AES-256-GCM encrypted in
-`.ysd-node-agent.credentials`; the passphrase is never sent to YSD. Keep the
-passphrase in your operating system's secret manager when running the agent as
-a service.
+Type the one-time code at the prompt. The bearer credential is AES-256-GCM
+encrypted in the per-user Agent home with a generated local key. Neither is
+sent back to YSD after pairing.
 
 ## Run
 
 ```powershell
 $env:YSD_NODE_URL = 'https://ysd-zero-cloud.ysd-zero-cloud.workers.dev'
-$env:YSD_NODE_AGENT_KEY = '<the same local passphrase>'
-node --experimental-strip-types agent/cli.ts run --url $env:YSD_NODE_URL
+node ysd-node-agent-0.6.0.mjs run --url $env:YSD_NODE_URL
 ```
+
+## Start automatically when you sign in
+
+```powershell
+node ysd-node-agent-0.6.0.mjs autostart enable --url $env:YSD_NODE_URL
+node ysd-node-agent-0.6.0.mjs autostart status
+node ysd-node-agent-0.6.0.mjs autostart repair --url $env:YSD_NODE_URL
+node ysd-node-agent-0.6.0.mjs autostart disable
+```
+
+Windows uses a current-user Task Scheduler logon task, Linux uses a systemd
+user unit without linger, and macOS uses a per-user LaunchAgent. No password or
+node secret is stored in the registration. This starts after user sign-in, not
+before login. If the credential depends on an explicit `YSD_NODE_AGENT_KEY`
+environment override, enablement refuses with `credential_key_unavailable`
+rather than copying the secret into the background configuration.
 
 The agent automatically detects a loopback Ollama or llama.cpp API and its
 cached models. It never installs either runtime. Model acquisition requires an

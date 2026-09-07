@@ -98,9 +98,17 @@ const SAFE_REGISTRY = 'https://registry.npmjs.org';
  * reappear as healthy on the next heartbeat.
  */
 export function isAppProcessRunning(
-  child: Pick<ChildProcess, 'exitCode' | 'signalCode'>,
+  child: Pick<ChildProcess, 'exitCode' | 'signalCode'> & { pid?: number },
 ): boolean {
-  return child.exitCode === null && (child.signalCode === null || child.signalCode === undefined);
+  if (child.exitCode !== null || (child.signalCode !== null && child.signalCode !== undefined)) return false;
+  if (typeof child.pid === 'number') {
+    try {
+      process.kill(child.pid, 0);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ESRCH') return false;
+    }
+  }
+  return true;
 }
 
 function safeRoot(rootDirectory: string): string {
@@ -618,10 +626,21 @@ async function ensureDiskCapacity(root: string, quotaBytes: number): Promise<voi
 async function assertPortAvailable(port: number): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     const server = createServer();
-    server.unref();
-    server.once('error', () => reject(new Error('The assigned private App Runtime port is already in use.')));
+    let settled = false;
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      if (error) reject(error);
+      else resolve();
+    };
+    const timeout = setTimeout(() => {
+      server.close();
+      finish(new Error('The assigned private App Runtime port check timed out.'));
+    }, 5_000);
+    server.once('error', () => finish(new Error('The assigned private App Runtime port is already in use.')));
     server.listen({ host: '127.0.0.1', port, exclusive: true }, () => {
-      server.close((error) => error ? reject(error) : resolve());
+      server.close((error) => finish(error ?? undefined));
     });
   });
 }
@@ -652,9 +671,12 @@ async function spawnManagedApp(input: {
   previousRestarts?: number;
   desiredRevision?: number;
 }): Promise<ManagedApp> {
+  console.error('App Runtime start: checking assigned private port.');
   await assertPortAvailable(input.port);
+  console.error('App Runtime start: assigned private port is available.');
   await mkdir(input.dataDirectory, { recursive: true });
   await mkdir(path.join(input.dataDirectory, 'tmp'), { recursive: true });
+  console.error('App Runtime start: private data directory is ready.');
   const values = Object.values(input.environment).filter((value) => value.length >= 4);
   const shell: Omit<ManagedApp, 'process' | 'startedAt' | 'restartTimes' | 'restartCount' | 'crashLoop' | 'desiredRunning' | 'intentionalStop' | 'desiredRevision' | 'healthState' | 'bind' | 'logLines' | 'logBytes'> = {
     ...input,
@@ -693,6 +715,11 @@ async function spawnManagedApp(input: {
   child.stdout?.on('data', (chunk: Buffer) => appendLogs(app, 'runtime', chunk));
   child.stderr?.on('data', (chunk: Buffer) => appendLogs(app, 'runtime', chunk));
   child.once('error', (error) => appendLogs(app, 'runtime', Buffer.from(error.message)));
+  await new Promise<void>((resolve, reject) => {
+    child.once('spawn', resolve);
+    child.once('error', reject);
+  });
+  console.error('App Runtime start: child process created.');
   child.once('exit', () => {
     if (!app.intentionalStop && app.desiredRunning) {
       void restartAfterCrash(app).catch((error: unknown) => {
@@ -911,6 +938,10 @@ export async function executeAppRuntimeJob(input: {
   if (!validated.ok) return { status: 'failed', error: validated.error, retryable: false };
   const payload = validated.payload;
   let phase: RecoveryPhase | 'source_fetch' | 'extract' | 'dependency_install' | 'build' = 'reconcile';
+  const enterRecoveryPhase = (next: RecoveryPhase): void => {
+    phase = next;
+    if (payload.operation === 'recover') console.error(`App Runtime recovery phase: ${next}.`);
+  };
   const started = Date.now();
   const refuse = (error: string, reasonCode: RecoveryReasonCode): AgentJobResult => ({
     status: 'failed', error, retryable: false,
@@ -936,6 +967,7 @@ export async function executeAppRuntimeJob(input: {
     return refuse('The fixed package manager is unavailable on this node.', 'runtime_incompatible');
   }
   try {
+    enterRecoveryPhase('reconcile');
     const requestedRoot = safeRoot(input.rootDirectory);
     await mkdir(requestedRoot, { recursive: true });
     const root = await realpath(requestedRoot);
@@ -1086,12 +1118,12 @@ export async function executeAppRuntimeJob(input: {
     const selectedArtifact = payload.operation === 'rollback' ? payload.targetArtifactId : payload.artifactId;
     if (!selectedArtifact) throw new Error('The action has no verified local artifact.');
     const artifact = artifactDirectory(root, input.workspaceId, payload, selectedArtifact);
-    phase = 'artifact_verify';
+    enterRecoveryPhase('artifact_verify');
     const manifest = await verifyArtifact(artifact, input.token, selectedArtifact);
-    phase = 'activate';
+    enterRecoveryPhase('activate');
     await stopManagedApp(payload.deploymentId);
     const dataDirectory = await ensurePrivateDirectory(deployDirectory, ['data']);
-    phase = 'start';
+    enterRecoveryPhase('start');
     const app = await spawnManagedApp({
       deploymentId: payload.deploymentId,
       projectId: payload.projectId,
@@ -1105,11 +1137,21 @@ export async function executeAppRuntimeJob(input: {
       environment: allowedEnvironment,
       desiredRevision: payload.expectedDesiredRevision ?? 1,
     });
-    phase = 'health';
+    enterRecoveryPhase('health');
     try {
       await healthCheck(app, input.signal);
     } catch (error) {
-      if (payload.operation === 'recover') await stopManagedApp(payload.deploymentId);
+      if (payload.operation === 'recover') {
+        const diagnostic = app.logLines.some((line) => /ERR_ACCESS_DENIED|network access|allow-net/i.test(line))
+          ? 'permission_refused'
+          : app.logLines.some((line) => /MODULE_NOT_FOUND|Cannot find module/i.test(line))
+            ? 'dependency_missing'
+            : app.logLines.some((line) => /EADDRINUSE/i.test(line))
+              ? 'port_in_use'
+              : 'health_failed';
+        console.error(`App Runtime recovery diagnostic: ${diagnostic}.`);
+        await stopManagedApp(payload.deploymentId);
+      }
       throw error;
     }
     return resultFor(app, {

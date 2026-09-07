@@ -63,6 +63,7 @@ void test('signal-terminated Windows child is not reported as a running runtime'
   assert.equal(isAppProcessRunning({ exitCode: 0, signalCode: null }), false);
   assert.equal(isAppProcessRunning({ exitCode: null, signalCode: 'SIGTERM' }), false);
   assert.equal(isAppProcessRunning({ exitCode: null, signalCode: 'SIGKILL' }), false);
+  assert.equal(isAppProcessRunning({ exitCode: null, signalCode: null, pid: 2_147_483_647 }), false);
 });
 
 async function runInFreshAgentProcess(input: {

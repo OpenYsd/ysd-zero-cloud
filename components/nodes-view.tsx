@@ -80,6 +80,53 @@ function jobStyle(state: NodeJob['state']): string {
   return 'text-white/45';
 }
 
+const AUTOSTART_MANAGER_LABEL = {
+  'windows-task-scheduler': 'Windows Task Scheduler',
+  'systemd-user': 'systemd user',
+  launchagent: 'macOS LaunchAgent',
+} as const;
+
+const AUTOSTART_ATTENTION: Record<string, string> = {
+  manager_missing: 'Native manager unavailable',
+  agent_missing: 'Managed Agent missing',
+  node_runtime_missing: 'Node runtime missing',
+  registration_invalid: 'Registration needs repair',
+  upgrade_required: 'Upgrade Agent to 0.6.0',
+  credential_key_unavailable: 'Local Agent key required',
+  restart_limited: 'Restart limit reached',
+  authorization_rejected: 'Node authorization rejected',
+};
+
+function AutostartSummary({ node }: { node: ComputeNode }) {
+  const autostart = node.capabilities.autostart;
+  if (!autostart || !node.capabilities.contracts.autostart) {
+    return (
+      <div className="mt-2 border-t border-white/[0.05] pt-2 text-[9px] text-white/28">
+        <p>Auto-start · Unsupported</p>
+        <p>Upgrade Agent to 0.6.0</p>
+      </div>
+    );
+  }
+  if (!autostart.enabled || autostart.state === 'disabled') {
+    return (
+      <div className="mt-2 border-t border-white/[0.05] pt-2 text-[9px] text-white/28">
+        <p>Auto-start · Disabled</p>
+        <p>Enable locally with the Agent CLI</p>
+      </div>
+    );
+  }
+  const attention = AUTOSTART_ATTENTION[autostart.state];
+  return (
+    <div className="mt-2 border-t border-white/[0.05] pt-2 text-[9px] text-white/35">
+      <p className={attention ? 'text-amber-300' : 'text-[#c8ff69]'}>
+        Auto-start · {attention ? 'Needs attention' : 'Enabled'}
+      </p>
+      <p>{attention ?? 'Starts when you sign in'}</p>
+      {autostart.manager ? <p>{AUTOSTART_MANAGER_LABEL[autostart.manager]}</p> : null}
+    </div>
+  );
+}
+
 export function NodesView({ state, now }: { state: NodesState; now: number }) {
   const router = useRouter();
   const [name, setName] = useState('My compute node');
@@ -506,6 +553,7 @@ export function NodesView({ state, now }: { state: NodesState; now: number }) {
                         Recovery upgrade required
                       </p>
                     ) : null}
+                    <AutostartSummary node={node} />
                   </TableCell>
                   <TableCell className="px-4 py-3 text-white/38">
                     {node.lastHeartbeatAt

@@ -32,9 +32,9 @@ const legacyPayload: Omit<AppRuntimeJobPayload, 'expectedDesiredRevision' | 'pro
   retainArtifacts: 5,
 };
 
-void test('Phase 18 versions Agent 0.5.0 without changing Protocol 1', () => {
-  assert.equal(JSON.parse(source('package.json')).version, '0.18.0');
-  assert.equal(CURRENT_AGENT_VERSION, '0.5.0');
+void test('Phase 18 recovery remains compatible after Phase 19 keeps Protocol 1', () => {
+  assert.equal(JSON.parse(source('package.json')).version, '0.19.0');
+  assert.equal(CURRENT_AGENT_VERSION, '0.6.0');
   assert.equal(NODE_PROTOCOL_VERSION, 1);
   assert.equal(recoveryAgentCompatible('0.4.2'), false);
   assert.equal(recoveryAgentCompatible('0.5.0'), true);
