@@ -8,7 +8,7 @@ create.
 The starting state is the real one: a managed Agent 0.6.0, built from the
 Phase 19 commit, installed by its own `autostart enable`, running an
 application. The upgrade is then driven exactly as an operator would drive it --
-`node ysd-node-agent-0.7.0.mjs autostart upgrade` -- and every claim about
+`node ysd-node-agent-<current>.mjs autostart upgrade` -- and every claim about
 staging, the trial, promotion, rollback and the untouched OS registration is
 checked against what is actually on disk and actually running.
 """
@@ -41,6 +41,9 @@ NODE = os.environ.get(
 # exercised against the launcher that actually shipped, not a reconstruction.
 PREVIOUS_COMMIT = "78f7ac74fcf2e0588e13a91455e1b727c620daa3"
 PREVIOUS_AGENT_VERSION = "0.6.0"
+CURRENT_AGENT_VERSION = json.loads(
+    (Path(__file__).resolve().parent / "public/agent/manifest.json").read_text(encoding="utf8")
+)["version"]
 RUN = secrets.token_hex(3)
 CLIENT_ADDRESS = f"198.51.100.{20 + (int(RUN, 16) % 220)}"
 FIXTURE = "cyclic-software/express-hello-world"
@@ -294,7 +297,7 @@ FAILING_CANDIDATE = """// YSD_TEST_ONLY_FAILING_AGENT
 // the marker above.
 const args = process.argv.slice(2);
 if (args.includes('--version') || args.includes('-v')) {
-  console.log('YSD Node Agent 0.7.1');
+  console.log('YSD Node Agent 9.9.9');
   console.log('Protocol 1');
   process.exit(0);
 }
@@ -368,7 +371,7 @@ try:
     )
     check(
         f"Agent {manifest['version']} is the published candidate",
-        manifest["version"] == "0.7.0" and manifest["protocolVersion"] == 1,
+        manifest["version"] == CURRENT_AGENT_VERSION and manifest["protocolVersion"] == 1,
     )
 
     if REQUESTED_BASE:
@@ -459,7 +462,7 @@ try:
     check("app artifact recorded", bool(artifact_id and artifact_checksum))
     log_before = managed_log_text()
 
-    print("\n=== THE CENTRAL GATE: user-initiated 0.6.0 to 0.7.0 upgrade ===", flush=True)
+    print(f"\n=== THE CENTRAL GATE: user-initiated 0.6.0 to {CURRENT_AGENT_VERSION} upgrade ===", flush=True)
     upgraded = run_agent(current_agent, ["autostart", "upgrade"], timeout=600)
     try:
         result = json.loads(upgraded.stdout.strip().splitlines()[-1])
@@ -473,7 +476,7 @@ try:
     check("promotion recorded the Agent it replaced", result.get("previousVersion") == PREVIOUS_AGENT_VERSION, json.dumps(result))
 
     install = read_install(install_path)
-    check("top-level current is now 0.7.0", install.get("agentVersion") == "0.7.0" and install.get("installSchema") == 2)
+    check(f"top-level current is now {CURRENT_AGENT_VERSION}", install.get("agentVersion") == CURRENT_AGENT_VERSION and install.get("installSchema") == 2)
     check(
         "previous release is recorded by exact path and hash",
         (install.get("previousRelease") or {}).get("version") == PREVIOUS_AGENT_VERSION
@@ -497,13 +500,13 @@ try:
     check("task registration still contains no secrets",
           pairing["code"] not in registration_after and "YSD_NODE_AGENT_KEY" not in registration_after)
 
-    upgraded_node = wait_node_version(operator, node_id, "0.7.0")
-    check("the same node identity now reports Agent 0.7.0", upgraded_node is not None,
+    upgraded_node = wait_node_version(operator, node_id, CURRENT_AGENT_VERSION)
+    check(f"the same node identity now reports Agent {CURRENT_AGENT_VERSION}", upgraded_node is not None,
           json.dumps({"nodeId": node_id}))
     managed = managed_processes(install)
     check("exactly one launcher owns exactly one Agent", managed.get("launcherCount") == 1 and managed.get("agentCount") == 1,
           json.dumps(managed))
-    check("the running Agent is the promoted release", managed.get("agentRelease") == "0.7.0", json.dumps(managed))
+    check("the running Agent is the promoted release", managed.get("agentRelease") == CURRENT_AGENT_VERSION, json.dumps(managed))
 
     print("\n=== the application recovers from the same artifact ===", flush=True)
     recovered = wait_deployment(operator, deployment_id, {"healthy", "failed", "blocked", "timed_out"}, limit=120)
@@ -552,7 +555,7 @@ try:
     check("the refusal disturbed nothing", still.get("agentCount") == 1 and MARKER in body_at(port))
 
     print("\n=== a candidate that fails its trial is rolled back ===", flush=True)
-    failing = home / "ysd-node-agent-0.7.1.mjs"
+    failing = home / "ysd-node-agent-9.9.9.mjs"
     failing.write_text(FAILING_CANDIDATE, encoding="utf8")
     check("the failure fixture is test-only and never published",
           "YSD_TEST_ONLY_FAILING_AGENT" in failing.read_text(encoding="utf8")
@@ -585,24 +588,24 @@ try:
         rollback_result = {"stderr": rolled_err.strip()[:300]}
     check(
         "the failing candidate is staged and then rolled back",
-        rollback_result.get("outcome") == "rolled_back" and rollback_result.get("candidateVersion") == "0.7.1",
+        rollback_result.get("outcome") == "rolled_back" and rollback_result.get("candidateVersion") == "9.9.9",
         json.dumps(rollback_result),
     )
     install = read_install(install_path)
-    check("the known-good Agent is current again", install.get("agentVersion") == "0.7.0")
+    check("the known-good Agent is current again", install.get("agentVersion") == CURRENT_AGENT_VERSION)
     check("the failure is classified as candidate-specific",
           (install.get("upgrade") or {}).get("reason") == "candidate_start_failed",
           json.dumps(install.get("upgrade")))
     check("only one managed transaction ever ran", (install.get("upgrade") or {}).get("state") == "idle")
     quarantine = (install.get("upgrade") or {}).get("quarantine", [])
     check("the failed candidate is quarantined by exact hash",
-          len(quarantine) == 1 and quarantine[0].get("version") == "0.7.1" and len(quarantine[0].get("releaseHash", "")) == 64,
+          len(quarantine) == 1 and quarantine[0].get("version") == "9.9.9" and len(quarantine[0].get("releaseHash", "")) == 64,
           json.dumps(quarantine))
     check("the failed candidate bundle is pruned",
-          not (Path(install["releasePath"]).parent.parent / "0.7.1").exists())
+          not (Path(install["releasePath"]).parent.parent / "9.9.9").exists())
     check("registration is unchanged by staging, trial and rollback",
           canonical_registration(task_xml(task_name)) == registration_before)
-    restored_node = wait_node_version(operator, node_id, "0.7.0")
+    restored_node = wait_node_version(operator, node_id, CURRENT_AGENT_VERSION)
     check("the known-good Agent reconnects after the rollback", restored_node is not None)
     rollback_log = managed_log_text()[len(log_before_rollback):]
     check("the rollback is recorded in fixed language",
@@ -617,7 +620,7 @@ try:
           retry_result.get("reason") == "candidate_quarantined", json.dumps(retry_result))
 
     lower = home / "ysd-node-agent-lower.mjs"
-    lower.write_text(FAILING_CANDIDATE.replace("0.7.1", "0.5.0"), encoding="utf8")
+    lower.write_text(FAILING_CANDIDATE.replace("9.9.9", "0.5.0"), encoding="utf8")
     downgrade = run_agent(current_agent, ["autostart", "upgrade", "--source", str(lower)], timeout=180)
     downgrade_result = json.loads(downgrade.stdout.strip().splitlines()[-1]) if downgrade.stdout.strip() else {}
     check("an arbitrary lower bundle is refused as a downgrade",
@@ -637,16 +640,92 @@ try:
     downgraded_node = wait_node_version(operator, node_id, PREVIOUS_AGENT_VERSION)
     check("Agent 0.6.0 is accepted by the 0.20.0 control plane", downgraded_node is not None)
 
+    print("\n=== PHASE 20.1 GATE: restored 0.6.0 reads the status surface ===", flush=True)
+    status_060 = subprocess.run(
+        [NODE, str(previous_agent), "autostart", "status", "--config", str(config)],
+        cwd=home, env=env, capture_output=True, text=True, timeout=120,
+    )
+    try:
+        restored_status = json.loads(status_060.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        restored_status = {"stderr": status_060.stderr.strip()[:200]}
+    check(
+        "Agent 0.6.0 parses the status file this Agent wrote",
+        restored_status.get("state") is not None and "stderr" not in restored_status,
+        json.dumps(restored_status),
+    )
+    # What the hotfix guarantees, and what it does not.
+    #
+    # Agent 0.6.0 validates BOTH managed files by exact key set. `status.json`
+    # is now written in the shape it expects, which is what the heartbeat and
+    # the Nodes badge read -- that is the defect this hotfix targets. Its
+    # `autostart status` command additionally parses `install.json`, and that
+    # file legitimately carries the Phase 20 transaction, so 0.6.0 still cannot
+    # read it. Removing those keys would discard the recorded previous release,
+    # so the boundary is stated rather than papered over.
+    check(
+        "the status file is exactly the Phase 19 key set",
+        sorted(restored_status.keys()) == sorted([
+            "agentVersion", "crashFailures", "enabled", "lastExitAt", "lastStartAt",
+            "manager", "registrationFingerprint", "restartCount", "scope", "state", "version",
+        ]),
+        json.dumps(sorted(restored_status.keys())),
+    )
+    known_boundary = restored_status.get("registrationFingerprint") is None
+    check(
+        "0.6.0's own status command is limited by install.json, not by status.json",
+        known_boundary,
+        "install.json carries the Phase 20 transaction and 0.6.0 validates it by exact key set",
+    )
+    fresh_node = wait_node_version(operator, node_id, PREVIOUS_AGENT_VERSION) or downgraded_node
+    restored_capability = (fresh_node or {}).get("capabilities", {}).get("autostart", {})
+    check(
+        "THE HOTFIX: the control plane sees the restored 0.6.0 as auto-start enabled",
+        restored_capability.get("enabled") is True and restored_capability.get("state") == "enabled",
+        json.dumps(restored_capability),
+    )
+
+    # And the other direction: with the registration gone it must NOT claim
+    # Enabled. The task is ended first -- deleting a task does not stop an
+    # instance that is already running, and an orphaned launcher would keep the
+    # node identity and make the later upgrade contend with itself.
+    subprocess.run(["schtasks.exe", "/End", "/TN", task_name], capture_output=True)
+    check("the managed task reaches idle before its registration is removed",
+          wait_task_idle(task_name, install))
+    subprocess.run(["schtasks.exe", "/Delete", "/TN", task_name, "/F"], capture_output=True)
+    absent_060 = subprocess.run(
+        [NODE, str(previous_agent), "autostart", "status", "--config", str(config)],
+        cwd=home, env=env, capture_output=True, text=True, timeout=120,
+    )
+    try:
+        absent_status = json.loads(absent_060.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        absent_status = {}
+    check(
+        "with the task removed the restored Agent does not claim Enabled",
+        absent_status.get("enabled") is False and absent_status.get("state") in {"disabled", "registration_invalid"},
+        json.dumps(absent_status),
+    )
+    repaired = subprocess.run(
+        [NODE, str(previous_agent), "autostart", "repair", "--url", BASE, "--config", str(config)],
+        cwd=home, env=env, capture_output=True, text=True, timeout=180,
+    )
+    check("Agent 0.6.0 repairs its own registration", repaired.returncode == 0, repaired.stderr.strip()[:200])
+    install = read_install(install_path)
+    task_name = install["registrationId"]
+    check("the repaired registration is canonically identical",
+          canonical_registration(task_xml(task_name)) == registration_before)
+
     back = run_agent(current_agent, ["autostart", "upgrade"], timeout=600)
     back_result = json.loads(back.stdout.strip().splitlines()[-1]) if back.stdout.strip() else {}
-    check("upgrading again from the restored Agent promotes 0.7.0",
-          back_result.get("outcome") == "promoted" and back_result.get("currentVersion") == "0.7.0",
+    check(f"upgrading again from the restored Agent promotes {CURRENT_AGENT_VERSION}",
+          back_result.get("outcome") == "promoted" and back_result.get("currentVersion") == CURRENT_AGENT_VERSION,
           json.dumps(back_result))
     install = read_install(install_path)
     releases = sorted(p.name for p in (Path(install["releasePath"]).parent.parent).iterdir() if p.is_dir())
-    check("release retention stays at current plus previous", releases == ["0.6.0", "0.7.0"], json.dumps(releases))
-    final_node = wait_node_version(operator, node_id, "0.7.0")
-    check("the node is back on Agent 0.7.0", final_node is not None)
+    check("release retention stays at current plus previous", releases == sorted(["0.6.0", CURRENT_AGENT_VERSION]), json.dumps(releases))
+    final_node = wait_node_version(operator, node_id, CURRENT_AGENT_VERSION)
+    check(f"the node is back on Agent {CURRENT_AGENT_VERSION}", final_node is not None)
     wait_deployment(operator, deployment_id, {"healthy"}, limit=120)
 
     print("\n=== an intentionally stopped application stays stopped ===", flush=True)

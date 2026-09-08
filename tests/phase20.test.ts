@@ -618,7 +618,11 @@ void test('0.20 keeps accepting Agent 0.6, and 0.7 stays inside Protocol 1', () 
   assert.equal(agentVersionSupported(KNOWN_GOOD), true);
   assert.equal(agentVersionSupported(CURRENT_AGENT_VERSION), true);
   assert.equal(NODE_PROTOCOL_VERSION, 1);
-  assert.equal(CURRENT_AGENT_VERSION, CANDIDATE);
+  // The fixture upgrades 0.6.0 -> 0.7.0. The shipped Agent moves on past that
+  // pair, and every version in between has to stay acceptable, so the claim
+  // here is the supported range -- not that the fixture names today's release.
+  assert.equal(agentVersionSupported('0.7.0'), true);
+  assert.equal(compareStrictVersions(CURRENT_AGENT_VERSION, CANDIDATE)! >= 0, true);
 
   // And the other direction: an 0.7 node against a control plane that has been
   // rolled back. The autostart capability is the only thing Phase 19 added and

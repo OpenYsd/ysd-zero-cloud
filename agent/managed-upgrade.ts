@@ -197,6 +197,21 @@ export type ManagedUpgrade = {
   updatedAt: number;
 };
 
+/**
+ * The exact `status.json` key set Agent 0.6.0 accepts.
+ *
+ * Frozen. That Agent validates the file by comparing its whole key set to
+ * this list, so a single additional key -- even one carrying `null` -- makes
+ * it reject the file and fall back to reporting auto-start as disabled. A
+ * managed node can be returned to 0.6.0 at any time by `restore-previous`, so
+ * whatever is on disk has to stay readable by it for good. Phase 20's own
+ * transaction lives in the install file, which 0.6.0 never parses.
+ */
+export const LEGACY_STATUS_KEYS = [
+  'agentVersion', 'crashFailures', 'enabled', 'lastExitAt', 'lastStartAt',
+  'manager', 'registrationFingerprint', 'restartCount', 'scope', 'state', 'version',
+] as const;
+
 export type UpgradeStatus = {
   state: UpgradeStatusState;
   reason: UpgradeReason | null;
@@ -600,7 +615,12 @@ export function evaluateRestoreTarget(input: {
 export function projectUpgradeStatus(upgrade: ManagedUpgrade): UpgradeStatus {
   const state: UpgradeStatusState =
     upgrade.state === 'staged' ? 'upgrade_staged'
-      : upgrade.state === 'trial' ? 'upgrade_trial'
+      // A trial that has annotated itself `network_unavailable` is a live
+      // candidate that has not reached the control plane yet. That used to be
+      // a separate observation in `status.json`; it is a fact about the
+      // transaction, so it is recorded on the transaction.
+      : upgrade.state === 'trial'
+        ? upgrade.reason === 'network_unavailable' ? 'upgrade_waiting_for_network' : 'upgrade_trial'
         : upgrade.state === 'blocked' ? 'upgrade_blocked'
           : upgrade.state === 'rollback_pending' ? 'upgrade_rolled_back'
             : upgrade.reason === null ? 'upgrade_idle'

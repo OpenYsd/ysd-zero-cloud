@@ -47,7 +47,13 @@ export const NODE_PROTOCOL_VERSION = 1;
 // nothing mandatory and Protocol 1 is unchanged, so 0.6.0 keeps working
 // against this control plane and 0.7.0 keeps working against the
 // previous one.
-export const CURRENT_AGENT_VERSION = '0.7.0';
+// 0.7.1 stops writing the Phase 20 upgrade projection into `status.json`.
+// 0.6.0 validates that file by exact key set, so the extra key made a
+// restored 0.6.0 report its auto-start as disabled while Task Scheduler had
+// it enabled. The projection is derived from the install file instead, and
+// the heartbeat's auto-start observation now checks the native manager
+// rather than trusting a status file. Protocol 1 is unchanged.
+export const CURRENT_AGENT_VERSION = '0.7.1';
 export const MINIMUM_AGENT_VERSION = '0.3.0';
 
 export const NODE_TIMING = {

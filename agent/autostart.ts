@@ -32,6 +32,7 @@ import {
   AUTOSTART_CRASH_WINDOW_MS,
   AUTOSTART_LOG_FILES,
   AUTOSTART_LOG_MAX_BYTES,
+  LEGACY_STATUS_KEYS,
   MANAGERS,
   MANAGED_INSTALL_SCHEMA,
   MANAGED_RELEASE_TRANSACTION_LIMIT,
@@ -44,6 +45,7 @@ import {
   evaluateRestoreTarget,
   evaluateUpgradeCandidate,
   idleUpgrade,
+  canonicalCredentialPath,
   isManagedRelease,
   projectUpgradeStatus,
   resetTransaction,
@@ -126,12 +128,15 @@ export type ManagedStatus = {
   restartCount: number;
   registrationFingerprint: string | null;
   crashFailures: number[];
-  /**
-   * A read-only projection of the transaction for headless observation. The
-   * managed install file is the only authority; this exists so a person
-   * reading `status.json` over SSH can see what the launcher is doing.
-   */
-  upgrade?: UpgradeStatus | null;
+};
+
+/**
+ * What `autostart status` prints. The transaction projection lives here, on
+ * the command's own response, rather than in `status.json` -- that file is the
+ * Phase 19 contract and an Agent restored to 0.6.0 has to keep reading it.
+ */
+export type ManagedStatusReport = ManagedStatus & {
+  upgrade: UpgradeStatus | null;
 };
 
 type ManagerInput = {
@@ -359,14 +364,20 @@ export function evaluateCrashBudget(
   return { retry: failures.length < AUTOSTART_CRASH_LIMIT, failures };
 }
 
+/**
+ * Reads a managed status file and normalises it to the Phase 19 shape.
+ *
+ * Liberal in what it accepts, conservative in what it writes. Agent 0.7.0
+ * shipped an extra `upgrade` key here; tolerating it on read means a node
+ * upgraded by 0.7.0 keeps its crash-budget history instead of starting over,
+ * and {@link legacyManagedStatus} guarantees that whatever this process writes
+ * back is a file Agent 0.6.0 can still parse.
+ */
 export function validateManagedStatus(value: unknown): ManagedStatus | null {
   if (!isRecord(value)) return null;
-  const expected = [
-    'agentVersion', 'crashFailures', 'enabled', 'lastExitAt', 'lastStartAt',
-    'manager', 'registrationFingerprint', 'restartCount', 'scope', 'state', 'version',
-  ];
-  // `upgrade` is optional so a status file written by a Phase 19 launcher, and
-  // one written by a Phase 20 launcher, are both readable here.
+  const expected = [...LEGACY_STATUS_KEYS];
+  // Exactly one historical key is tolerated, and it is dropped from the
+  // result. Nothing else is: an unknown key still means an unknown file.
   const required = Object.keys(value).filter((key) => key !== 'upgrade');
   if (required.sort().join('\0') !== expected.sort().join('\0')) return null;
   if (value.upgrade !== undefined && value.upgrade !== null && !validateUpgradeStatus(value.upgrade)) return null;
@@ -384,7 +395,25 @@ export function validateManagedStatus(value: unknown): ManagedStatus | null {
     !Array.isArray(value.crashFailures) || value.crashFailures.length > AUTOSTART_CRASH_LIMIT ||
     value.crashFailures.some((entry) => !Number.isSafeInteger(entry) || Number(entry) < 0)
   ) return null;
-  return value as ManagedStatus;
+  return legacyManagedStatus(value as ManagedStatus);
+}
+
+/** Projects a status onto exactly the keys Agent 0.6.0 accepts, in order. */
+export function legacyManagedStatus(status: ManagedStatus): ManagedStatus {
+  const source = status as unknown as Record<string, unknown>;
+  const legacy: Record<string, unknown> = {};
+  for (const key of LEGACY_STATUS_KEYS) legacy[key] = source[key];
+  return legacy as unknown as ManagedStatus;
+}
+
+/**
+ * The only place this process writes `status.json`.
+ *
+ * Everything goes through the legacy projection, so no future field can leak
+ * into a file that an older Agent has to parse.
+ */
+async function writeManagedStatus(statusPath: string, status: ManagedStatus): Promise<void> {
+  await atomicWrite(statusPath, `${JSON.stringify(legacyManagedStatus(status))}\n`);
 }
 
 export function validateManagedInstall(value: unknown): ManagedInstall | null {
@@ -710,7 +739,6 @@ function initialStatus(manager: AutostartManager, fingerprint: string): ManagedS
     restartCount: 0,
     registrationFingerprint: fingerprint,
     crashFailures: [],
-    upgrade: null,
   };
 }
 
@@ -811,7 +839,7 @@ async function installManagedAutostart(input: {
     updatedAt: Date.now(),
   };
   await atomicWrite(layout.installPath, `${JSON.stringify(install)}\n`);
-  await atomicWrite(layout.statusPath, `${JSON.stringify(initialStatus(manager, registrationFingerprint))}\n`);
+  await writeManagedStatus(layout.statusPath, initialStatus(manager, registrationFingerprint));
   if (manager === 'windows-task-scheduler') {
     const rendered = renderWindowsTask(managerConfig);
     await registerWindows(rendered);
@@ -843,15 +871,20 @@ async function loadContext(credentialPath: string): Promise<{
   return { layout, install, status };
 }
 
-export async function statusAutostart(credentialPath: string): Promise<ManagedStatus> {
+export async function statusAutostart(credentialPath: string): Promise<ManagedStatusReport> {
   if (process.env.YSD_NODE_AGENT_KEY?.trim()) {
-    return { ...initialStatus(managerForPlatform() ?? 'systemd-user', ''.padStart(64, '0')), enabled: false, state: 'credential_key_unavailable', registrationFingerprint: null };
+    return { ...initialStatus(managerForPlatform() ?? 'systemd-user', ''.padStart(64, '0')), enabled: false, state: 'credential_key_unavailable', registrationFingerprint: null, upgrade: null };
   }
   const { layout, install, status } = await loadContext(credentialPath);
   const manager = managerForPlatform();
-  if (!manager) return { ...initialStatus('systemd-user', ''.padStart(64, '0')), enabled: false, state: 'manager_missing', registrationFingerprint: null };
+  if (!manager) return { ...initialStatus('systemd-user', ''.padStart(64, '0')), enabled: false, state: 'manager_missing', registrationFingerprint: null, upgrade: null };
   const observed = status ?? { ...initialStatus(manager, ''.padStart(64, '0')), enabled: false, state: 'disabled' as const, registrationFingerprint: null };
-  const base: ManagedStatus = { ...observed, upgrade: projectTransaction(install, validateUpgradeStatus(observed.upgrade)) };
+  // The transaction comes from the install file and nowhere else. `status.json`
+  // no longer carries it, which is what lets Agent 0.6.0 still read that file.
+  const base: ManagedStatusReport = {
+    ...observed,
+    upgrade: install ? projectUpgradeStatus(upgradeOf(install)) : null,
+  };
   if (!install) return { ...base, enabled: false, state: 'disabled', registrationFingerprint: null };
   try { await verifyRegularFile(install.nodeExecutable, 'Node executable'); } catch { return { ...base, state: 'node_runtime_missing' }; }
   try {
@@ -919,9 +952,8 @@ async function removeManagedAutostart(credentialPath: string, stop: boolean): Pr
     enabled: false,
     state: 'disabled',
     registrationFingerprint: install?.registrationFingerprint ?? null,
-    upgrade: null,
   };
-  await atomicWrite(layout.statusPath, `${JSON.stringify(next)}\n`);
+  await writeManagedStatus(layout.statusPath, next);
   return next;
 }
 
@@ -948,21 +980,6 @@ export async function uninstallAutostart(credentialPath: string): Promise<void> 
  * observation -- so exactly that one observation is taken from `status.json`,
  * and only while it is describing the same transaction.
  */
-function projectTransaction(
-  install: ManagedInstall | null,
-  observed: UpgradeStatus | null,
-): UpgradeStatus | null {
-  if (!install) return null;
-  const projected = projectUpgradeStatus(upgradeOf(install));
-  if (
-    observed
-    && observed.transactionId === projected.transactionId
-    && observed.state === 'upgrade_waiting_for_network'
-    && projected.state === 'upgrade_trial'
-  ) return observed;
-  return projected;
-}
-
 export type UpgradeOutcome =
   | 'promoted'
   | 'rolled_back'
@@ -1398,6 +1415,18 @@ export async function restorePreviousAutostart(input: {
       return refuse('node_runtime_missing');
     }
 
+    // Fail before the switch, not after. Execution is about to be handed to an
+    // Agent that validates `status.json` by exact key set, so a file left by
+    // 0.7.0 -- which carried an extra key -- is rewritten in the shape that
+    // Agent understands first. If that write fails, nothing is switched and the
+    // current Agent keeps the machine.
+    try {
+      const existingStatus = validateManagedStatus(JSON.parse(await readFile(layout.statusPath, 'utf8')));
+      if (existingStatus) await writeManagedStatus(layout.statusPath, existingStatus);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') return refuse('transaction_interrupted');
+    }
+
     const now = Date.now();
     const restored: ManagedInstall = {
       ...resetTransaction(install, now),
@@ -1441,24 +1470,62 @@ export async function restorePreviousAutostart(input: {
   }
 }
 
+/**
+ * How long a native-manager check is reused for the heartbeat observation.
+ *
+ * The heartbeat runs every 25 seconds and this costs a process spawn, so the
+ * answer is cached. A minute of staleness on a badge is not worth a
+ * `schtasks` invocation every heartbeat, and a person who wants the current
+ * answer runs `autostart status`, which never caches.
+ */
+export const AUTOSTART_CAPABILITY_TTL_MS = 60_000;
+
+let capabilityCache: { key: string; at: number; value: AutostartCapability } | null = null;
+
+/** Test seam: drops the cached native-manager observation. */
+export function resetAutostartCapabilityCache(): void {
+  capabilityCache = null;
+}
+
+/**
+ * What the heartbeat reports about auto-start.
+ *
+ * This used to read `status.json` alone, which meant it could keep saying
+ * "enabled" after the scheduled task had been deleted -- the file says what the
+ * launcher last wrote, not what the operating system is actually configured to
+ * do. It now asks the same question `autostart status` asks, so a missing or
+ * altered registration is reported as such instead of being papered over.
+ */
 export async function readAutostartCapability(
   credentialPath: string,
   nodeId?: string,
 ): Promise<AutostartCapability> {
   const manager = managerForPlatform();
   if (!manager) return { version: 1, supported: false, enabled: false, manager: null, scope: 'none', state: 'unsupported' };
+  const disabled: AutostartCapability = { version: 1, supported: true, enabled: false, manager, scope: 'user-session', state: 'disabled' };
   try {
     const resolvedNodeId = nodeId ?? (await loadCredentials(credentialPath)).nodeId;
-    const layout = await managedLayout(credentialPath, resolvedNodeId);
-    let status: ManagedStatus | null = null;
-    try { status = validateManagedStatus(JSON.parse(await readFile(layout.statusPath, 'utf8'))); } catch { /* Not enabled yet. */ }
-    if (!status) return { version: 1, supported: true, enabled: false, manager, scope: 'user-session', state: 'disabled' };
+    const key = `${canonicalCredentialPath(credentialPath)}\0${resolvedNodeId}`;
+    const now = Date.now();
+    if (capabilityCache && capabilityCache.key === key && now - capabilityCache.at < AUTOSTART_CAPABILITY_TTL_MS) {
+      return capabilityCache.value;
+    }
+    const report = await statusAutostart(credentialPath);
     const publicState: AutostartCapability['state'] =
-      status.state === 'starting' || status.state === 'stopped' || status.state === 'already_running'
-        ? status.enabled ? 'enabled' : 'disabled'
-        : status.state;
-    return { version: 1, supported: true, enabled: status.enabled, manager, scope: 'user-session', state: publicState };
+      report.state === 'starting' || report.state === 'stopped' || report.state === 'already_running'
+        ? report.enabled ? 'enabled' : 'disabled'
+        : report.state;
+    const value: AutostartCapability = {
+      version: 1,
+      supported: true,
+      enabled: report.enabled,
+      manager,
+      scope: 'user-session',
+      state: publicState,
+    };
+    capabilityCache = { key, at: now, value };
+    return value;
   } catch {
-    return { version: 1, supported: true, enabled: false, manager, scope: 'user-session', state: 'disabled' };
+    return disabled;
   }
 }

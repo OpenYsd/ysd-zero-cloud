@@ -55,6 +55,8 @@ const TRIAL_LIMIT=${UPGRADE_TRIAL_ATTEMPT_LIMIT}, NOTICE=${UPGRADE_READINESS_NOT
 const EXIT={ok:${AGENT_EXIT.clean},already:${AGENT_EXIT.alreadyRunning},auth:${AGENT_EXIT.authorizationRejected},credential:${AGENT_EXIT.credentialInvalid},runtime:${AGENT_EXIT.unsupportedRuntime},controlled:${AGENT_EXIT.controlledShutdown}};
 const terminal=new Set([EXIT.already,EXIT.auth,EXIT.credential,EXIT.runtime,EXIT.controlled]);
 const NULL_TX='0'.repeat(32);
+const LEGACY_STATUS=['agentVersion','crashFailures','enabled','lastExitAt','lastStartAt','manager','registrationFingerprint','restartCount','scope','state','version'];
+const legacyStatus=(value)=>{const out={};for(const key of LEGACY_STATUS)out[key]=value[key];return out;};
 const hash=(value)=>createHash('sha256').update(value).digest('hex');
 const redact=(value)=>value.replace(/\\bAuthorization\\s*:\\s*[^\\r\\n]+/giu,'Authorization: [REDACTED]').replace(/\\b(cookie|session)\\s*[=:]\\s*[^\\s;]+/giu,'$1=[REDACTED]').replace(/\\bYSD_NODE_AGENT_KEY\\s*=\\s*[^\\s]+/giu,'YSD_NODE_AGENT_KEY=[REDACTED]').replace(/\\bysdp_[A-Za-z0-9_-]{16,}/gu,'[REDACTED]').replace(/\\bnode_[A-Za-z0-9_.-]{20,}/gu,'[REDACTED]');
 const bounded=(value)=>{const bytes=Buffer.from(value);if(bytes.length<=MAX)return value;let start=bytes.length-MAX;while(start<bytes.length&&(bytes[start]&0xc0)===0x80)start++;return bytes.subarray(start).toString('utf8');};
@@ -89,27 +91,31 @@ let install=null,status=null;
 try{install=await loadInstall();}catch{await log(logDirectory,'launcher validation failed\\n');try{const raw=JSON.parse(await readFile(installPath,'utf8'));await atomic(statusPath,{version:1,enabled:true,manager:managers.has(raw.manager)?raw.manager:'windows-task-scheduler',scope:'user-session',state:'registration_invalid',agentVersion:typeof raw.agentVersion==='string'?raw.agentVersion:'unknown',lastStartAt:null,lastExitAt:Date.now(),restartCount:0,registrationFingerprint:/^[a-f0-9]{64}$/u.test(raw.registrationFingerprint)?raw.registrationFingerprint:null,crashFailures:[]});}catch{}process.exit(0);}
 try{status=JSON.parse(await readFile(statusPath,'utf8'));}catch{}
 if(!validStatus(status))status={version:1,enabled:true,manager:install.manager,scope:'user-session',state:'starting',agentVersion:install.agentVersion,lastStartAt:null,lastExitAt:null,restartCount:0,registrationFingerprint:install.registrationFingerprint,crashFailures:[]};
+status=legacyStatus(status);
 const childEnv=Object.fromEntries(Object.entries(process.env).filter(([key])=>!['YSD_NODE_AGENT_KEY','YSD_NODE_PAIRING_CODE'].includes(key)));childEnv.YSD_NODE_AGENT_HOME=install.agentHome;
 let controlled=false,child=null;for(const signal of ['SIGINT','SIGTERM'])process.on(signal,()=>{controlled=true;try{child?.kill(signal);}catch{}});
 const sleep=(milliseconds)=>new Promise((resolve)=>setTimeout(resolve,milliseconds));
-const publish=async(patch)=>{status={...status,...patch};await atomic(statusPath,status);};
+// Agent 0.6.0 validates this file by exact key set and a node can be
+// returned to it at any time, so only the Phase 19 keys are ever written.
+// The upgrade transaction lives in the install file, which 0.6.0 never reads.
+const publish=async(patch)=>{status=legacyStatus({...status,...patch});await atomic(statusPath,status);};
 while(!controlled){
 try{install=await loadInstall();}catch{await queueLog(logDirectory,'launcher validation failed\\n');await publish({state:'registration_invalid',lastExitAt:Date.now()});break;}
 let plan=upgradeOf(install);
-if(plan.state==='rollback_pending'){const reason=plan.reason||'candidate_start_failed';const failed=plan.candidate;install=rollback(install,reason,Date.now());await atomic(installPath,install);if(failed){const directory=path.dirname(failed.releasePath);if(path.dirname(directory)===releaseRoot)await rm(directory,{recursive:true,force:true});}await queueLog(logDirectory,'previous Agent restored version='+install.agentVersion+'\\n');plan=upgradeOf(install);await publish({agentVersion:install.agentVersion,upgrade:{state:'upgrade_rolled_back',reason,transactionId:plan.transactionId,candidateVersion:failed?failed.version:null}});}
+if(plan.state==='rollback_pending'){const reason=plan.reason||'candidate_start_failed';const failed=plan.candidate;install=rollback(install,reason,Date.now());await atomic(installPath,install);if(failed){const directory=path.dirname(failed.releasePath);if(path.dirname(directory)===releaseRoot)await rm(directory,{recursive:true,force:true});}await queueLog(logDirectory,'previous Agent restored version='+install.agentVersion+'\\n');plan=upgradeOf(install);await publish({agentVersion:install.agentVersion});}
 const selection=select(install);
-if(!selection){await publish({state:plan.reason==='credential_invalid'?'credential_key_unavailable':'authorization_rejected',lastExitAt:Date.now(),upgrade:{state:'upgrade_blocked',reason:plan.reason,transactionId:plan.transactionId,candidateVersion:plan.candidate?plan.candidate.version:null}});break;}
+if(!selection){await publish({state:plan.reason==='credential_invalid'?'credential_key_unavailable':'authorization_rejected',lastExitAt:Date.now()});break;}
 let nodeInfo=null;try{nodeInfo=await stat(install.nodeExecutable);}catch{}
 if(!nodeInfo||!nodeInfo.isFile()){await publish({state:'node_runtime_missing',lastExitAt:Date.now()});break;}
 let bytes=null;try{bytes=await readFile(selection.release.releasePath);}catch{}
 const mismatch=bytes!==null&&hash(bytes)!==selection.release.releaseHash;
-if(bytes===null||mismatch){if(selection.trial){const reason=mismatch?'candidate_hash_mismatch':'candidate_unreadable';install=rollback(install,reason,Date.now());await atomic(installPath,install);await queueLog(logDirectory,'candidate failed reason='+reason+'\\n');await publish({upgrade:{state:'upgrade_rolled_back',reason,transactionId:plan.transactionId,candidateVersion:selection.release.version}});continue;}await publish({state:bytes===null?'agent_missing':'registration_invalid',lastExitAt:Date.now()});break;}
+if(bytes===null||mismatch){if(selection.trial){const reason=mismatch?'candidate_hash_mismatch':'candidate_unreadable';install=rollback(install,reason,Date.now());await atomic(installPath,install);await queueLog(logDirectory,'candidate failed reason='+reason+'\\n');continue;}await publish({state:bytes===null?'agent_missing':'registration_invalid',lastExitAt:Date.now()});break;}
 const now=Date.now();
 const failures=(Array.isArray(status.crashFailures)?status.crashFailures:[]).filter((time)=>Number.isSafeInteger(time)&&time>=now-WINDOW&&time<=now);
 if(!selection.trial&&failures.length>=LIMIT){await publish({state:'restart_limited',restartCount:failures.length,crashFailures:failures});break;}
 let args=[selection.release.releasePath,'run','--url',install.origin,'--config',install.credentialPath];
 const startPatch={state:'starting',lastStartAt:now,agentVersion:selection.release.version,restartCount:failures.length,crashFailures:failures};
-if(selection.trial){install={...install,upgrade:{...plan,attempts:plan.attempts+1,updatedAt:now},updatedAt:now};await atomic(installPath,install);plan=upgradeOf(install);await rm(readinessPath,{force:true});args=args.concat(['--managed-trial',plan.transactionId,'--managed-generation',String(plan.generation)]);await queueLog(logDirectory,'candidate trial started version='+selection.release.version+' attempt='+plan.attempts+'\\n');startPatch.upgrade={state:'upgrade_trial',reason:null,transactionId:plan.transactionId,candidateVersion:selection.release.version};}
+if(selection.trial){install={...install,upgrade:{...plan,attempts:plan.attempts+1,updatedAt:now},updatedAt:now};await atomic(installPath,install);plan=upgradeOf(install);await rm(readinessPath,{force:true});args=args.concat(['--managed-trial',plan.transactionId,'--managed-generation',String(plan.generation)]);await queueLog(logDirectory,'candidate trial started version='+selection.release.version+' attempt='+plan.attempts+'\\n');}
 await publish(startPatch);
 let promoted=false,watch=null;
 const outcome=await new Promise((resolve)=>{
@@ -117,8 +123,8 @@ child=spawn(install.nodeExecutable,args,{cwd:install.workingDirectory,shell:fals
 child.stdout.on('data',(chunk)=>void queueLog(logDirectory,String(chunk)));
 child.stderr.on('data',(chunk)=>void queueLog(logDirectory,String(chunk)));
 if(selection.trial){const started=Date.now();let noticed=false;watch=setInterval(()=>{void (async()=>{if(promoted)return;let marker=null;try{marker=JSON.parse(await readFile(readinessPath,'utf8'));}catch{}
-if(markerValid(marker,plan)){promoted=true;if(watch){clearInterval(watch);watch=null;}install=promote(install,Date.now());await atomic(installPath,install);await rm(readinessPath,{force:true});await queueLog(logDirectory,'candidate heartbeat accepted; candidate promoted version='+install.agentVersion+'\\n');status={...status,agentVersion:install.agentVersion,upgrade:{state:'upgrade_succeeded',reason:null,transactionId:plan.transactionId,candidateVersion:install.agentVersion}};await atomic(statusPath,status);}
-else if(!noticed&&Date.now()-started>=NOTICE){noticed=true;status={...status,upgrade:{state:'upgrade_waiting_for_network',reason:'network_unavailable',transactionId:plan.transactionId,candidateVersion:selection.release.version}};await atomic(statusPath,status);}})();},READY_POLL);}
+if(markerValid(marker,plan)){promoted=true;if(watch){clearInterval(watch);watch=null;}install=promote(install,Date.now());await atomic(installPath,install);await rm(readinessPath,{force:true});await queueLog(logDirectory,'candidate heartbeat accepted; candidate promoted version='+install.agentVersion+'\\n');status=legacyStatus({...status,agentVersion:install.agentVersion});await atomic(statusPath,status);}
+else if(!noticed&&Date.now()-started>=NOTICE){noticed=true;install={...install,upgrade:{...upgradeOf(install),reason:'network_unavailable',updatedAt:Date.now()},updatedAt:Date.now()};await atomic(installPath,install);await queueLog(logDirectory,'candidate trial waiting for the control plane\\n');}})();},READY_POLL);}
 let finished=false;
 child.once('error',async()=>{if(finished)return;finished=true;await queueLog(logDirectory,'agent spawn failed\\n');resolve({code:null});});
 child.once('exit',async(code)=>{if(finished)return;finished=true;await logQueue;resolve({code});});});
@@ -128,8 +134,8 @@ await queueLog(logDirectory,'agent exited code='+(Number.isInteger(code)?code:'s
 if(selection.trial&&!promoted){
 const decision=trialOutcome(code,upgradeOf(install).attempts,controlled);
 const candidateVersion=selection.release.version;
-if(decision.action==='block'){install={...install,upgrade:{...upgradeOf(install),state:'blocked',reason:decision.reason,updatedAt:ended},updatedAt:ended};await atomic(installPath,install);await queueLog(logDirectory,'candidate failed reason='+decision.reason+'\\n');await publish({state:decision.reason==='credential_invalid'?'credential_key_unavailable':'authorization_rejected',lastExitAt:ended,upgrade:{state:'upgrade_blocked',reason:decision.reason,transactionId:plan.transactionId,candidateVersion}});break;}
-if(decision.action==='rollback'){install={...install,upgrade:{...upgradeOf(install),state:'rollback_pending',reason:decision.reason,updatedAt:ended},updatedAt:ended};await atomic(installPath,install);const failed=plan.candidate;install=rollback(install,decision.reason,Date.now());await atomic(installPath,install);if(failed){const directory=path.dirname(failed.releasePath);if(path.dirname(directory)===releaseRoot)await rm(directory,{recursive:true,force:true});}await queueLog(logDirectory,'candidate failed reason='+decision.reason+'; previous Agent restored version='+install.agentVersion+'\\n');await publish({state:'stopped',lastExitAt:ended,agentVersion:install.agentVersion,upgrade:{state:'upgrade_rolled_back',reason:decision.reason,transactionId:plan.transactionId,candidateVersion}});await sleep(RETRY_DELAY);continue;}
+if(decision.action==='block'){install={...install,upgrade:{...upgradeOf(install),state:'blocked',reason:decision.reason,updatedAt:ended},updatedAt:ended};await atomic(installPath,install);await queueLog(logDirectory,'candidate failed reason='+decision.reason+'\\n');await publish({state:decision.reason==='credential_invalid'?'credential_key_unavailable':'authorization_rejected',lastExitAt:ended});break;}
+if(decision.action==='rollback'){install={...install,upgrade:{...upgradeOf(install),state:'rollback_pending',reason:decision.reason,updatedAt:ended},updatedAt:ended};await atomic(installPath,install);const failed=plan.candidate;install=rollback(install,decision.reason,Date.now());await atomic(installPath,install);if(failed){const directory=path.dirname(failed.releasePath);if(path.dirname(directory)===releaseRoot)await rm(directory,{recursive:true,force:true});}await queueLog(logDirectory,'candidate failed reason='+decision.reason+'; previous Agent restored version='+install.agentVersion+'\\n');await publish({state:'stopped',lastExitAt:ended,agentVersion:install.agentVersion});await sleep(RETRY_DELAY);continue;}
 if(decision.action==='hold'){await publish({state:code===EXIT.already?'already_running':'stopped',lastExitAt:ended});break;}
 await publish({state:'stopped',lastExitAt:ended});await sleep(RETRY_DELAY);continue;}
 if(code===EXIT.auth){await publish({state:'authorization_rejected',lastExitAt:ended});break;}

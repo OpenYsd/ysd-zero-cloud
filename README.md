@@ -1,7 +1,7 @@
 # YSD Zero Cloud
 
 YSD Zero Cloud is a zero-cost-first cloud operating system. The source tree and Production
-baseline are `0.20.0`, with Compute Node Agent `0.7.0` and Protocol `1`. Production includes
+baseline are `0.20.1`, with Compute Node Agent `0.7.1` and Protocol `1`. Production includes
 authentication, persistence, security scanning, the cost guard, private-object storage policy,
 network inventory, an outbound-only user-owned compute control plane, a private Node.js App
 Runtime, local AI scheduling, private Minecraft Java server orchestration, organization
@@ -302,14 +302,53 @@ running an Agent too old to report the auto-start contract to "Upgrade Agent to 
 that went stale the moment the Agent version moved. Every version the page shows now comes from
 the release constant, and a test fails if a hardcoded one returns.
 
-One rough edge is known and not fixed. `status.json` gained an upgrade projection in `0.7.0`, and
-Agent `0.6.0` validates that file by exact key set, so a node deliberately restored from `0.7.0`
-back to `0.6.0` reports its auto-start as disabled while it is in fact enabled and running under
-Task Scheduler. Nothing stops working — the task, the launcher, the heartbeat and recovery are all
-unaffected — but the badge is wrong until that node returns to `0.7.0`, which corrects it, as does
-`autostart repair`. It cannot occur on a node that has never been upgraded.
+`0.20.1`, Phase 20.1, is the current source and Production release, with Agent `0.7.1`. It is a
+narrow compatibility hotfix for exactly one thing.
 
-**Live:** <https://ysd-zero-cloud.ysd-zero-cloud.workers.dev> — running `0.20.0`, agent `0.7.0`,
+Agent `0.7.0` wrote its upgrade projection into `status.json`. Agent `0.6.0` validates that file by
+comparing its whole key set to a fixed list, so one extra key — even one holding `null` — made it
+reject the file and report auto-start as disabled while Task Scheduler had it enabled. The old
+Agent's bytes are frozen, so the fix belongs on the newer side: `status.json` is the Phase 19
+contract and Agent `0.7.1` writes nothing else into it. The upgrade transaction was already in the
+install file, which `0.6.0` never reads, and the one runtime observation that had no home there —
+a candidate that is alive but has not reached the control plane — is now recorded on the
+transaction itself. A file left behind by `0.7.0` is still read, so a node upgraded by it keeps its
+crash-budget history, and `restore-previous` rewrites that file in the old shape *before* handing
+over, failing rather than switching if it cannot.
+
+The reproduction and the proof both run the real `0.6.0` parser, read out of the Phase 19 commit
+rather than copied by hand, and the retained `0.6.0` artifact is untouched at
+`8829435c…17dc9`.
+
+While proving it, one further inaccuracy surfaced and is fixed: the auto-start state in the
+heartbeat came from `status.json` alone, so a deleted scheduled task could still read as enabled.
+It now asks the same question `autostart status` asks — the native manager — cached for a minute so
+a badge does not cost a process spawn every heartbeat.
+
+Production acceptance drove the real path on a controlled Windows node: paired on the frozen
+Agent `0.6.0`, its own `autostart enable` registering a genuine Task Scheduler logon task, upgraded
+to `0.7.1`, then restored to the exact retained `0.6.0` and upgraded back. Throughout every sampled
+generation, `status.json` held exactly the eleven Phase 19 keys and never the `upgrade` key. The
+restored `0.6.0` was checked with its *own* parser, read out of the Phase 19 commit: it accepted the
+live file and reported auto-start enabled, the control plane agreed, and the Nodes page showed
+"Agent 0.6.0 · Update available: 0.7.1 · Auto-start Enabled" — where before the fix it said
+Disabled while the task was running. The scheduled task's canonical configuration was byte-identical
+before, during and after. Both upgrades kept the Phase 20 promotion invariant: the authoritative
+release stayed `0.6.0` until an accepted signed heartbeat existed.
+
+Manager truth was checked in both directions on the same node: with the task registered the
+capability reported enabled, and with the registration removed it reported disabled rather than
+inheriting a stale "enabled" from a file.
+
+**One thing this hotfix does not fix, stated plainly.** Agent `0.6.0` validates `install.json` by
+exact key set too, and Phase 20 added three keys to it. Those cannot be given back — `previousRelease`
+is the exact release a rollback restores, and dropping it would discard the protection the rollback
+depends on. So a node restored to `0.6.0` runs, heartbeats, recovers applications and reports its
+auto-start truthfully, but `0.6.0`'s own `autostart status`, `disable` and `uninstall` cannot manage
+a Phase 20 install. Use the `0.7.1` or newer bundle for managed operations after a restore, or
+upgrade back first. This is not full `0.6.0` CLI compatibility and is not claimed as such.
+
+**Live:** <https://ysd-zero-cloud.ysd-zero-cloud.workers.dev> — running `0.20.1`, agent `0.7.1`,
 Protocol `1`.
 
 This is a standalone project intended only for `OpenYsd/ysd-zero-cloud`. It has no dependency on,
