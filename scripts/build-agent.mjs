@@ -67,6 +67,11 @@ if (nonBuiltin.length > 0) {
 }
 
 for (const [label, pattern] of [
+  // Phase 20 needs an Agent that fails its managed trial on purpose so the
+  // automatic rollback can be proved end to end. That fixture lives under
+  // tests/ and is built by the harness, never by this script -- but a marker
+  // check costs nothing and turns "we were careful" into "it cannot happen".
+  ['the YSD_TEST_ONLY_FAILING_AGENT fixture marker', /YSD_TEST_ONLY_FAILING_AGENT/],
   ['a require() call', /\brequire\s*\(/],
   ['an absolute Windows build path', /[A-Za-z]:\\\\?Users/],
   ['an absolute POSIX build path', /\/(?:home|Users)\/[A-Za-z0-9_.-]+\//],

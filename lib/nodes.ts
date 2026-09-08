@@ -40,7 +40,14 @@ export const NODE_PROTOCOL_VERSION = 1;
 // auto-start, bounded headless diagnostics, and duplicate-Agent ownership.
 // The heartbeat extension is optional and Protocol 1 remains unchanged, so
 // 0.5.0 stays valid for every capability it already supports.
-export const CURRENT_AGENT_VERSION = '0.6.0';
+// 0.7.0 adds a user-initiated managed upgrade: a staged candidate, a
+// trial supervised by the managed launcher, promotion only after this
+// control plane accepts a signed heartbeat, and rollback to the exact
+// recorded previous release. All of it is local. The heartbeat gains
+// nothing mandatory and Protocol 1 is unchanged, so 0.6.0 keeps working
+// against this control plane and 0.7.0 keeps working against the
+// previous one.
+export const CURRENT_AGENT_VERSION = '0.7.0';
 export const MINIMUM_AGENT_VERSION = '0.3.0';
 
 export const NODE_TIMING = {
@@ -819,6 +826,45 @@ export function compareVersions(left: string, right: string): number {
   for (let index = 0; index < 3; index += 1) {
     const difference = (a[index] || 0) - (b[index] || 0);
     if (difference !== 0) return Math.sign(difference);
+  }
+  return 0;
+}
+
+/**
+ * Parses a release version for the managed Agent upgrade policy.
+ *
+ * Deliberately stricter than {@link compareVersions}, which exists to gate a
+ * heartbeat and is forgiving on purpose: it drops a prerelease suffix and reads
+ * an unparsable part as zero. That is the right shape for "is this node too old
+ * to talk to", and the wrong shape for "should this machine replace the binary
+ * it boots". Under the lenient rule `abc` compares equal to `0.0.0`, so a
+ * malformed candidate would read as an ancient version -- and a malformed
+ * *current* would make almost anything look like an upgrade.
+ *
+ * So: MAJOR.MINOR.PATCH, decimal, no `v`, no leading zeros, no prerelease, no
+ * build metadata, no surrounding space, and each part bounded well below the
+ * point where integer parsing stops being exact. Anything else is `null`, and
+ * every caller has to decide what to do about that rather than inheriting a
+ * zero.
+ */
+export function parseStrictVersion(value: unknown): [number, number, number] | null {
+  if (typeof value !== 'string') return null;
+  const match = /^(0|[1-9]\d{0,5})\.(0|[1-9]\d{0,5})\.(0|[1-9]\d{0,5})$/u.exec(value);
+  if (!match) return null;
+  return [Number(match[1]), Number(match[2]), Number(match[3])];
+}
+
+export function isStrictVersion(value: unknown): value is string {
+  return parseStrictVersion(value) !== null;
+}
+
+/** Orders two strict versions, or `null` when either side is not one. */
+export function compareStrictVersions(left: unknown, right: unknown): number | null {
+  const a = parseStrictVersion(left);
+  const b = parseStrictVersion(right);
+  if (!a || !b) return null;
+  for (let index = 0; index < 3; index += 1) {
+    if (a[index] !== b[index]) return a[index] > b[index] ? 1 : -1;
   }
   return 0;
 }

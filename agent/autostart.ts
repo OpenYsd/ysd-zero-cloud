@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   appendFile,
   chmod,
@@ -12,53 +12,61 @@ import {
   rename,
   rm,
   stat,
+  statfs,
   writeFile,
 } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 
 import { loadCredentials } from './credentials.ts';
 import { agentHomeDirectory } from './agent-key.ts';
 import {
   CURRENT_AGENT_VERSION,
   NODE_PROTOCOL_VERSION,
+  isStrictVersion,
   type AutostartCapability,
 } from '../lib/nodes.ts';
+import {
+  AUTOSTART_CRASH_LIMIT,
+  AUTOSTART_CRASH_WINDOW_MS,
+  AUTOSTART_LOG_FILES,
+  AUTOSTART_LOG_MAX_BYTES,
+  MANAGERS,
+  MANAGED_INSTALL_SCHEMA,
+  MANAGED_RELEASE_TRANSACTION_LIMIT,
+  STATES,
+  UPGRADE_MINIMUM_FREE_BYTES,
+  beginTrial,
+  buildReadinessMarker,
+  currentRelease,
+  deriveManagedIdentity,
+  evaluateRestoreTarget,
+  evaluateUpgradeCandidate,
+  idleUpgrade,
+  isManagedRelease,
+  projectUpgradeStatus,
+  resetTransaction,
+  stageTransaction,
+  upgradeOf,
+  validateManagedUpgrade,
+  validateUpgradeStatus,
+  type AutostartManager,
+  type AutostartState,
+  type ManagedRelease,
+  type ManagedUpgrade,
+  type UpgradeReason,
+  type UpgradeStatus,
+} from './managed-upgrade.ts';
+import { buildManagedLauncherSource } from './managed-launcher.ts';
+import {
+  acquireMaintenanceOwnership,
+  agentOwnershipHeld,
+  requestManagedUpgradeShutdown,
+} from './instance-lock.ts';
 
-export const AUTOSTART_CRASH_LIMIT = 3;
-export const AUTOSTART_CRASH_WINDOW_MS = 10 * 60_000;
-export const AUTOSTART_RESTART_DELAY_MS = 2_000;
-export const AUTOSTART_LOG_FILES = 4;
-export const AUTOSTART_LOG_MAX_BYTES = 256 * 1024;
-
-export const AGENT_EXIT = {
-  clean: 0,
-  alreadyRunning: 20,
-  authorizationRejected: 21,
-  credentialInvalid: 22,
-  unsupportedRuntime: 23,
-  controlledShutdown: 24,
-} as const;
-
-export type AutostartManager =
-  | 'windows-task-scheduler'
-  | 'systemd-user'
-  | 'launchagent';
-
-export type AutostartState =
-  | 'enabled'
-  | 'disabled'
-  | 'manager_missing'
-  | 'agent_missing'
-  | 'node_runtime_missing'
-  | 'registration_invalid'
-  | 'upgrade_required'
-  | 'credential_key_unavailable'
-  | 'restart_limited'
-  | 'authorization_rejected'
-  | 'already_running'
-  | 'stopped'
-  | 'starting';
+export * from './managed-upgrade.ts';
+export { buildManagedLauncherSource } from './managed-launcher.ts';
 
 export type ManagedLayout = {
   instanceId: string;
@@ -69,15 +77,27 @@ export type ManagedLayout = {
   launcherPath: string;
   installPath: string;
   statusPath: string;
+  readinessPath: string;
   logDirectory: string;
 };
 
 export type ManagedInstall = {
+  /**
+   * Stays `1`. This is the shape the Phase 19 launcher validates, and a
+   * launcher that refuses the file cannot start the Agent that is already
+   * working. Phase 20 adds fields instead of changing this number, and marks
+   * the revision with `installSchema` for anything that wants to know.
+   */
   version: 1;
+  installSchema?: typeof MANAGED_INSTALL_SCHEMA;
   instanceId: string;
   agentVersion: string;
   protocolVersion: number;
   previousVersion: string | null;
+  /** The exact Agent to restore to: version, path and hash, all verified. */
+  previousRelease?: ManagedRelease | null;
+  /** The in-flight upgrade transaction, if any. Absent means idle. */
+  upgrade?: ManagedUpgrade | null;
   nodeExecutable: string;
   releasePath: string;
   releaseHash: string;
@@ -106,6 +126,12 @@ export type ManagedStatus = {
   restartCount: number;
   registrationFingerprint: string | null;
   crashFailures: number[];
+  /**
+   * A read-only projection of the transaction for headless observation. The
+   * managed install file is the only authority; this exists so a person
+   * reading `status.json` over SSH can see what the launcher is doing.
+   */
+  upgrade?: UpgradeStatus | null;
 };
 
 type ManagerInput = {
@@ -119,28 +145,6 @@ type ManagerInput = {
   userName: string;
 };
 
-const MANAGERS = [
-  'windows-task-scheduler',
-  'systemd-user',
-  'launchagent',
-] as const;
-
-const STATES = [
-  'enabled',
-  'disabled',
-  'manager_missing',
-  'agent_missing',
-  'node_runtime_missing',
-  'registration_invalid',
-  'upgrade_required',
-  'credential_key_unavailable',
-  'restart_limited',
-  'authorization_rejected',
-  'already_running',
-  'stopped',
-  'starting',
-] as const;
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -151,18 +155,6 @@ function sha256Bytes(value: string | Buffer): string {
 
 async function hashFile(file: string): Promise<string> {
   return sha256Bytes(await readFile(file));
-}
-
-function canonicalCredentialPath(value: string): string {
-  const absolute = path.resolve(value);
-  return process.platform === 'win32' ? absolute.toLowerCase() : absolute;
-}
-
-export async function deriveManagedIdentity(
-  credentialPath: string,
-  nodeId: string,
-): Promise<string> {
-  return sha256Bytes(`${canonicalCredentialPath(credentialPath)}\0${nodeId}`).slice(0, 16);
 }
 
 export async function managedLayout(
@@ -181,6 +173,7 @@ export async function managedLayout(
     launcherPath: path.join(managedRoot, 'launcher.mjs'),
     installPath: path.join(managedRoot, 'install.json'),
     statusPath: path.join(managedRoot, 'status.json'),
+    readinessPath: path.join(managedRoot, 'readiness.json'),
     logDirectory: path.join(managedRoot, 'logs'),
   };
 }
@@ -372,7 +365,11 @@ export function validateManagedStatus(value: unknown): ManagedStatus | null {
     'agentVersion', 'crashFailures', 'enabled', 'lastExitAt', 'lastStartAt',
     'manager', 'registrationFingerprint', 'restartCount', 'scope', 'state', 'version',
   ];
-  if (Object.keys(value).sort().join('\0') !== expected.sort().join('\0')) return null;
+  // `upgrade` is optional so a status file written by a Phase 19 launcher, and
+  // one written by a Phase 20 launcher, are both readable here.
+  const required = Object.keys(value).filter((key) => key !== 'upgrade');
+  if (required.sort().join('\0') !== expected.sort().join('\0')) return null;
+  if (value.upgrade !== undefined && value.upgrade !== null && !validateUpgradeStatus(value.upgrade)) return null;
   if (
     value.version !== 1 ||
     typeof value.enabled !== 'boolean' ||
@@ -398,7 +395,12 @@ export function validateManagedInstall(value: unknown): ManagedInstall | null {
     'protocolVersion', 'registrationFingerprint', 'registrationId', 'releaseHash',
     'releasePath', 'scope', 'updatedAt', 'version', 'workingDirectory',
   ];
-  if (Object.keys(value).sort().join('\0') !== expected.sort().join('\0')) return null;
+  const optional = new Set(['installSchema', 'previousRelease', 'upgrade']);
+  const required = Object.keys(value).filter((key) => !optional.has(key));
+  if (required.sort().join('\0') !== expected.sort().join('\0')) return null;
+  if (value.installSchema !== undefined && value.installSchema !== MANAGED_INSTALL_SCHEMA) return null;
+  if (value.previousRelease !== undefined && value.previousRelease !== null && !isManagedRelease(value.previousRelease)) return null;
+  if (value.upgrade !== undefined && value.upgrade !== null && !validateManagedUpgrade(value.upgrade)) return null;
   if (
     value.version !== 1 ||
     typeof value.instanceId !== 'string' || !/^[a-f0-9]{16}$/u.test(value.instanceId) ||
@@ -457,22 +459,53 @@ export async function appendManagedLog(logDirectory: string, message: string): P
   await appendFile(current, safe, { encoding: 'utf8', mode: 0o600 });
 }
 
-async function runFile(file: string, arguments_: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
+/**
+ * The absolute path to a Windows system tool.
+ *
+ * Never the bare name: `spawn` without a shell searches the working directory
+ * and then PATH, so whichever `schtasks.exe` appears first there would be the
+ * one that registers this machine's auto-start. These are always the ones in
+ * System32.
+ */
+function systemExecutable(name: string): string {
+  if (process.platform !== 'win32') return name;
+  const root = process.env.SystemRoot ?? process.env.windir ?? 'C:\\Windows';
+  return path.join(root, 'System32', name);
+}
+
+async function runFile(
+  file: string,
+  arguments_: string[],
+  options: { cwd?: string; env?: NodeJS.ProcessEnv; timeoutMs?: number } = {},
+): Promise<{ code: number; stdout: string; stderr: string }> {
   return await new Promise((resolve, reject) => {
-    const child = spawn(file, arguments_, { shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(file, arguments_, {
+      shell: false,
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      ...(options.cwd ? { cwd: options.cwd } : {}),
+      ...(options.env ? { env: options.env } : {}),
+    });
     let stdout = '';
     let stderr = '';
+    const timer = options.timeoutMs
+      ? setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* Already gone. */ } }, options.timeoutMs)
+      : null;
+    const settle = (value: { code: number; stdout: string; stderr: string }) => {
+      if (timer) clearTimeout(timer);
+      resolve(value);
+    };
     child.stdout.setEncoding('utf8');
     child.stderr.setEncoding('utf8');
-    child.stdout.on('data', (chunk: string) => { stdout += chunk; });
-    child.stderr.on('data', (chunk: string) => { stderr += chunk; });
-    child.once('error', reject);
-    child.once('exit', (code) => resolve({ code: code ?? 1, stdout, stderr }));
+    child.stdout.on('data', (chunk: string) => { stdout += chunk.slice(0, 4096); });
+    child.stderr.on('data', (chunk: string) => { stderr += chunk.slice(0, 4096); });
+    child.once('error', (error) => { if (timer) clearTimeout(timer); reject(error); });
+    child.once('exit', (code) => settle({ code: code ?? 1, stdout, stderr }));
   });
 }
 
 async function currentWindowsIdentity(): Promise<{ sid: string; name: string }> {
-  const result = await runFile('whoami.exe', ['/user', '/fo', 'csv', '/nh']);
+  const result = await runFile(systemExecutable('whoami.exe'), ['/user', '/fo', 'csv', '/nh']);
   if (result.code !== 0) throw new Error('Could not resolve the current Windows identity.');
   const match = result.stdout.match(/^"([^"]+)","(S-\d(?:-\d+)+)"\s*$/mu);
   if (!match) throw new Error('Could not parse the current Windows identity.');
@@ -499,7 +532,7 @@ async function registerWindows(rendered: ReturnType<typeof renderWindowsTask>): 
   const taskFile = path.join(directory, 'task.xml');
   try {
     await writeFile(taskFile, `\uFEFF${rendered.xml}`, { encoding: 'utf16le', flag: 'wx', mode: 0o600 });
-    const result = await runFile('schtasks.exe', ['/Create', '/TN', rendered.id, '/XML', taskFile, '/F']);
+    const result = await runFile(systemExecutable('schtasks.exe'), ['/Create', '/TN', rendered.id, '/XML', taskFile, '/F']);
     if (result.code !== 0) throw new Error(`Task Scheduler registration failed (${result.code}).`);
   } finally {
     await rm(directory, { recursive: true, force: true });
@@ -507,7 +540,7 @@ async function registerWindows(rendered: ReturnType<typeof renderWindowsTask>): 
 }
 
 async function windowsTaskXml(id: string): Promise<string | null> {
-  const result = await runFile('schtasks.exe', ['/Query', '/TN', id, '/XML']);
+  const result = await runFile(systemExecutable('schtasks.exe'), ['/Query', '/TN', id, '/XML']);
   return result.code === 0 ? result.stdout : null;
 }
 
@@ -570,38 +603,6 @@ async function registerLaunchAgent(input: ManagerInput, plist: string): Promise<
   return file;
 }
 
-export function buildManagedLauncherSource(): string {
-  // Kept self-contained: the installed launcher must run without this repository.
-  return `import { spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
-import { appendFile, mkdir, open, readFile, rename, rm, stat } from 'node:fs/promises';
-import path from 'node:path';
-const MAX=${AUTOSTART_LOG_MAX_BYTES}, FILES=${AUTOSTART_LOG_FILES}, LIMIT=${AUTOSTART_CRASH_LIMIT}, WINDOW=${AUTOSTART_CRASH_WINDOW_MS}, RETRY_DELAY=${AUTOSTART_RESTART_DELAY_MS};
-const terminal=new Set([${AGENT_EXIT.alreadyRunning},${AGENT_EXIT.authorizationRejected},${AGENT_EXIT.credentialInvalid},${AGENT_EXIT.unsupportedRuntime},${AGENT_EXIT.controlledShutdown}]);
-const hash=(value)=>createHash('sha256').update(value).digest('hex');
-const redact=(value)=>value.replace(/\\bAuthorization\\s*:\\s*[^\\r\\n]+/giu,'Authorization: [REDACTED]').replace(/\\b(cookie|session)\\s*[=:]\\s*[^\\s;]+/giu,'$1=[REDACTED]').replace(/\\bYSD_NODE_AGENT_KEY\\s*=\\s*[^\\s]+/giu,'YSD_NODE_AGENT_KEY=[REDACTED]').replace(/\\bysdp_[A-Za-z0-9_-]{16,}/gu,'[REDACTED]').replace(/\\bnode_[A-Za-z0-9_.-]{20,}/gu,'[REDACTED]');
-const bounded=(value)=>{const bytes=Buffer.from(value);if(bytes.length<=MAX)return value;let start=bytes.length-MAX;while(start<bytes.length&&(bytes[start]&0xc0)===0x80)start++;return bytes.subarray(start).toString('utf8');};
-const states=new Set(['enabled','disabled','manager_missing','agent_missing','node_runtime_missing','registration_invalid','upgrade_required','credential_key_unavailable','restart_limited','authorization_rejected','already_running','stopped','starting']);
-const managers=new Set(['windows-task-scheduler','systemd-user','launchagent']);
-const absolute=(value)=>typeof value==='string'&&path.isAbsolute(value)&&!/[\\u0000\\r\\n]/u.test(value);
-const validInstall=(value)=>value&&value.version===1&&/^[a-f0-9]{16}$/u.test(value.instanceId)&&typeof value.agentVersion==='string'&&value.protocolVersion===${NODE_PROTOCOL_VERSION}&&managers.has(value.manager)&&value.scope==='user-session'&&absolute(value.nodeExecutable)&&absolute(value.releasePath)&&absolute(value.launcherPath)&&absolute(value.credentialPath)&&absolute(value.agentHome)&&absolute(value.workingDirectory)&&/^[a-f0-9]{64}$/u.test(value.releaseHash)&&/^[a-f0-9]{64}$/u.test(value.launcherHash)&&/^[a-f0-9]{64}$/u.test(value.registrationFingerprint)&&typeof value.origin==='string';
-const validStatus=(value)=>value&&value.version===1&&typeof value.enabled==='boolean'&&managers.has(value.manager)&&value.scope==='user-session'&&states.has(value.state)&&typeof value.agentVersion==='string'&&(value.lastStartAt===null||Number.isSafeInteger(value.lastStartAt))&&(value.lastExitAt===null||Number.isSafeInteger(value.lastExitAt))&&Number.isSafeInteger(value.restartCount)&&value.restartCount>=0&&value.restartCount<=LIMIT&&(value.registrationFingerprint===null||/^[a-f0-9]{64}$/u.test(value.registrationFingerprint))&&Array.isArray(value.crashFailures)&&value.crashFailures.length<=LIMIT&&value.crashFailures.every((entry)=>Number.isSafeInteger(entry)&&entry>=0);
-const atomic=async(file,value)=>{const temporary=path.join(path.dirname(file),'.'+path.basename(file)+'.'+process.pid+'.tmp');const handle=await open(temporary,'wx',0o600);try{await handle.writeFile(JSON.stringify(value)+'\\n','utf8');await handle.sync();}finally{await handle.close();}await rename(temporary,file);};
-const log=async(directory,value)=>{await mkdir(directory,{recursive:true,mode:0o700});const safe=bounded(redact(value)),current=path.join(directory,'agent.log');let size=0;try{size=(await stat(current)).size;}catch{}if(size+Buffer.byteLength(safe)>MAX){await rm(path.join(directory,'agent.'+(FILES-1)+'.log'),{force:true});for(let index=FILES-2;index>=1;index--)try{await rename(path.join(directory,'agent.'+index+'.log'),path.join(directory,'agent.'+(index+1)+'.log'));}catch{}try{await rename(current,path.join(directory,'agent.1.log'));}catch{}}await appendFile(current,safe,{encoding:'utf8',mode:0o600});};
-let logQueue=Promise.resolve();const queueLog=(directory,value)=>{logQueue=logQueue.then(()=>log(directory,value)).catch(()=>{});return logQueue;};
-const installPath=process.argv[process.argv.indexOf('--install')+1];
-if(!installPath||!path.isAbsolute(installPath)) process.exit(${AGENT_EXIT.credentialInvalid});
-const root=path.dirname(installPath), statusPath=path.join(root,'status.json'), logDirectory=path.join(root,'logs');
-let install,status;
-try{install=JSON.parse(await readFile(installPath,'utf8'));if(!validInstall(install))throw new Error('install_invalid');try{status=JSON.parse(await readFile(statusPath,'utf8'));}catch{}if(!validStatus(status))status={version:1,enabled:true,manager:install.manager,scope:'user-session',state:'starting',agentVersion:install.agentVersion,lastStartAt:null,lastExitAt:null,restartCount:0,registrationFingerprint:install.registrationFingerprint,crashFailures:[]};let nodeInfo;try{nodeInfo=await stat(install.nodeExecutable);}catch{throw new Error('node_runtime_missing');}if(!nodeInfo.isFile())throw new Error('node_runtime_missing');let release;try{release=await readFile(install.releasePath);}catch{throw new Error('agent_missing');}if(hash(release)!==install.releaseHash)throw new Error('hash_mismatch');}catch(error){await log(logDirectory,'launcher validation failed\\n');if(install&&managers.has(install.manager)){const reason=String(error?.message),state=reason==='node_runtime_missing'?'node_runtime_missing':reason==='agent_missing'?'agent_missing':'registration_invalid';await atomic(statusPath,{version:1,enabled:true,manager:install.manager,scope:'user-session',state,agentVersion:typeof install.agentVersion==='string'?install.agentVersion:'unknown',lastStartAt:null,lastExitAt:Date.now(),restartCount:0,registrationFingerprint:/^[a-f0-9]{64}$/u.test(install.registrationFingerprint)?install.registrationFingerprint:null,crashFailures:[]});}process.exit(0);}
-const childEnv=Object.fromEntries(Object.entries(process.env).filter(([key])=>!['YSD_NODE_AGENT_KEY','YSD_NODE_PAIRING_CODE'].includes(key)));childEnv.YSD_NODE_AGENT_HOME=install.agentHome;
-let controlled=false,child=null;for(const signal of ['SIGINT','SIGTERM'])process.on(signal,()=>{controlled=true;try{child?.kill(signal);}catch{}});
-const sleep=(milliseconds)=>new Promise((resolve)=>setTimeout(resolve,milliseconds));
-while(!controlled){const now=Date.now(),failures=(Array.isArray(status.crashFailures)?status.crashFailures:[]).filter((time)=>Number.isSafeInteger(time)&&time>=now-WINDOW&&time<=now);if(failures.length>=LIMIT){status={...status,enabled:true,state:'restart_limited',restartCount:failures.length,crashFailures:failures};await atomic(statusPath,status);break;}status={...status,enabled:true,state:'starting',lastStartAt:now,restartCount:failures.length,crashFailures:failures};await atomic(statusPath,status);const outcome=await new Promise((resolve)=>{child=spawn(install.nodeExecutable,[install.releasePath,'run','--url',install.origin,'--config',install.credentialPath],{cwd:install.workingDirectory,shell:false,windowsHide:true,env:childEnv,stdio:['ignore','pipe','pipe']});child.stdout.on('data',(chunk)=>void queueLog(logDirectory,String(chunk)));child.stderr.on('data',(chunk)=>void queueLog(logDirectory,String(chunk)));let finished=false;child.once('error',async()=>{if(finished)return;finished=true;await queueLog(logDirectory,'agent spawn failed\\n');resolve({code:null});});child.once('exit',async(code)=>{if(finished)return;finished=true;await logQueue;resolve({code});});});child=null;const ended=Date.now(),code=outcome.code;await queueLog(logDirectory,'agent exited code='+(Number.isInteger(code)?code:'spawn_error')+'\\n');if(code===${AGENT_EXIT.authorizationRejected}){status={...status,state:'authorization_rejected',lastExitAt:ended};await atomic(statusPath,status);break;}if(code===${AGENT_EXIT.alreadyRunning}){status={...status,state:'already_running',lastExitAt:ended};await atomic(statusPath,status);break;}if(code===0||controlled||terminal.has(code)){status={...status,state:'stopped',lastExitAt:ended};await atomic(statusPath,status);break;}const next=failures.concat(ended).slice(-LIMIT),retry=next.length<LIMIT;status={...status,state:retry?'stopped':'restart_limited',lastExitAt:ended,restartCount:next.length,crashFailures:next};await atomic(statusPath,status);if(!retry)break;await sleep(RETRY_DELAY);}
-process.exit(0);
-`;
-}
-
 async function verifyRegularFile(file: string, label: string): Promise<void> {
   const details = await lstat(file);
   if (!details.isFile() || details.isSymbolicLink()) throw new Error(`${label} must be a regular file.`);
@@ -609,7 +610,7 @@ async function verifyRegularFile(file: string, label: string): Promise<void> {
 
 async function validateWindowsAcl(directory: string): Promise<void> {
   if (process.platform !== 'win32') return;
-  const result = await runFile('icacls.exe', [directory]);
+  const result = await runFile(systemExecutable('icacls.exe'), [directory]);
   if (result.code !== 0) throw new Error('Could not validate the managed directory ACL.');
   for (const line of result.stdout.split(/\r?\n/u)) {
     if (/\\(?:Everyone|Users|Authenticated Users):.*\((?:F|M|W)\)/iu.test(line)) {
@@ -618,11 +619,16 @@ async function validateWindowsAcl(directory: string): Promise<void> {
   }
 }
 
-export async function copyManagedRelease(layout: ManagedLayout, source: string): Promise<{ hash: string; releasePath: string }> {
+export async function copyManagedRelease(
+  layout: ManagedLayout,
+  source: string,
+  version: string = CURRENT_AGENT_VERSION,
+): Promise<{ hash: string; releasePath: string }> {
   await verifyRegularFile(source, 'Agent source');
+  if (!isStrictVersion(version)) throw new Error('candidate_incompatible');
   const hash = await hashFile(source);
-  const directory = path.join(layout.releaseRoot, CURRENT_AGENT_VERSION);
-  const releasePath = path.join(directory, `ysd-node-agent-${CURRENT_AGENT_VERSION}.mjs`);
+  const directory = path.join(layout.releaseRoot, version);
+  const releasePath = path.join(directory, `ysd-node-agent-${version}.mjs`);
   await mkdir(directory, { recursive: true, mode: 0o700 });
   try {
     await verifyRegularFile(releasePath, 'Managed Agent release');
@@ -651,12 +657,22 @@ async function cleanupReleases(layout: ManagedLayout, keep: Set<string>): Promis
   }
 }
 
+/**
+ * Keeps current and previous, plus the candidate while one is in flight.
+ *
+ * Three is the ceiling, and it is temporary. Nothing prunes the release a
+ * rollback would need in order to make room for a candidate -- that trade is
+ * exactly backwards, and staging refuses on low disk instead.
+ */
 export async function retainManagedReleases(
   layout: ManagedLayout,
   currentVersion: string,
   previousVersion: string | null,
+  candidateVersion: string | null = null,
 ): Promise<void> {
-  await cleanupReleases(layout, new Set([currentVersion, previousVersion].filter(Boolean) as string[]));
+  const keep = [currentVersion, previousVersion, candidateVersion].filter(Boolean) as string[];
+  if (keep.length > MANAGED_RELEASE_TRANSACTION_LIMIT) throw new Error('retention_overflow');
+  await cleanupReleases(layout, new Set(keep));
 }
 
 async function previousInstall(file: string): Promise<ManagedInstall | null> {
@@ -694,7 +710,27 @@ function initialStatus(manager: AutostartManager, fingerprint: string): ManagedS
     restartCount: 0,
     registrationFingerprint: fingerprint,
     crashFailures: [],
+    upgrade: null,
   };
+}
+
+/**
+ * Serialises every local maintenance action for one node.
+ *
+ * Enable, disable, repair, uninstall, upgrade and restore all rewrite the same
+ * install file and all talk to the same OS registration, so exactly one of them
+ * runs at a time. Other nodes on the same machine are unaffected: the lock is
+ * per managed identity, like everything else here.
+ */
+async function withMaintenanceLock<T>(credentialPath: string, run: () => Promise<T>): Promise<T> {
+  if (process.env.YSD_NODE_AGENT_KEY?.trim()) throw new Error('credential_key_unavailable');
+  const credentials = await loadCredentials(credentialPath);
+  const maintenance = await acquireMaintenanceOwnership(credentialPath, credentials.nodeId);
+  try {
+    return await run();
+  } finally {
+    await maintenance.release();
+  }
 }
 
 export async function enableAutostart(input: {
@@ -702,7 +738,14 @@ export async function enableAutostart(input: {
   origin: string;
   sourcePath?: string;
 }): Promise<ManagedStatus> {
-  if (process.env.YSD_NODE_AGENT_KEY?.trim()) throw new Error('credential_key_unavailable');
+  return await withMaintenanceLock(input.credentialPath, () => installManagedAutostart(input));
+}
+
+async function installManagedAutostart(input: {
+  credentialPath: string;
+  origin: string;
+  sourcePath?: string;
+}): Promise<ManagedStatus> {
   const credentials = await loadCredentials(input.credentialPath);
   if (credentials.origin !== input.origin) throw new Error('The credential belongs to a different origin.');
   const manager = managerForPlatform();
@@ -730,12 +773,28 @@ export async function enableAutostart(input: {
     registrationId = launchLabel(layout.instanceId);
     registrationFingerprint = sha256Bytes(renderLaunchAgent(managerConfig));
   }
+  // Enable and repair are explicit operator actions that re-establish the
+  // install from the bundle in front of them, so any transaction in flight is
+  // abandoned rather than resumed. The quarantine survives: a candidate that
+  // failed is still a candidate that failed.
+  const priorUpgrade = old ? upgradeOf(old) : idleUpgrade();
+  const previousRelease: ManagedRelease | null =
+    old && old.agentVersion !== CURRENT_AGENT_VERSION && isStrictVersion(old.agentVersion)
+      ? currentRelease(old)
+      : old?.previousRelease ?? null;
   const install: ManagedInstall = {
     version: 1,
+    installSchema: MANAGED_INSTALL_SCHEMA,
     instanceId: layout.instanceId,
     agentVersion: CURRENT_AGENT_VERSION,
     protocolVersion: NODE_PROTOCOL_VERSION,
-    previousVersion: old && old.agentVersion !== CURRENT_AGENT_VERSION ? old.agentVersion : old?.previousVersion ?? null,
+    previousVersion: previousRelease?.version ?? null,
+    previousRelease,
+    upgrade: {
+      ...idleUpgrade(Date.now()),
+      generation: priorUpgrade.generation + 1,
+      quarantine: priorUpgrade.quarantine,
+    },
     nodeExecutable: managerConfig.nodeExecutable,
     releasePath: release.releasePath,
     releaseHash: release.hash,
@@ -760,7 +819,7 @@ export async function enableAutostart(input: {
     if (!live || fingerprintWindowsTaskXml(live, managerConfig) !== rendered.fingerprint) {
       throw new Error('registration_invalid');
     }
-    const started = await runFile('schtasks.exe', ['/Run', '/TN', rendered.id]);
+    const started = await runFile(systemExecutable('schtasks.exe'), ['/Run', '/TN', rendered.id]);
     if (started.code !== 0) throw new Error('Task Scheduler could not start the managed Agent.');
   } else if (manager === 'systemd-user') {
     await registerSystemd(managerConfig, renderSystemdUserUnit(managerConfig));
@@ -791,7 +850,8 @@ export async function statusAutostart(credentialPath: string): Promise<ManagedSt
   const { layout, install, status } = await loadContext(credentialPath);
   const manager = managerForPlatform();
   if (!manager) return { ...initialStatus('systemd-user', ''.padStart(64, '0')), enabled: false, state: 'manager_missing', registrationFingerprint: null };
-  const base = status ?? { ...initialStatus(manager, ''.padStart(64, '0')), enabled: false, state: 'disabled', registrationFingerprint: null };
+  const observed = status ?? { ...initialStatus(manager, ''.padStart(64, '0')), enabled: false, state: 'disabled' as const, registrationFingerprint: null };
+  const base: ManagedStatus = { ...observed, upgrade: projectTransaction(install, validateUpgradeStatus(observed.upgrade)) };
   if (!install) return { ...base, enabled: false, state: 'disabled', registrationFingerprint: null };
   try { await verifyRegularFile(install.nodeExecutable, 'Node executable'); } catch { return { ...base, state: 'node_runtime_missing' }; }
   try {
@@ -828,14 +888,18 @@ export async function statusAutostart(credentialPath: string): Promise<ManagedSt
 }
 
 export async function disableAutostart(credentialPath: string, stop = false): Promise<ManagedStatus> {
+  return await withMaintenanceLock(credentialPath, () => removeManagedAutostart(credentialPath, stop));
+}
+
+async function removeManagedAutostart(credentialPath: string, stop: boolean): Promise<ManagedStatus> {
   const { layout, install, status } = await loadContext(credentialPath);
   const manager = install?.manager ?? managerForPlatform() ?? 'systemd-user';
   if (install?.manager === 'windows-task-scheduler') {
     if (stop) {
-      await runFile('schtasks.exe', ['/Change', '/TN', install.registrationId, '/Disable']);
-      await runFile('schtasks.exe', ['/End', '/TN', install.registrationId]);
+      await runFile(systemExecutable('schtasks.exe'), ['/Change', '/TN', install.registrationId, '/Disable']);
+      await runFile(systemExecutable('schtasks.exe'), ['/End', '/TN', install.registrationId]);
     }
-    await runFile('schtasks.exe', ['/Delete', '/TN', install.registrationId, '/F']);
+    await runFile(systemExecutable('schtasks.exe'), ['/Delete', '/TN', install.registrationId, '/F']);
   } else if (install?.manager === 'systemd-user') {
     await runFile('systemctl', ['--user', 'disable', '--now', install.registrationId]);
   } else if (install?.manager === 'launchagent') {
@@ -844,11 +908,18 @@ export async function disableAutostart(credentialPath: string, stop = false): Pr
     const plist = path.join(os.homedir(), 'Library', 'LaunchAgents', `${install.registrationId}.plist`);
     await rm(plist, { force: true });
   }
+  // Turning auto-start off must not leave a transaction that a later launcher
+  // would resume behind the user's back. The candidate bytes stay on disk so
+  // an upgrade can be retried deliberately; only the intent is cleared.
+  if (install && upgradeOf(install).state !== 'idle') {
+    await atomicWrite(layout.installPath, `${JSON.stringify(resetTransaction(install, Date.now()))}\n`);
+  }
   const next: ManagedStatus = {
     ...(status ?? initialStatus(manager, install?.registrationFingerprint ?? ''.padStart(64, '0'))),
     enabled: false,
     state: 'disabled',
     registrationFingerprint: install?.registrationFingerprint ?? null,
+    upgrade: null,
   };
   await atomicWrite(layout.statusPath, `${JSON.stringify(next)}\n`);
   return next;
@@ -862,6 +933,512 @@ export async function uninstallAutostart(credentialPath: string): Promise<void> 
   const { layout } = await loadContext(credentialPath);
   await disableAutostart(credentialPath, true);
   await rm(layout.managedRoot, { recursive: true, force: true });
+}
+
+// ---------------------------------------------------------------------------
+// Phase 20: the local upgrade transaction.
+// ---------------------------------------------------------------------------
+
+/**
+ * Merges what the metadata knows with the one thing only the launcher can see.
+ *
+ * The install file is the authority for which release is current and what the
+ * transaction is doing. It cannot know that a live candidate has been up for
+ * two minutes without reaching the control plane, because that is a runtime
+ * observation -- so exactly that one observation is taken from `status.json`,
+ * and only while it is describing the same transaction.
+ */
+function projectTransaction(
+  install: ManagedInstall | null,
+  observed: UpgradeStatus | null,
+): UpgradeStatus | null {
+  if (!install) return null;
+  const projected = projectUpgradeStatus(upgradeOf(install));
+  if (
+    observed
+    && observed.transactionId === projected.transactionId
+    && observed.state === 'upgrade_waiting_for_network'
+    && projected.state === 'upgrade_trial'
+  ) return observed;
+  return projected;
+}
+
+export type UpgradeOutcome =
+  | 'promoted'
+  | 'rolled_back'
+  | 'blocked'
+  | 'trial'
+  | 'restored'
+  | 'refused';
+
+export type UpgradeResult = {
+  outcome: UpgradeOutcome;
+  reason: UpgradeReason | null;
+  transactionId: string | null;
+  currentVersion: string;
+  previousVersion: string | null;
+  candidateVersion: string | null;
+  handoff: string | null;
+};
+
+/** Free bytes on the volume holding the managed directory, when knowable. */
+async function freeBytes(directory: string): Promise<number | null> {
+  try {
+    const stats = await statfs(directory);
+    return Number(stats.bsize) * Number(stats.bavail);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Asks a candidate bundle what it is.
+ *
+ * `--version` prints two fixed lines and exits; it opens no credential, no
+ * socket and no managed directory. Reading the version from the bundle rather
+ * than assuming the running process's own constant is what makes the answer
+ * true when a bundle is named explicitly, and it doubles as proof that the
+ * candidate can at least start on this machine's Node runtime.
+ */
+async function probeCandidate(
+  nodeExecutable: string,
+  source: string,
+  workingDirectory: string,
+): Promise<{ version: string; protocolVersion: number } | null> {
+  const environment: NodeJS.ProcessEnv = { ...process.env };
+  delete environment.YSD_NODE_AGENT_KEY;
+  delete environment.YSD_NODE_PAIRING_CODE;
+  let result: { code: number; stdout: string };
+  try {
+    result = await runFile(nodeExecutable, [source, '--version'], {
+      cwd: workingDirectory,
+      env: environment,
+      timeoutMs: 30_000,
+    });
+  } catch {
+    return null;
+  }
+  if (result.code !== 0) return null;
+  const version = /^YSD Node Agent (\S+)\s*$/mu.exec(result.stdout)?.[1] ?? '';
+  const protocolVersion = Number(/^Protocol (\d+)\s*$/mu.exec(result.stdout)?.[1] ?? Number.NaN);
+  if (!isStrictVersion(version) || !Number.isSafeInteger(protocolVersion)) return null;
+  return { version, protocolVersion };
+}
+
+/**
+ * Stops the managed Agent through the manager that already owns it.
+ *
+ * This is the manager's own stop verb -- `schtasks /End`, `systemctl --user
+ * stop`, `launchctl kill` -- not a re-registration. The task, unit and plist
+ * are byte-identical before and after.
+ */
+async function stopManagedRegistration(install: ManagedInstall): Promise<void> {
+  if (install.manager === 'windows-task-scheduler') {
+    await runFile(systemExecutable('schtasks.exe'), ['/End', '/TN', install.registrationId]);
+  } else if (install.manager === 'systemd-user') {
+    await runFile('systemctl', ['--user', 'stop', install.registrationId]);
+  } else {
+    const uid = process.getuid?.();
+    if (uid !== undefined) {
+      await runFile('launchctl', ['kill', 'SIGTERM', `gui/${uid}/${install.registrationId}`]);
+    }
+  }
+}
+
+/** Starts the existing registration again. Same command line, same task. */
+async function startManagedRegistration(install: ManagedInstall): Promise<void> {
+  if (install.manager === 'windows-task-scheduler') {
+    const started = await runFile(systemExecutable('schtasks.exe'), ['/Run', '/TN', install.registrationId]);
+    if (started.code !== 0) throw new Error('registration_invalid');
+  } else if (install.manager === 'systemd-user') {
+    const started = await runFile('systemctl', ['--user', 'start', install.registrationId]);
+    if (started.code !== 0) throw new Error('registration_invalid');
+  } else {
+    const uid = process.getuid?.();
+    if (uid === undefined) throw new Error('manager_missing');
+    const started = await runFile('launchctl', ['kickstart', `gui/${uid}/${install.registrationId}`]);
+    if (started.code !== 0) throw new Error('registration_invalid');
+  }
+}
+
+/** Waits until no Agent holds the node identity and the manager is idle. */
+async function waitForManagedIdle(
+  credentialPath: string,
+  nodeId: string,
+  install: ManagedInstall,
+  limitMs = 90_000,
+): Promise<boolean> {
+  const deadline = Date.now() + limitMs;
+  while (Date.now() < deadline) {
+    const held = await agentOwnershipHeld(credentialPath, nodeId);
+    let managerIdle = true;
+    if (install.manager === 'windows-task-scheduler') {
+      const query = await runFile(systemExecutable('schtasks.exe'), ['/Query', '/TN', install.registrationId, '/FO', 'LIST']);
+      managerIdle = query.code === 0 && /^Status:\s+Ready\s*$/mu.test(query.stdout);
+    }
+    if (!held && managerIdle) return true;
+    await delay(500);
+  }
+  return false;
+}
+
+/** Waits for the launcher to finish the trial it was handed. */
+async function awaitTransactionSettled(
+  layout: ManagedLayout,
+  transactionId: string,
+  limitMs: number,
+): Promise<ManagedInstall | null> {
+  const deadline = Date.now() + limitMs;
+  let latest: ManagedInstall | null = null;
+  while (Date.now() < deadline) {
+    latest = await previousInstall(layout.installPath);
+    if (latest) {
+      const plan = upgradeOf(latest);
+      const settled = plan.state === 'idle' || plan.state === 'blocked';
+      if (settled && (plan.transactionId === transactionId || plan.state === 'blocked')) return latest;
+    }
+    await delay(1_000);
+  }
+  return latest;
+}
+
+function describeTransaction(
+  install: ManagedInstall,
+  transactionId: string,
+  candidateVersion: string,
+  handoff: string | null,
+): UpgradeResult {
+  const plan = upgradeOf(install);
+  const quarantined = plan.quarantine.some((entry) => entry.version === candidateVersion);
+  const outcome: UpgradeOutcome =
+    plan.state === 'blocked' ? 'blocked'
+      : install.agentVersion === candidateVersion ? 'promoted'
+        : quarantined ? 'rolled_back'
+          : 'trial';
+  return {
+    outcome,
+    reason: plan.reason,
+    transactionId,
+    currentVersion: install.agentVersion,
+    previousVersion: install.previousRelease?.version ?? install.previousVersion,
+    candidateVersion,
+    handoff,
+  };
+}
+
+/**
+ * Answers the local upgrade handoff verb.
+ *
+ * The running Agent agrees to stand down only for the transaction its own
+ * managed install currently names. That is not an authentication boundary --
+ * see `instance-lock.ts` -- but it does mean a stale or invented transaction
+ * id cannot talk a healthy Agent into stopping.
+ */
+export async function acceptManagedUpgradeRequest(
+  credentialPath: string,
+  nodeId: string,
+  transactionId: string,
+): Promise<boolean> {
+  try {
+    const layout = await managedLayout(credentialPath, nodeId);
+    const install = await previousInstall(layout.installPath);
+    if (!install) return false;
+    const plan = upgradeOf(install);
+    return (
+      plan.transactionId === transactionId
+      && (plan.state === 'trial' || plan.state === 'staged')
+      && plan.candidate !== null
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Records that this Agent's first signed heartbeat was accepted.
+ *
+ * Written only after the control plane answers a signed heartbeat with a
+ * success, because that is the milestone that actually proves the whole chain:
+ * the process started, the credential decrypted, the ownership lock was taken,
+ * the request signed, and the control plane accepted it. Anything earlier --
+ * the process existing, a banner on stdout, surviving five seconds -- proves
+ * only that the file parses.
+ *
+ * The marker carries no token, no node key, no path and no process id. It is a
+ * local, non-secret statement that one transaction reached one milestone.
+ */
+export async function writeReadinessMarker(input: {
+  credentialPath: string;
+  nodeId: string;
+  transactionId: string;
+  generation: number;
+  agentVersion: string;
+}): Promise<void> {
+  const layout = await managedLayout(input.credentialPath, input.nodeId);
+  const marker = buildReadinessMarker(
+    input.transactionId,
+    input.generation,
+    input.agentVersion,
+    Date.now(),
+  );
+  await atomicWrite(layout.readinessPath, `${JSON.stringify(marker)}\n`);
+}
+
+/**
+ * Stages a verified candidate and hands the machine to it for a trial.
+ *
+ * The order is chosen so that every interruption lands somewhere safe:
+ *
+ *   1. verify the candidate completely, while the current Agent keeps running;
+ *   2. copy it into an immutable release directory and re-verify the bytes;
+ *   3. write `staged` -- an interruption here is invisible, because a staged
+ *      transaction still starts the known-good Agent;
+ *   4. install launcher v2 next to the running v1, which never re-reads it;
+ *   5. write `trial` -- the first point at which anything would start the
+ *      candidate, and the top-level release is still the known-good one;
+ *   6. stop the running Agent, wait for the manager to go idle, start the
+ *      same registration again.
+ *
+ * Nothing here downloads anything and nothing here is reachable from the
+ * browser. The candidate is a file already on this machine.
+ */
+export async function upgradeAutostart(input: {
+  credentialPath: string;
+  sourcePath?: string;
+  retry?: boolean;
+  settleMs?: number;
+}): Promise<UpgradeResult> {
+  const credentials = await loadCredentials(input.credentialPath);
+  const layout = await managedLayout(input.credentialPath, credentials.nodeId);
+  const existing = await previousInstall(layout.installPath);
+  if (!existing) throw new Error('autostart_not_enabled');
+
+  const refuse = (reason: UpgradeReason, candidateVersion: string | null = null): UpgradeResult => ({
+    outcome: 'refused',
+    reason,
+    transactionId: null,
+    currentVersion: existing.agentVersion,
+    previousVersion: existing.previousRelease?.version ?? existing.previousVersion,
+    candidateVersion,
+    handoff: null,
+  });
+
+  let locked: Awaited<ReturnType<typeof acquireMaintenanceOwnership>>;
+  try {
+    if (process.env.YSD_NODE_AGENT_KEY?.trim()) throw new Error('credential_key_unavailable');
+    locked = await acquireMaintenanceOwnership(input.credentialPath, credentials.nodeId);
+  } catch (error) {
+    if (error instanceof Error && error.message === 'maintenance_busy') return refuse('maintenance_busy');
+    throw error;
+  }
+
+  try {
+    const install = (await previousInstall(layout.installPath)) ?? existing;
+    await validateWindowsAcl(layout.managedRoot);
+    const source = path.resolve(input.sourcePath ?? process.argv[1] ?? '');
+    await verifyRegularFile(source, 'Agent source');
+
+    // The runtime the launcher will use has to still be there. Finding this
+    // out after the running Agent has been stopped turns a refusal into an
+    // outage, so it is checked before anything is disturbed.
+    try {
+      await verifyRegularFile(install.nodeExecutable, 'Node executable');
+    } catch {
+      return refuse('node_runtime_missing');
+    }
+
+    const probe = await probeCandidate(install.nodeExecutable, source, layout.managedRoot);
+    if (!probe || probe.protocolVersion !== NODE_PROTOCOL_VERSION) return refuse('candidate_incompatible');
+
+    const sourceHash = await hashFile(source);
+    const plan = upgradeOf(install);
+    const decision = evaluateUpgradeCandidate({
+      current: install.agentVersion,
+      candidate: probe.version,
+      candidateHash: sourceHash,
+      quarantine: plan.quarantine,
+      retry: input.retry ?? false,
+    });
+    if (!decision.allowed) return refuse(decision.reason ?? 'candidate_incompatible', probe.version);
+
+    const size = (await stat(source)).size;
+    const free = await freeBytes(layout.managedRoot);
+    if (free !== null && free < size * 3 + UPGRADE_MINIMUM_FREE_BYTES) return refuse('low_disk', probe.version);
+
+    const copied = await copyManagedRelease(layout, source, probe.version);
+    if (copied.hash !== sourceHash) return refuse('candidate_hash_mismatch', probe.version);
+    const candidate: ManagedRelease = {
+      version: probe.version,
+      releasePath: copied.releasePath,
+      releaseHash: copied.hash,
+    };
+    const transactionId = randomUUID().replaceAll('-', '');
+
+    // The migration point: an install first written by Agent 0.6.0 is carried
+    // forward, not rebuilt, so this is where it picks up the revision marker.
+    let next = stageTransaction(
+      { ...install, installSchema: MANAGED_INSTALL_SCHEMA },
+      candidate,
+      transactionId,
+      Date.now(),
+    );
+    await atomicWrite(layout.installPath, `${JSON.stringify(next)}\n`);
+    await retainManagedReleases(
+      layout,
+      next.agentVersion,
+      next.previousRelease?.version ?? next.previousVersion,
+      candidate.version,
+    );
+    await appendManagedLog(
+      layout.logDirectory,
+      `Upgrade staged version=${candidate.version}\nCandidate verified\n`,
+    );
+
+    // Launcher v2 goes down while v1 is still supervising the running Agent.
+    // v1 read its own copy at startup and never looks again, so this cannot
+    // disturb it; the next start by the existing registration picks up v2.
+    const launcher = buildManagedLauncherSource();
+    const launcherHash = sha256Bytes(launcher);
+    if (launcherHash !== next.launcherHash) {
+      await atomicWrite(layout.launcherPath, launcher);
+      next = { ...next, launcherHash, updatedAt: Date.now() };
+    }
+
+    next = beginTrial(next, candidate, transactionId, Date.now());
+    await atomicWrite(layout.installPath, `${JSON.stringify(next)}\n`);
+
+    const handoff = await requestManagedUpgradeShutdown(
+      input.credentialPath,
+      credentials.nodeId,
+      transactionId,
+    );
+    if (handoff !== 'shutting_down') {
+      // Either no Agent is running, or the running one predates the verb --
+      // a managed 0.6.0 answers exactly as it always did. The manager's own
+      // stop is what guarantees the old launcher exits too.
+      await stopManagedRegistration(next);
+    }
+    if (!(await waitForManagedIdle(input.credentialPath, credentials.nodeId, next))) {
+      // Something still owns the node. Starting the candidate now would mean
+      // two Agents, so the transaction steps back to staged and the Agent that
+      // is already running keeps the machine.
+      await atomicWrite(
+        layout.installPath,
+        `${JSON.stringify(stageTransaction(next, candidate, transactionId, Date.now()))}\n`,
+      );
+      return { ...refuse('ownership_conflict', candidate.version), transactionId, handoff };
+    }
+    await appendManagedLog(layout.logDirectory, 'Current Agent stopped for upgrade\n');
+
+    await startManagedRegistration(next);
+    const settled = await awaitTransactionSettled(layout, transactionId, input.settleMs ?? 180_000);
+    return describeTransaction(settled ?? next, transactionId, candidate.version, handoff);
+  } finally {
+    await locked.release();
+  }
+}
+
+/**
+ * Restores the exact Agent recorded as previous.
+ *
+ * Only that one release, verified by hash before anything stops. There is no
+ * version argument and no search of the filesystem, because a downgrade path
+ * that accepts an arbitrary local bundle is a downgrade attack with extra
+ * steps. The launcher stays at v2 -- regenerating it from the older Agent
+ * would remove the transaction support that makes this recoverable at all.
+ */
+export async function restorePreviousAutostart(input: {
+  credentialPath: string;
+}): Promise<UpgradeResult> {
+  const credentials = await loadCredentials(input.credentialPath);
+  const layout = await managedLayout(input.credentialPath, credentials.nodeId);
+  const existing = await previousInstall(layout.installPath);
+  if (!existing) throw new Error('autostart_not_enabled');
+
+  const refuse = (reason: UpgradeReason): UpgradeResult => ({
+    outcome: 'refused',
+    reason,
+    transactionId: null,
+    currentVersion: existing.agentVersion,
+    previousVersion: existing.previousRelease?.version ?? existing.previousVersion,
+    candidateVersion: null,
+    handoff: null,
+  });
+
+  let locked: Awaited<ReturnType<typeof acquireMaintenanceOwnership>>;
+  try {
+    if (process.env.YSD_NODE_AGENT_KEY?.trim()) throw new Error('credential_key_unavailable');
+    locked = await acquireMaintenanceOwnership(input.credentialPath, credentials.nodeId);
+  } catch (error) {
+    if (error instanceof Error && error.message === 'maintenance_busy') return refuse('maintenance_busy');
+    throw error;
+  }
+
+  try {
+    const install = (await previousInstall(layout.installPath)) ?? existing;
+    const previous = install.previousRelease ?? null;
+    let observedHash: string | null = null;
+    if (previous) {
+      try {
+        await verifyRegularFile(previous.releasePath, 'Previous Agent release');
+        observedHash = await hashFile(previous.releasePath);
+      } catch {
+        observedHash = null;
+      }
+    }
+    const decision = evaluateRestoreTarget({
+      current: install.agentVersion,
+      previous,
+      observedHash,
+    });
+    if (!decision.allowed || !previous) return refuse(decision.reason ?? 'previous_missing');
+    try {
+      await verifyRegularFile(install.nodeExecutable, 'Node executable');
+    } catch {
+      return refuse('node_runtime_missing');
+    }
+
+    const now = Date.now();
+    const restored: ManagedInstall = {
+      ...resetTransaction(install, now),
+      installSchema: MANAGED_INSTALL_SCHEMA,
+      agentVersion: previous.version,
+      releasePath: previous.releasePath,
+      releaseHash: previous.releaseHash,
+      previousVersion: install.agentVersion,
+      previousRelease: currentRelease(install),
+      updatedAt: now,
+    };
+    await atomicWrite(layout.installPath, `${JSON.stringify(restored)}\n`);
+
+    const handoff = await requestManagedUpgradeShutdown(
+      input.credentialPath,
+      credentials.nodeId,
+      upgradeOf(restored).transactionId,
+    );
+    if (handoff !== 'shutting_down') await stopManagedRegistration(restored);
+    if (!(await waitForManagedIdle(input.credentialPath, credentials.nodeId, restored))) {
+      await atomicWrite(layout.installPath, `${JSON.stringify(install)}\n`);
+      return { ...refuse('ownership_conflict'), handoff };
+    }
+    await startManagedRegistration(restored);
+    await retainManagedReleases(layout, restored.agentVersion, restored.previousRelease?.version ?? null);
+    await appendManagedLog(
+      layout.logDirectory,
+      `Previous Agent restored version=${restored.agentVersion}\n`,
+    );
+    return {
+      outcome: 'restored',
+      reason: null,
+      transactionId: null,
+      currentVersion: restored.agentVersion,
+      previousVersion: restored.previousRelease?.version ?? null,
+      candidateVersion: null,
+      handoff,
+    };
+  } finally {
+    await locked.release();
+  }
 }
 
 export async function readAutostartCapability(

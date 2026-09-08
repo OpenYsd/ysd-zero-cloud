@@ -26,7 +26,7 @@ import {
   validateManagedStatus,
 } from '../agent/autostart.ts';
 import { acquireAgentOwnership } from '../agent/instance-lock.ts';
-import { parseCapabilities, type NodeCapabilities } from '../lib/nodes.ts';
+import { CURRENT_AGENT_VERSION, parseCapabilities, type NodeCapabilities } from '../lib/nodes.ts';
 
 const safe = {
   instanceId: 'a1b2c3d4e5f60718',
@@ -75,8 +75,11 @@ void test('managed release copy verifies bytes, refuses mutation, and retains cu
       await mkdir(path.join(layout.releaseRoot, version), { recursive: true });
       await writeFile(path.join(layout.releaseRoot, version, 'agent.mjs'), version);
     }
-    await retainManagedReleases(layout, '0.6.0', '0.5.0');
-    assert.deepEqual((await readdir(layout.releaseRoot)).sort(), ['0.5.0', '0.6.0']);
+    await retainManagedReleases(layout, CURRENT_AGENT_VERSION, '0.5.0');
+    assert.deepEqual(
+      (await readdir(layout.releaseRoot)).sort(),
+      ['0.5.0', CURRENT_AGENT_VERSION].sort(),
+    );
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

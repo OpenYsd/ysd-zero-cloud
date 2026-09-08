@@ -24,12 +24,16 @@ import {
 } from './app-runtime.ts';
 import {
   AGENT_EXIT,
+  acceptManagedUpgradeRequest,
   disableAutostart,
   enableAutostart,
   readAutostartCapability,
   repairAutostart,
+  restorePreviousAutostart,
   statusAutostart,
   uninstallAutostart,
+  upgradeAutostart,
+  writeReadinessMarker,
 } from './autostart.ts';
 import { acquireAgentOwnership } from './instance-lock.ts';
 import {
@@ -39,7 +43,18 @@ import {
 } from './runtime.ts';
 
 type Command = 'pair' | 'run' | 'autostart';
-type AutostartAction = 'enable' | 'status' | 'disable' | 'repair' | 'uninstall';
+type AutostartAction =
+  | 'enable'
+  | 'status'
+  | 'disable'
+  | 'repair'
+  | 'uninstall'
+  | 'upgrade'
+  | 'restore-previous';
+
+const AUTOSTART_ACTIONS: AutostartAction[] = [
+  'enable', 'status', 'disable', 'repair', 'uninstall', 'upgrade', 'restore-previous',
+];
 
 type Arguments = {
   command: Command;
@@ -47,6 +62,16 @@ type Arguments = {
   configPath: string;
   autostartAction: AutostartAction | null;
   stop: boolean;
+  retry: boolean;
+  sourcePath: string | null;
+  /**
+   * Set by the managed launcher when this process is a candidate on trial.
+   * Both values are local, non-secret and bounded: a transaction id and its
+   * generation. They exist so the readiness proof this Agent writes can only
+   * satisfy the exact upgrade that asked for it.
+   */
+  managedTrial: string | null;
+  managedGeneration: number;
 };
 
 function argument(name: string): string | null {
@@ -81,12 +106,21 @@ const USAGE = [
   '  node ysd-node-agent-<version>.mjs autostart disable [--config <path>] [--stop]',
   '  node ysd-node-agent-<version>.mjs autostart repair  --url <https://control-plane>',
   '  node ysd-node-agent-<version>.mjs autostart uninstall [--config <path>]',
+  '  node ysd-node-agent-<version>.mjs autostart upgrade [--config <path>] [--retry]',
+  '  node ysd-node-agent-<version>.mjs autostart restore-previous [--config <path>]',
   '',
   'Options:',
   '  --url <origin>     Control plane origin. HTTPS, or HTTP on localhost.',
   '  --config <path>    Credential file. Defaults to a per-user location.',
+  '  --retry            Re-attempt a candidate that already failed a trial.',
+  '  --source <path>    Local Agent bundle to upgrade to. Defaults to this one.',
   '  --version          Print the agent and protocol version.',
   '  --help             Print this message.',
+  '',
+  'The upgrade runs on this machine, from a bundle already on this machine.',
+  'Nothing is downloaded and nothing is started remotely. If the new Agent',
+  'fails during its first managed start, the previous verified Agent is',
+  'restored automatically.',
 ].join(String.fromCharCode(10));
 
 function parseArguments(): Arguments {
@@ -95,13 +129,18 @@ function parseArguments(): Arguments {
     throw new Error(USAGE);
   }
   const action = candidate === 'autostart' ? process.argv[3] : null;
-  if (candidate === 'autostart' && !['enable', 'status', 'disable', 'repair', 'uninstall'].includes(action ?? '')) {
+  if (candidate === 'autostart' && !AUTOSTART_ACTIONS.includes(action as AutostartAction)) {
     throw new Error(USAGE);
   }
   const rawOrigin = argument('--url') ?? process.env.YSD_NODE_URL ?? '';
+  // Upgrade and restore act on an install that already records its origin.
+  // Asking for it again would be one more chance to point a working node at
+  // the wrong control plane.
   const needsOrigin = candidate !== 'autostart' || action === 'enable' || action === 'repair';
   const origin = rawOrigin ? safeOrigin(rawOrigin) : '';
   if (needsOrigin && !origin) throw new Error(USAGE);
+  const trial = argument('--managed-trial');
+  const generation = Number(argument('--managed-generation') ?? Number.NaN);
   return {
     command: candidate,
     origin,
@@ -111,6 +150,13 @@ function parseArguments(): Arguments {
       defaultCredentialPath(),
     autostartAction: action as AutostartAction | null,
     stop: process.argv.includes('--stop'),
+    retry: process.argv.includes('--retry'),
+    sourcePath: argument('--source'),
+    managedTrial:
+      trial && /^[a-f0-9]{32}$/.test(trial) && Number.isSafeInteger(generation) && generation >= 0
+        ? trial
+        : null,
+    managedGeneration: Number.isSafeInteger(generation) && generation >= 0 ? generation : 0,
   };
 }
 
@@ -429,21 +475,40 @@ async function run(arguments_: Arguments): Promise<void> {
   if (credentials.origin !== arguments_.origin) {
     throw new AgentTerminalError('credential_origin_mismatch', AGENT_EXIT.credentialInvalid);
   }
+  const shutdown = new AbortController();
+  let controlledShutdown = false;
+  let upgradeHandoff = false;
+  const onSignal = () => {
+    controlledShutdown = true;
+    shutdown.abort('controlled-shutdown');
+  };
   let ownership: Awaited<ReturnType<typeof acquireAgentOwnership>>;
   try {
-    ownership = await acquireAgentOwnership(arguments_.configPath, credentials.nodeId);
+    ownership = await acquireAgentOwnership(
+      arguments_.configPath,
+      credentials.nodeId,
+      // The only thing another local process may ask this Agent to do: stand
+      // down for the upgrade transaction its own managed install already
+      // names. A stale or invented transaction id is refused, and the answer
+      // is always a clean shutdown -- never "run this".
+      async (transactionId) => {
+        const expected = await acceptManagedUpgradeRequest(
+          arguments_.configPath,
+          credentials.nodeId,
+          transactionId,
+        );
+        if (!expected) return false;
+        upgradeHandoff = true;
+        onSignal();
+        return true;
+      },
+    );
   } catch (error) {
     if (error instanceof Error && error.message === 'already_running') {
       throw new AgentTerminalError('already_running', AGENT_EXIT.alreadyRunning);
     }
     throw new AgentTerminalError('ownership_lock_invalid', AGENT_EXIT.credentialInvalid);
   }
-  const shutdown = new AbortController();
-  let controlledShutdown = false;
-  const onSignal = () => {
-    controlledShutdown = true;
-    shutdown.abort('controlled-shutdown');
-  };
   process.once('SIGINT', onSignal);
   process.once('SIGTERM', onSignal);
   console.log(
@@ -462,6 +527,7 @@ async function run(arguments_: Arguments): Promise<void> {
   );
   let lastHeartbeat = 0;
   let backoff = 2_000;
+  let readinessWritten = false;
   const runtimeGeneration = randomToken(18);
   try {
     while (!shutdown.signal.aborted) {
@@ -480,6 +546,28 @@ async function run(arguments_: Arguments): Promise<void> {
           shutdown.signal,
         );
         lastHeartbeat = Date.now();
+        // Readiness, and only here. Reaching this line means the control
+        // plane answered a signed heartbeat with a success: the process
+        // started, the credential decrypted, ownership was taken, the request
+        // was signed, and the server accepted it. A banner on stdout or a few
+        // seconds of uptime would have proved none of that.
+        if (arguments_.managedTrial && !readinessWritten) {
+          readinessWritten = true;
+          try {
+            await writeReadinessMarker({
+              credentialPath: arguments_.configPath,
+              nodeId: credentials.nodeId,
+              transactionId: arguments_.managedTrial,
+              generation: arguments_.managedGeneration,
+              agentVersion: CURRENT_AGENT_VERSION,
+            });
+          } catch {
+            // A managed trial that cannot record its own readiness will be
+            // rolled back by the launcher. Nothing here should take the
+            // running Agent down over it.
+            readinessWritten = false;
+          }
+        }
       }
       const worked = await poll(
         credentials.origin,
@@ -514,6 +602,12 @@ async function run(arguments_: Arguments): Promise<void> {
     if (controlledShutdown) {
       await shutdownManagedGameServers();
       await shutdownManagedApps();
+    }
+    if (upgradeHandoff) {
+      // A code the Phase 19 launcher already treats as terminal, so the old
+      // launcher exits with this Agent instead of restarting it. That is what
+      // lets the existing OS registration start launcher v2 next.
+      process.exitCode = AGENT_EXIT.controlledShutdown;
     }
   } finally {
     process.off('SIGINT', onSignal);
@@ -559,6 +653,16 @@ try {
   } else if (arguments_.autostartAction === 'uninstall') {
     await uninstallAutostart(arguments_.configPath);
     console.log(JSON.stringify({ state: 'uninstalled' }));
+  } else if (arguments_.autostartAction === 'upgrade') {
+    console.log(JSON.stringify(await upgradeAutostart({
+      credentialPath: arguments_.configPath,
+      retry: arguments_.retry,
+      ...(arguments_.sourcePath ? { sourcePath: arguments_.sourcePath } : {}),
+    })));
+  } else if (arguments_.autostartAction === 'restore-previous') {
+    console.log(JSON.stringify(await restorePreviousAutostart({
+      credentialPath: arguments_.configPath,
+    })));
   }
 } catch (error) {
   if (error instanceof AgentTerminalError) {

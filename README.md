@@ -1,15 +1,15 @@
 # YSD Zero Cloud
 
 YSD Zero Cloud is a zero-cost-first cloud operating system. The source tree and Production
-baseline are `0.19.0`, with Compute Node Agent `0.6.0` and Protocol `1`. Production includes authentication,
-persistence, security scanning, the cost guard, private-object storage policy, network inventory,
-an outbound-only user-owned compute control plane, a private Node.js App Runtime, local AI
-scheduling, private Minecraft Java server orchestration, organization collaboration, and a
-fail-closed Public App Exposure control plane against Cloudflare Workers and D1. It also includes
-the tenant-isolated YSD Workflows engine: immutable published versions, bounded D1 execution,
-internal notifications, audit history, one global free-plan scheduler tick, and a signed inbound
-External Event Gateway with workspace-scoped webhook sources, the Operations Center, and the Data
-Lifecycle & Capacity Guard.
+baseline are `0.20.0`, with Compute Node Agent `0.7.0` and Protocol `1`. Production includes
+authentication, persistence, security scanning, the cost guard, private-object storage policy,
+network inventory, an outbound-only user-owned compute control plane, a private Node.js App
+Runtime, local AI scheduling, private Minecraft Java server orchestration, organization
+collaboration, and a fail-closed Public App Exposure control plane against Cloudflare Workers
+and D1. It also includes the tenant-isolated YSD Workflows engine: immutable published versions,
+bounded D1 execution, internal notifications, audit history, one global free-plan scheduler
+tick, and a signed inbound External Event Gateway with workspace-scoped webhook sources, the
+Operations Center, and the Data Lifecycle & Capacity Guard.
 
 `0.13.2` is the deployed P0 stabilization release. It is **not a new phase**: it adds no feature
 and no schema beyond the account column in `0017`. It fixes defects that were proven in
@@ -213,7 +213,7 @@ certificate and an Apple Developer identity, neither of which exists for this pr
 compromised control plane could replace the artifact and its digest together. Migration
 `0020_runtime_recovery.sql` remains the newest; Phase 19 adds no schema.
 
-`0.19.0`, Phase 19: **Managed Compute Node Auto-Start**, is the current source and Production
+`0.19.0`, Phase 19: **Managed Compute Node Auto-Start**, was the previous Production
 release. Agent `0.6.0` keeps Protocol `1` and adds an owner-scoped managed installation,
 single-Agent ownership, bounded headless diagnostics, and native user-session auto-start:
 Windows Task Scheduler at logon, systemd user units, and macOS LaunchAgents. It starts only after
@@ -232,7 +232,84 @@ Agent home were removed afterward, the local port was closed, and the acceptance
 The production database finished with no active acceptance node, no non-zero deployment cost, and
 no orphaned audit evidence.
 
-**Live:** <https://ysd-zero-cloud.ysd-zero-cloud.workers.dev> — running `0.19.0`, agent `0.6.0`,
+`0.20.0`, Phase 20: **Managed Agent Safe Upgrade & Local Rollback**, is the current source and
+Production release, with Agent `0.7.0`.
+
+Replacing a managed Agent used to be an overwrite. `autostart enable` copied the new release over
+the old one, regenerated the launcher, rewrote the metadata and re-registered the task, in that
+order, with nothing in between that could be undone. If the new Agent then failed to start,
+nothing on the machine remembered what had worked: `previousVersion` was a bare string with no
+path and no hash behind it, so there was nothing to go back to even in principle.
+
+Phase 20 makes the replacement a transaction, and keeps one property throughout: the metadata's
+top-level release always names an Agent that is known to work. A candidate lives beside it until
+it earns the job.
+
+- **You start it, from a bundle you already have.** `autostart upgrade` runs on your machine
+  against the Agent you downloaded and checked. Nothing is fetched in the background, and there is
+  no button in the browser that reaches a Compute Node and replaces its Agent — that would make a
+  web session able to choose which executable someone else's computer runs at every login.
+- **The candidate is verified before anything stops.** Version, protocol, integrity, containment,
+  free disk and the recorded Node runtime are all checked while the current Agent is still
+  serving. A candidate that fails any of them is refused without a second of downtime.
+- **Promotion means one thing: an accepted heartbeat.** Not "the process started", not "it printed
+  a banner", not "it survived five seconds" — the control plane answered a signed heartbeat with a
+  success, which is the only event that proves the whole chain. Until that happens the previous
+  Agent is still the one the metadata names.
+- **A failed candidate is undone, a shared failure is not.** A candidate that crashes on startup,
+  or that refuses the local Node runtime, is rolled back to the exact recorded previous release —
+  verified by hash — and remembered by hash so the next login does not walk into it again. A
+  rejected authorization, an invalid credential or a network outage is *not* rolled back: the
+  previous Agent has the same credential and the same network, so downgrading would prove nothing
+  and could oscillate.
+- **The OS registration is never rewritten to change version.** The scheduled task, systemd user
+  unit and LaunchAgent point at the launcher and the metadata, never at a release, so the upgrade
+  uses the manager's own stop and start. Acceptance compares the task's canonical configuration
+  before staging, after promotion and after rollback, and requires it byte-identical.
+
+The upgrade is **not** zero-downtime. A controlled Agent shutdown stops the applications that
+Agent owns, and the Phase 18 same-node reconciliation restores them from the artifact already on
+the node — proven in acceptance with zero GitHub fetches, zero package-manager invocations, zero
+builds and no new artifact, on the same deployment, node, port and checksum. An application that
+was intentionally stopped stays stopped.
+
+Integrity wording is unchanged and still accurate: a pinned version, a SHA-256 published by the
+same control plane, and HTTPS. It is not a code-signed binary and not publisher-signed, and the
+local upgrade handoff runs over a same-user named pipe or a `0600` socket — a boundary against
+other users, not against code already running as you. No migration, Worker, D1, cron, R2, Queue,
+Durable Object, paid service, remote upgrade endpoint, silent updater, Windows Service, system
+service or LaunchDaemon is added; `0020_runtime_recovery.sql` is still the newest migration.
+
+Production acceptance ran the real thing: a controlled Windows node paired on Agent `0.6.0`,
+its own `autostart enable` registering a genuine Task Scheduler logon task, and a healthy private
+application. The upgrade was then started the way an operator starts it — the Production-served
+`0.7.0` bundle, verified against the published checksum, running `autostart upgrade` locally. A
+watcher sampling the managed metadata caught the ordering that matters: the candidate was staged
+and started while the authoritative release still read `0.6.0`, it still read `0.6.0` at the
+instant the readiness proof appeared, and only afterwards did it become `0.7.0` with the exact
+`0.6.0` path and hash recorded as previous. The scheduled task's canonical configuration was
+byte-identical before staging, after promotion and after a restore. Phase 18 then recovered the
+application onto the same deployment, node, port, artifact and checksum with no repository fetch,
+no package manager and no build, and an application that had been intentionally stopped stayed
+stopped across a fresh managed start. The retained `0.6.0` was restored once and upgraded back,
+the revoked node's credential was live-rejected with a 401, and the controlled task, node and
+local material were removed.
+
+Two defects surfaced during that acceptance, both fixed here. A managed install created by Agent
+`0.6.0` was carried forward by the upgrade rather than rebuilt, so it never picked up the metadata
+revision marker; it is now stamped at the migration point. And the Nodes page told operators
+running an Agent too old to report the auto-start contract to "Upgrade Agent to 0.6.0" — a literal
+that went stale the moment the Agent version moved. Every version the page shows now comes from
+the release constant, and a test fails if a hardcoded one returns.
+
+One rough edge is known and not fixed. `status.json` gained an upgrade projection in `0.7.0`, and
+Agent `0.6.0` validates that file by exact key set, so a node deliberately restored from `0.7.0`
+back to `0.6.0` reports its auto-start as disabled while it is in fact enabled and running under
+Task Scheduler. Nothing stops working — the task, the launcher, the heartbeat and recovery are all
+unaffected — but the badge is wrong until that node returns to `0.7.0`, which corrects it, as does
+`autostart repair`. It cannot occur on a node that has never been upgraded.
+
+**Live:** <https://ysd-zero-cloud.ysd-zero-cloud.workers.dev> — running `0.20.0`, agent `0.7.0`,
 Protocol `1`.
 
 This is a standalone project intended only for `OpenYsd/ysd-zero-cloud`. It has no dependency on,

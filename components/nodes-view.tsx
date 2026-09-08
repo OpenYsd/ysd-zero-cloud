@@ -45,7 +45,7 @@ import {
   type AgentPlatform,
 } from '@/lib/agent-release';
 import { compatibilityLabel } from '@/lib/node-preflight';
-import { agentVersionSupported } from '@/lib/nodes';
+import { CURRENT_AGENT_VERSION, agentVersionSupported, compareStrictVersions } from '@/lib/nodes';
 import { recoveryAgentCompatible } from '@/lib/runtime-recovery';
 import { cn } from '@/lib/utils';
 
@@ -91,11 +91,31 @@ const AUTOSTART_ATTENTION: Record<string, string> = {
   agent_missing: 'Managed Agent missing',
   node_runtime_missing: 'Node runtime missing',
   registration_invalid: 'Registration needs repair',
-  upgrade_required: 'Upgrade Agent to 0.6.0',
+  upgrade_required: `Upgrade Agent to ${CURRENT_AGENT_VERSION}`,
   credential_key_unavailable: 'Local Agent key required',
   restart_limited: 'Restart limit reached',
   authorization_rejected: 'Node authorization rejected',
 };
+
+/**
+ * What this control plane publishes against what the node reports.
+ *
+ * Reporting only. The upgrade happens on the operator's machine, started by
+ * the operator, from a bundle they downloaded and checked. There is no button
+ * here that reaches a node and replaces its Agent, and there should not be:
+ * that would make a browser session able to choose which executable a
+ * stranger's computer runs at every login.
+ */
+function AgentUpdate({ version }: { version: string }) {
+  const order = compareStrictVersions(version, CURRENT_AGENT_VERSION);
+  if (order === null) return null;
+  if (order >= 0) return <p className="mt-1 text-[9px] text-white/22">Up to date</p>;
+  return (
+    <p className="mt-1 text-[9px] text-[#c8ff69]">
+      Update available: {CURRENT_AGENT_VERSION}
+    </p>
+  );
+}
 
 function AutostartSummary({ node }: { node: ComputeNode }) {
   const autostart = node.capabilities.autostart;
@@ -103,7 +123,7 @@ function AutostartSummary({ node }: { node: ComputeNode }) {
     return (
       <div className="mt-2 border-t border-white/[0.05] pt-2 text-[9px] text-white/28">
         <p>Auto-start · Unsupported</p>
-        <p>Upgrade Agent to 0.6.0</p>
+        <p>Upgrade Agent to {CURRENT_AGENT_VERSION}</p>
       </div>
     );
   }
@@ -548,6 +568,7 @@ export function NodesView({ state, now }: { state: NodesState; now: number }) {
                     <p className="mt-1 text-[9px] text-white/22">
                       protocol {node.protocolVersion}
                     </p>
+                    <AgentUpdate version={node.agentVersion} />
                     {!recoveryAgentCompatible(node.agentVersion) ? (
                       <p className="mt-1 text-[9px] text-amber-300">
                         Recovery upgrade required
