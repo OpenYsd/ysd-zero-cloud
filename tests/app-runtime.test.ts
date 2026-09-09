@@ -752,7 +752,10 @@ void test('real safe deploy, lifecycle, rollback integrity, port conflict, and c
     });
     conflictServer.close();
     assert.equal(conflict.status, 'failed');
-    if (conflict.status === 'failed') assert.match(conflict.error, /port is already in use/);
+    // A port this node cannot bind is not necessarily one anything is using:
+    // Windows refuses its reserved ranges with EACCES and reports no listener.
+    // The Agent now says only what it knows.
+    if (conflict.status === 'failed') assert.match(conflict.error, /port is unavailable on this Compute Node/);
 
     const cancellation = new AbortController();
     const slowFetch: typeof fetch = async (_source, init) => new Promise<Response>((_resolve, reject) => {

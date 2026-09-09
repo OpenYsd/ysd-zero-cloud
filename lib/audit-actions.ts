@@ -106,6 +106,14 @@ export const EVIDENCE_ACTIONS = [
     why: 'Runtime recovery proves who restored an existing artifact and why it succeeded or stopped.',
   },
   {
+    action: 'deployment.artifact_restore',
+    resourceType: 'deployment',
+    metadataKeys: ['artifactId', 'nodeId', 'availability', 'clearedReasonCode'],
+    route: 'lib/server/nodes.ts',
+    critical: true,
+    why: 'Marking a lost artifact available again is the one node-reported claim that reopens automatic recovery.',
+  },
+  {
     action: 'node.register',
     resourceType: 'compute_node',
     metadataKeys: ['label'],

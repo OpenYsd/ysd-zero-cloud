@@ -19,6 +19,9 @@ import { gunzipSync } from 'node:zlib';
 
 import {
   APP_RUNTIME_LIMITS,
+  PRIVATE_PORT_CANDIDATE_LIMIT,
+  privatePortInRange,
+  privatePortSearchOrder,
   appCrashRecoveryDecision,
   analyzeNodeRepository,
   parseAppRuntimeSnapshots,
@@ -46,6 +49,7 @@ import {
   verifyTextSignature,
 } from '../lib/nodes.ts';
 import type { AgentJobResult } from './runtime.ts';
+import { signedPost } from './signed-request.ts';
 
 type ManagedApp = {
   deploymentId: string;
@@ -596,7 +600,7 @@ function unsignedManifest(manifest: ArtifactManifest): Omit<ArtifactManifest, 's
   };
 }
 
-async function verifyArtifact(
+export async function verifyArtifact(
   directory: string,
   token: string,
   expectedArtifactId?: string,
@@ -623,26 +627,89 @@ async function ensureDiskCapacity(root: string, quotaBytes: number): Promise<voi
   }
 }
 
-async function assertPortAvailable(port: number): Promise<void> {
-  await new Promise<void>((resolve, reject) => {
+/**
+ * Whether this machine will actually let the runtime have a port.
+ *
+ * A real exclusive bind on the same address the runtime uses, because nothing
+ * weaker is true. A port with no listener on it is not necessarily available:
+ * Windows reserves blocks for Hyper-V and WSL, and binding one of those fails
+ * with `EACCES` while every "is anything listening?" check says it is free.
+ * That is not a corner case -- it is what made a whole node undeployable, with
+ * the control plane assigning 41000 out of a reserved 40947-41146 block and
+ * every deployment failing before it built anything.
+ *
+ * Errors are classified by code, never by message text. `EADDRINUSE` and
+ * `EACCES` both mean "pick another"; anything else is a genuine fault and is
+ * reported as one rather than quietly costing the caller a candidate.
+ */
+async function probePort(port: number): Promise<'available' | 'unavailable'> {
+  return await new Promise<'available' | 'unavailable'>((resolve, reject) => {
     const server = createServer();
     let settled = false;
-    const finish = (error?: Error) => {
+    const finish = (outcome: 'available' | 'unavailable' | Error) => {
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
-      if (error) reject(error);
-      else resolve();
+      if (outcome instanceof Error) reject(outcome);
+      else resolve(outcome);
     };
     const timeout = setTimeout(() => {
       server.close();
-      finish(new Error('The assigned private App Runtime port check timed out.'));
+      finish(new Error('The private App Runtime port check timed out.'));
     }, 5_000);
-    server.once('error', () => finish(new Error('The assigned private App Runtime port is already in use.')));
+    server.once('error', (error: NodeJS.ErrnoException) => {
+      if (error.code === 'EADDRINUSE' || error.code === 'EACCES') finish('unavailable');
+      else finish(new Error('The private App Runtime port could not be checked.'));
+    });
     server.listen({ host: '127.0.0.1', port, exclusive: true }, () => {
-      server.close((error) => finish(error ?? undefined));
+      server.close((error) => finish(error ? new Error('The private App Runtime port could not be released.') : 'available'));
     });
   });
+}
+
+/**
+ * Ports this node can actually bind, preferring the one already assigned.
+ *
+ * Scans as far through the private range as it needs to, but returns only a
+ * bounded set: the control plane decides which of them becomes authoritative.
+ */
+export async function bindablePrivatePorts(
+  preferred: number,
+  limit = PRIVATE_PORT_CANDIDATE_LIMIT,
+): Promise<number[]> {
+  const found: number[] = [];
+  for (const port of privatePortSearchOrder(preferred)) {
+    if (await probePort(port) === 'available') {
+      found.push(port);
+      if (found.length >= limit) break;
+    }
+  }
+  return found;
+}
+
+async function assertPortAvailable(port: number): Promise<void> {
+  if (await probePort(port) === 'unavailable') {
+    throw new AppRuntimePortError(port);
+  }
+}
+
+// Windows refuses a reserved port with EACCES while reporting nothing
+// listening on it, so "already in use" was a diagnosis the Agent could not
+// support. These say only what is known: the node cannot have this port.
+export const PRIVATE_PORT_UNAVAILABLE =
+  'The assigned private App Runtime port is unavailable on this Compute Node.';
+export const NO_AVAILABLE_PRIVATE_PORT =
+  'No private App Runtime port on this Compute Node is available.';
+
+/** A private port this node cannot bind, carrying what it could bind instead. */
+export class AppRuntimePortError extends Error {
+  readonly reasonCode = 'private_port_unavailable';
+  readonly port: number;
+
+  constructor(port: number) {
+    super(PRIVATE_PORT_UNAVAILABLE);
+    this.port = port;
+  }
 }
 
 function runtimeEnvironment(app: Omit<ManagedApp, 'process' | 'startedAt' | 'restartTimes' | 'restartCount' | 'crashLoop' | 'desiredRunning' | 'intentionalStop' | 'desiredRevision' | 'healthState' | 'bind' | 'logLines' | 'logBytes'>): Record<string, string> {
@@ -925,10 +992,48 @@ function resultFor(app: ManagedApp, extra: Record<string, unknown> = {}): AgentJ
   };
 }
 
+/**
+ * Agrees a private port this node can actually bind.
+ *
+ * The control plane stays authoritative: the node only reports which ports it
+ * can bind, and the server decides which one this deployment gets. A node that
+ * quietly moved itself from 41000 to 41200 would leave the UI, health checks,
+ * runtime recovery and release evidence all pointing at a port nothing is
+ * listening on.
+ */
+async function negotiatePrivatePort(input: {
+  origin: string;
+  token: string;
+  deploymentId: string;
+  currentPort: number;
+  signal?: AbortSignal;
+}): Promise<number> {
+  const candidates = await bindablePrivatePorts(input.currentPort);
+  if (candidates.length === 0) throw new Error('no_available_private_port');
+  const answer = await signedPost<{ localPort?: unknown }>({
+    origin: input.origin,
+    token: input.token,
+    pathname: `/api/nodes/agent/deployments/${input.deploymentId}/private-port`,
+    body: { expectedCurrentPort: input.currentPort, candidatePorts: candidates },
+    signal: input.signal,
+  });
+  const granted = answer.localPort;
+  // Trust, then verify: the port has to be one this node offered, and it has to
+  // still bind before anything is built against it.
+  if (!privatePortInRange(granted) || !candidates.includes(granted as number)) {
+    throw new Error('private_port_rejected');
+  }
+  if (await probePort(granted as number) === 'unavailable') {
+    throw new Error('private_port_unavailable');
+  }
+  return granted as number;
+}
+
 export async function executeAppRuntimeJob(input: {
   payload: Record<string, unknown>;
   workspaceId: string;
   token: string;
+  origin?: string;
   capabilities: AppRuntimeCapabilities;
   rootDirectory: string;
   signal?: AbortSignal;
@@ -937,6 +1042,55 @@ export async function executeAppRuntimeJob(input: {
   const validated = validateAppRuntimeJobPayload(input.payload);
   if (!validated.ok) return { status: 'failed', error: validated.error, retryable: false };
   const payload = validated.payload;
+  // The port has to be settled before anything is fetched, installed or built.
+  // A node whose assigned port is reserved by the operating system would
+  // otherwise spend a whole build only to fail at the last step, every time.
+  let activePort = payload.port;
+  // Recovery is deliberately absent. Phase 18 restores an application in
+  // place -- same deployment, same node, same artifact, same port -- and a
+  // recovery that quietly moved the port would break that promise and the
+  // 'same port' guarantee the artifact restore acceptance depends on. A port
+  // blocked during recovery stays a recovery diagnostic (`port_in_use`), which
+  // is what the control plane already understands. Negotiation belongs to the
+  // first activation, before anything depends on the port.
+  if (['deploy', 'redeploy', 'start', 'restart', 'rollback'].includes(payload.operation)) {
+    // This runs before the job's own try/catch, so it has to produce a result
+    // rather than throw: `executeAppRuntimeJob` always answers with an
+    // `AgentJobResult`, and a job that escapes with an exception takes the
+    // Agent's job loop with it instead of failing one deployment.
+    try {
+      if (await probePort(activePort) === 'unavailable') {
+        if (!input.origin) {
+          return {
+            status: 'failed',
+            error: PRIVATE_PORT_UNAVAILABLE,
+            retryable: false,
+            result: { phase: 'reconcile', reasonCode: 'private_port_unavailable' },
+          };
+        }
+        console.error('App Runtime start: the assigned private port is unavailable; negotiating another.');
+        activePort = await negotiatePrivatePort({
+          origin: input.origin,
+          token: input.token,
+          deploymentId: payload.deploymentId,
+          currentPort: activePort,
+          signal: input.signal,
+        });
+        console.error('App Runtime start: the control plane assigned a usable private port.');
+      }
+    } catch (error) {
+      const exhausted = error instanceof Error && error.message === 'no_available_private_port';
+      return {
+        status: 'failed',
+        error: exhausted ? NO_AVAILABLE_PRIVATE_PORT : PRIVATE_PORT_UNAVAILABLE,
+        retryable: false,
+        result: {
+          phase: 'reconcile',
+          reasonCode: exhausted ? 'no_available_private_port' : 'private_port_unavailable',
+        },
+      };
+    }
+  }
   let phase: RecoveryPhase | 'source_fetch' | 'extract' | 'dependency_install' | 'build' = 'reconcile';
   const enterRecoveryPhase = (next: RecoveryPhase): void => {
     phase = next;
@@ -1008,7 +1162,7 @@ export async function executeAppRuntimeJob(input: {
         logApp = {
           deploymentId: payload.deploymentId, projectId: payload.projectId, artifactId,
           artifactDirectory: artifact, dataDirectory: path.join(deployDirectory, 'data'),
-          entrypoint: contract.entrypoint, port: payload.port, healthPath: payload.healthPath,
+          entrypoint: contract.entrypoint, port: activePort, healthPath: payload.healthPath,
           memoryMb: payload.memoryMb, environment: allowedEnvironment,
           secrets: Object.values(allowedEnvironment), process: fakeProcess,
           startedAt, restartTimes: [], restartCount: 0, crashLoop: false,
@@ -1061,7 +1215,7 @@ export async function executeAppRuntimeJob(input: {
         artifactDirectory: artifact,
         dataDirectory,
         entrypoint: contract.entrypoint,
-        port: payload.port,
+        port: activePort,
         healthPath: payload.healthPath,
         memoryMb: payload.memoryMb,
         environment: allowedEnvironment,
@@ -1131,7 +1285,7 @@ export async function executeAppRuntimeJob(input: {
       artifactDirectory: artifact,
       dataDirectory,
       entrypoint: manifest.contract.entrypoint,
-      port: payload.port,
+      port: activePort,
       healthPath: payload.healthPath,
       memoryMb: payload.memoryMb,
       environment: allowedEnvironment,
@@ -1171,10 +1325,16 @@ export async function executeAppRuntimeJob(input: {
     const code = error instanceof Error && 'code' in error && typeof error.code === 'string' ? error.code : null;
     const integrityFailure = /manifest|checksum|integrity|unsigned/i.test(message);
     const availability = availabilityFromVerificationFailure({ code, integrityFailure });
+    // The port failure is recognised by its type, not by matching words in a
+    // message. The message became truthful -- a port Windows reserves is not
+    // "in use" -- and a classifier reading English would have silently
+    // reclassified it the moment that wording changed. `port_in_use` remains
+    // the recovery vocabulary the control plane already understands.
     const reasonCode: RecoveryReasonCode =
-      code === 'ENOENT' ? 'artifact_missing'
-        : integrityFailure ? 'artifact_corrupted'
-          : /port.*use/i.test(message) ? 'port_in_use'
+      error instanceof AppRuntimePortError ? 'port_in_use'
+        : code === 'ENOENT' ? 'artifact_missing'
+          : integrityFailure ? 'artifact_corrupted'
+            : /port.*use/i.test(message) ? 'port_in_use'
             : /health/i.test(message) ? 'health_failed'
               : /insufficient disk|disk quota/i.test(message) ? 'disk_low'
                 : /node version|package manager|permission/i.test(message) ? 'runtime_incompatible'

@@ -29,6 +29,13 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from acceptance_preflight import app_runtime_port_minimum, probe_port
+from acceptance_ports import (
+    first_bindable_port,
+    release_reserved_ports,
+    reserve_unbindable_ports,
+)
+
 REPO = Path(__file__).resolve().parent
 REQUESTED_BASE = os.environ.get("YSD_PHASE20_BASE")
 BASE = REQUESTED_BASE or ""
@@ -358,6 +365,39 @@ def run_agent(artifact, arguments, timeout=420):
     )
 
 
+
+def legacy_environment_preflight():
+    """Refuses to start when the frozen Agent's prerequisite cannot be met.
+
+    Frozen Agent 0.6.0 cannot renegotiate a private port, so the fixture needs
+    one this host will grant. It does not have to be the bottom of the range --
+    the harness reserves whatever prefix Windows refuses, and the real allocator
+    then picks the first free port by itself. What this cannot survive is a host
+    with no bindable port in the range at all.
+
+    Reads only; writes nothing and starts nothing.
+    """
+    try:
+        range_start, bindable = first_bindable_port(REPO)
+    except RuntimeError:
+        print("\n=== PHASE 20 / 20.1: BLOCKED \u2014 ENVIRONMENT ===", flush=True)
+        print(json.dumps({
+            "reason": "no_bindable_private_port_in_range",
+            "rangeStart": app_runtime_port_minimum(REPO),
+            "agentVersion": PREVIOUS_AGENT_VERSION,
+            "why": "the frozen Agent cannot renegotiate a private port",
+            "productGateResult": "not produced",
+        }), flush=True)
+        raise SystemExit(2) from None
+    print("PORT_PREFLIGHT=" + json.dumps({
+        "rangeStart": range_start,
+        "firstBindable": bindable,
+        "hostReservesPrefix": bindable != range_start,
+    }), flush=True)
+
+
+legacy_environment_preflight()
+
 try:
     print("=== build the shipped Agent 0.6.0 to start from ===", flush=True)
     previous_agent = build_previous_agent()
@@ -443,6 +483,23 @@ try:
           json.dumps({"status": (node_row or {}).get("status"), "agentVersion": (node_row or {}).get("agentVersion")}))
 
     print("\n=== deploy the safe fixture and record it ===", flush=True)
+    # Frozen Agent 0.6.0 cannot renegotiate a private port, so the fixture has
+    # to be given one this host will actually grant. Nothing about the product
+    # changes: the allocator, the range and every Phase 20 expectation stay as
+    # they are, and the harness simply owns the ports Windows refuses so the
+    # real `nextPort()` skips them of its own accord. The holders describe no
+    # application -- no job, no artifact, nothing running -- and are removed in
+    # cleanup.
+    range_start, bindable_port = first_bindable_port(REPO)
+    reserved = reserve_unbindable_ports(REPO, node_id, bindable_port, int(time.time() * 1000))
+    print("PORT_RESERVATION=" + json.dumps({
+        "rangeStart": range_start,
+        "firstBindable": bindable_port,
+        "reservedCount": len(reserved),
+    }), flush=True)
+    check("the fixture will be offered a port this host can bind",
+          probe_port(bindable_port)[0], f"port {bindable_port} is not bindable")
+
     status, body = operator.request("POST", "/api/smart-deploy", {
         "repository": FIXTURE, "branch": "main", "commit": COMMIT,
         "nodeId": node_id, "environment": "Production", "healthPath": "/",
@@ -451,8 +508,22 @@ try:
     deployment = (body or {}).get("deployment")
     check("private Zero Mode deployment queued", status == 202 and deployment, f"got {status}")
     deployment_id, port = deployment["id"], deployment["localPort"]
+    check("the server allocator assigned the first bindable port itself",
+          port == bindable_port, f"expected {bindable_port}, got {port}")
     row = wait_deployment(operator, deployment_id, {"healthy", "failed", "crash_loop"}, limit=150)
-    check("deployment is healthy before the upgrade", (row or {}).get("state") == "healthy", str(row)[:300])
+    # Named fields rather than a truncated dump: a 300-character `str(row)` put
+    # the repository and commit first and cut off `state` and `lastError`, which
+    # is exactly what a failure needs to say. Safe fields only -- no
+    # environment, token, cookie or credential.
+    if row is not None and row.get("state") != "healthy":
+        print("FIXTURE_DEPLOYMENT=" + json.dumps({key: row.get(key) for key in (
+            "id", "state", "desiredState", "observedState", "localPort",
+            "currentArtifactId", "restartCount", "crashLoop",
+            "recoveryReasonCode", "buildDurationMs", "lastError",
+        )}, default=str), flush=True)
+    check("deployment is healthy before the upgrade", (row or {}).get("state") == "healthy",
+          json.dumps({"state": (row or {}).get("state"), "port": (row or {}).get("localPort"),
+                      "lastError": (row or {}).get("lastError")}, default=str))
     check("marker is served before the upgrade", MARKER in body_at(port))
     _, before_detail = operator.request("GET", f"/api/deployments/{deployment_id}")
     before = (before_detail or {}).get("deployment", {})
@@ -748,6 +819,12 @@ try:
 
     print(f"\nBROWSER_EMAIL={email}\nBROWSER_PASSWORD={password}\nBROWSER_NODE={node_id}")
 finally:
+    try:
+        released = release_reserved_ports(REPO)
+        if released:
+            print(f"released {released} harness port holder(s)", flush=True)
+    except Exception as error:  # noqa: BLE001 - cleanup must not mask a result
+        print(f"port holder cleanup note: {type(error).__name__}", flush=True)
     if FAILED and install:
         status_path = Path(install["workingDirectory"]) / "status.json"
         if status_path.exists():

@@ -53,7 +53,12 @@ export const NODE_PROTOCOL_VERSION = 1;
 // it enabled. The projection is derived from the install file instead, and
 // the heartbeat's auto-start observation now checks the native manager
 // rather than trusting a status file. Protocol 1 is unchanged.
-export const CURRENT_AGENT_VERSION = '0.7.1';
+// 0.8.0 can copy one immutable artifact to storage the operator controls,
+// verify that copy offline, and put it back on the same node when the local
+// bytes are lost. Nothing about the protocol changes: backup and verify are
+// entirely local, and restore reads one bounded, node-authenticated preflight
+// before it writes anything.
+export const CURRENT_AGENT_VERSION = '0.8.0';
 export const MINIMUM_AGENT_VERSION = '0.3.0';
 
 export const NODE_TIMING = {
@@ -91,12 +96,29 @@ export type NodeCapabilities = {
   gameServers: GameServerCapabilities;
   appRuntime?: AppRuntimeCapabilities;
   autostart?: AutostartCapability;
+  artifactBackup?: ArtifactBackupCapability;
   contracts: {
     ai: boolean;
     gameServers: boolean;
     appRuntime?: boolean;
     autostart?: boolean;
+    artifactBackup?: boolean;
   };
+};
+
+/**
+ * What an Agent can do with artifact backups.
+ *
+ * Three booleans and a version. Deliberately no path, no filename, no device
+ * and no history: where an operator keeps their backups is their business, and
+ * a control plane that recorded it would be claiming to know something it
+ * cannot verify -- an external drive can be unplugged without telling anyone.
+ */
+export type ArtifactBackupCapability = {
+  version: 1;
+  supported: boolean;
+  offlineVerify: boolean;
+  sameNodeRestore: boolean;
 };
 
 export type AutostartCapability = {
@@ -291,6 +313,7 @@ export function parseCapabilities(value: unknown): NodeCapabilities | null {
         }
       : parseAppRuntimeCapabilities(value.appRuntime);
   const autostart = parseAutostartCapability(value.autostart);
+  const artifactBackup = parseArtifactBackupCapability(value.artifactBackup);
   if (
     cores === null ||
     totalBytes === null ||
@@ -303,7 +326,8 @@ export function parseCapabilities(value: unknown): NodeCapabilities | null {
     !ai ||
     !gameServers ||
     !appRuntime ||
-    (value.autostart !== undefined && !autostart)
+    (value.autostart !== undefined && !autostart) ||
+    (value.artifactBackup !== undefined && !artifactBackup)
   ) {
     return null;
   }
@@ -313,7 +337,8 @@ export function parseCapabilities(value: unknown): NodeCapabilities | null {
     typeof contracts.ai !== 'boolean' ||
     typeof contracts.gameServers !== 'boolean' ||
     (contracts.appRuntime !== undefined && typeof contracts.appRuntime !== 'boolean') ||
-    (contracts.autostart !== undefined && typeof contracts.autostart !== 'boolean')
+    (contracts.autostart !== undefined && typeof contracts.autostart !== 'boolean') ||
+    (contracts.artifactBackup !== undefined && typeof contracts.artifactBackup !== 'boolean')
   ) {
     return null;
   }
@@ -333,6 +358,7 @@ export function parseCapabilities(value: unknown): NodeCapabilities | null {
     gameServers,
     appRuntime,
     ...(autostart ? { autostart } : {}),
+    ...(artifactBackup ? { artifactBackup } : {}),
     contracts: {
       ai: contracts.ai && ai.runtimes.some((runtime) => runtime.available),
       gameServers:
@@ -381,6 +407,23 @@ export function parseAutostartCapability(value: unknown): AutostartCapability | 
   if (!value.supported && (value.enabled || value.manager !== null || value.scope !== 'none' || value.state !== 'unsupported')) return null;
   if (value.supported && (value.manager === null || value.scope !== 'user-session' || value.state === 'unsupported')) return null;
   return value as AutostartCapability;
+}
+
+export function parseArtifactBackupCapability(value: unknown): ArtifactBackupCapability | null {
+  if (value === undefined || !isRecord(value)) return null;
+  const expected = ['offlineVerify', 'sameNodeRestore', 'supported', 'version'];
+  if (Object.keys(value).sort().join('\u0000') !== expected.sort().join('\u0000')) return null;
+  if (
+    value.version !== 1 ||
+    typeof value.supported !== 'boolean' ||
+    typeof value.offlineVerify !== 'boolean' ||
+    typeof value.sameNodeRestore !== 'boolean'
+  ) return null;
+  // Restore is same-node only, and offline verification is unconditional, so a
+  // node claiming support must claim both.
+  if (value.supported && !(value.offlineVerify && value.sameNodeRestore)) return null;
+  if (!value.supported && (value.offlineVerify || value.sameNodeRestore)) return null;
+  return value as ArtifactBackupCapability;
 }
 
 export function parseMetrics(value: unknown): NodeMetrics | null {

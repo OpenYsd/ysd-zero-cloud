@@ -1,7 +1,7 @@
 # YSD Zero Cloud
 
 YSD Zero Cloud is a zero-cost-first cloud operating system. The source tree and Production
-baseline are `0.20.1`, with Compute Node Agent `0.7.1` and Protocol `1`. Production includes
+baseline are `0.21.0`, with Compute Node Agent `0.8.0` and Protocol `1`. Production includes
 authentication, persistence, security scanning, the cost guard, private-object storage policy,
 network inventory, an outbound-only user-owned compute control plane, a private Node.js App
 Runtime, local AI scheduling, private Minecraft Java server orchestration, organization
@@ -348,7 +348,111 @@ auto-start truthfully, but `0.6.0`'s own `autostart status`, `disable` and `unin
 a Phase 20 install. Use the `0.7.1` or newer bundle for managed operations after a restore, or
 upgrade back first. This is not full `0.6.0` CLI compatibility and is not claimed as such.
 
-**Live:** <https://ysd-zero-cloud.ysd-zero-cloud.workers.dev> — running `0.20.1`, agent `0.7.1`,
+`0.21.0`, Phase 21: **Portable Artifact Backup & Offline Verification**, is the current source
+and Production release, with Agent `0.8.0`. No migration: the latest is still
+`0020_runtime_recovery.sql`, because everything this phase records already had a column.
+
+A deployed application already exists on its node as an immutable, checksummed artifact. Phase 21
+lets an operator copy one out to a file they hold, verify that file later with nothing running, and
+put it back on the same node — including when the artifact directory was deleted outright and
+Phase 18 recovery had already given up on it.
+
+**A bundle carries no paths.** `artifact backup create` writes one `.ysdbak` file: a tar archive
+whose entries are *numbered*. Every real path lives in a manifest that is validated in full before
+a byte is written to disk. That is the point. An archive that cannot express a path cannot carry a
+traversal, a long-name or PAX override, a reserved device name, or two entries that collide on a
+case-insensitive filesystem. All of those are still refused — in the manifest validator, where the
+rules are readable and tested — but the format itself no longer offers the attack.
+
+**What offline verification proves, and what it does not.** `artifact backup verify` needs no
+network, no control plane and no node token. It re-reads the payload, recomputes its digest and
+compares it to the manifest, so it proves the bundle is internally consistent and unmodified since
+it was written — truncation and corruption both fail, including a bundle cut exactly at its
+terminator. It does **not** prove the bundle came from YSD, and nothing in the CLI says otherwise.
+A bundle carries no control-plane signature and cannot: the manifest inside a live artifact is
+signed with that node's own token, which no other machine is able to verify.
+
+**Restore is same-node, and refuses rather than guesses.** Restore verifies the bundle, then checks
+identity — this deployment, this node, this artifact — then compatibility with the Node.js majors
+the App Runtime supports, then collision. An artifact already present with the same checksum is a
+no-op. One present with *different* bytes is refused, never overwritten. Extraction stages outside
+`artifacts/`, because retention deletes anything unrecognised there. Only once the staged copy
+hashes to the recorded checksum is it moved into place, and the runtime manifest is rebuilt and
+re-signed with the restoring node's token — the source node's signature is data, never authority.
+
+**Restore puts bytes back and says so. It starts nothing.** The command spawns no application,
+issues no Start, and never touches desired state. What it does do, once the artifact is in place and
+has passed the same verification the App Runtime runs before it will activate one, is tell the
+control plane in a single signed same-node statement: this exact artifact, this exact checksum, is
+here again. Phase 18 does the rest on its next pass. Proven end to end from a deleted artifact
+directory to a serving application with no operator command, one recovery job, and no GitHub fetch,
+no package install and no build.
+
+Getting there meant fixing the reason it could not work. Restoring is local — bytes reappear on a
+disk the control plane cannot see — and every recovery route refuses an artifact it believes is
+gone. So `restore-complete` is the one write this feature makes, and it is deliberately small: an
+availability projection, plus the blocked recovery condition that this evidence actually refutes. A
+recovery blocked on a port already in use is not answered by bytes reappearing, and is left alone.
+Identity is read from the database and every value the node supplies has to agree with it —
+deployment, node, current release, checksum — so a node holding a valid credential still cannot
+confirm another node's artifact, a different artifact of its own, or different bytes behind a
+trusted id. Repeating the call changes nothing further.
+
+Two older assumptions had to go with it. A recovery attempt was identified by deployment, intent
+revision and Agent generation, none of which a restore changes — so the attempt that failed while
+the artifact was missing kept the key and the restored one was deduplicated into silence: an
+available artifact, a willing reconciler, and no job, forever. An attempt now also accounts for when
+the node last confirmed those bytes. And "the Agent is already running this" was read from the
+Agent's whole list of known deployments, including ones it was explicitly *not* running — which
+described exactly the situation recovery exists for and quietly disabled it. Neither change can
+become a retry loop: a failed recovery marks the artifact missing again, and a missing artifact
+never reaches the enqueue.
+
+**What the control plane is trusting.** The same thing it trusts for every other artifact
+observation a node reports: a signed request from the node that owns the deployment. The Agent
+rebuilds the runtime manifest, signs it with this node's own token, re-hashes the payload and runs
+the App Runtime's own verifier before it says anything — but the control plane cannot re-derive any
+of that from a disk it cannot read. This is a node-reported fact at the existing trust boundary,
+not a proof, and it is recorded as one: the evidence entry is a system action attributed to
+`system:artifact-restore`, never to a person.
+
+**What a backup does not contain.** One artifact of one deployment, and nothing else. Not the
+deployment's data directory, not runtime or game-world state, not the database, and not a second
+node's copy. The bundle is written where the operator asks, on the machine they are sitting at;
+there is no cloud destination, no schedule and no automatic backup, and the control plane is never
+told where a backup went — an external drive can be unplugged without telling anyone, and a record
+that claimed otherwise would be a record that lies.
+
+The payload is the application's own build output, byte for byte. YSD never intentionally adds a
+node token, Agent key, credential file, pairing code, cookie, `Authorization` header or decrypted
+environment to it, and acceptance checks the bundle for those. It cannot follow that the payload
+holds no secrets: whatever a repository or its build put into that artifact is in the backup, and
+the file should be handled accordingly.
+
+Two bundles of the same artifact are not byte-identical — the manifest records when each was made.
+The payload digest is deterministic, and that is the thing verification and restore rely on.
+
+Production acceptance drove the whole path on a controlled Windows node against the live
+control plane. The node paired on Agent `0.7.1` and was upgraded to `0.8.0` through the managed
+transaction -- one candidate, one attempt, promotion only after an accepted authenticated
+heartbeat, the scheduled task's registration fingerprint unchanged throughout. The pinned fixture
+was deployed, backed up, verified offline, and then had its artifact directory deleted outright.
+Restoring the bundle brought the same bytes back on the same node, and the application returned to
+Healthy on the same port, same artifact id and same checksum with **no Start command**, no GitHub
+fetch, no package install and no build. Stopped on purpose, the same restore put the bytes back and
+started nothing.
+
+That deployment also exercised the new port negotiation for real: the host reserves the bottom of
+the private range for Hyper-V and WSL and refuses `41000` outright, so the node found `41147`,
+the control plane recorded it, and the runtime used it.
+
+**One honest note on dependencies.** `npm audit` reports four high findings, all reaching
+`sharp` (libheif) through `miniflare` and `wrangler` -- the local development toolchain. Phase 21
+added no dependency, and none of that code is in the deployed Worker. It is not "audit clean", and
+the shipped Worker is not known to be vulnerable from those findings; they are recorded here rather
+than silenced with a forced, breaking toolchain upgrade inside a release.
+
+**Live:** <https://ysd-zero-cloud.ysd-zero-cloud.workers.dev> — running `0.21.0`, agent `0.8.0`,
 Protocol `1`.
 
 This is a standalone project intended only for `OpenYsd/ysd-zero-cloud`. It has no dependency on,

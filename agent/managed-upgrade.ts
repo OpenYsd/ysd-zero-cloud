@@ -148,6 +148,7 @@ export const UPGRADE_REASONS = [
   'authorization_rejected',
   'credential_invalid',
   'network_unavailable',
+  'waiting_for_readiness',
   'previous_missing',
   'previous_corrupted',
   'transaction_interrupted',

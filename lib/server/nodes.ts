@@ -33,6 +33,8 @@ import {
   parseAppRuntimeSnapshots,
   validateAppRuntimeJobPayload,
   type AppRuntimeJobPayload,
+  parsePrivatePortCandidates,
+  privatePortInRange,
 } from '@/lib/app-runtime';
 import {
   planRuntimeReconciliation,
@@ -68,6 +70,7 @@ import {
   type SignedJobClaim,
 } from '@/lib/nodes';
 import { authSecret } from './auth';
+import { recordEvidence } from './audit';
 import { MAX_WORKFLOW_CHAIN_DEPTH } from '@/lib/workflows';
 import { db, execute, query, queryOne } from './db';
 import { clientAddress, enforceRateLimit } from './rate-limit';
@@ -1051,8 +1054,9 @@ async function reconcileAppRuntimes(input: {
     if (!deployment) continue;
     const artifact = await queryOne<{
       id: string; state: string; availabilityState: string | null;
+      lastVerifiedOnNodeAt: number | null;
     }>(
-      `SELECT id, state, availabilityState FROM app_artifact
+      `SELECT id, state, availabilityState, lastVerifiedOnNodeAt FROM app_artifact
        WHERE workspaceId = ? AND projectId = ? AND deploymentId = ? AND nodeId = ?
          AND id = ? AND deletedAt IS NULL`,
       input.context.node.workspaceId, deployment.projectId, deployment.deploymentId,
@@ -1115,6 +1119,16 @@ async function reconcileAppRuntimes(input: {
       deployment.nodeId, plan.artifactId,
     );
     const actionId = createId('dact');
+    // An attempt is identified by the deployment, the intent revision it serves,
+    // the Agent generation that observed it -- and when the node last confirmed
+    // these bytes. Without that last part, a restore is invisible here: the
+    // failed attempt from before the artifact came back already holds the key,
+    // the enqueue is deduplicated, and the deployment sits available and
+    // recoverable with nothing ever queued for it. Confirmation only moves this
+    // forward when an artifact is actually present, and the availability gate
+    // above has already refused a missing one, so this cannot become a retry
+    // loop: a failed recovery marks the artifact missing and stops at the gate.
+    const confirmedAt = artifact.lastVerifiedOnNodeAt ?? 0;
     const queued = await enqueueJob({
       workspaceId: input.context.node.workspaceId,
       actor: 'system:runtime-recovery',
@@ -1132,7 +1146,8 @@ async function reconcileAppRuntimes(input: {
         protectedArtifactIds: [plan.artifactId, ...(previous ? [previous.id] : [])],
       },
       targetNodeId: deployment.nodeId,
-      idempotencyKey: `recover:${deployment.deploymentId}:${plan.expectedDesiredRevision}:${input.generation}`,
+      idempotencyKey:
+        `recover:${deployment.deploymentId}:${plan.expectedDesiredRevision}:${input.generation}:${confirmedAt}`,
     });
     if (!queued.ok || !queued.created) continue;
     const database = await db();
@@ -1144,7 +1159,7 @@ async function reconcileAppRuntimes(input: {
          VALUES (?, ?, ?, ?, ?, ?, 'recover', 'queued', ?, 'system:runtime-recovery', NULL, ?, ?, NULL)`,
       ).bind(actionId, input.context.node.workspaceId, deployment.deploymentId,
         deployment.projectId, deployment.nodeId, queued.job.id,
-        `recover:${deployment.deploymentId}:${plan.expectedDesiredRevision}:${input.generation}`,
+        `recover:${deployment.deploymentId}:${plan.expectedDesiredRevision}:${input.generation}:${confirmedAt}`,
         input.now, input.now),
       database.prepare(
         `UPDATE deployment SET state = 'recovering', observedState = 'recovering',
@@ -1522,6 +1537,292 @@ async function recordJobSecurityEvent(
     `${detail} Job ${jobId}.`.slice(0, 500),
     Date.now(),
   );
+}
+
+/**
+ * What a node needs to know before it may rehydrate a missing artifact.
+ *
+ * Read-only and deliberately narrow. A restore has to prove the bundle it was
+ * handed belongs to *this* deployment on *this* node, and only the control
+ * plane knows that; letting the Agent decide from the bundle alone would make
+ * the bundle its own authorisation. So this returns the identifiers and the
+ * checksum already recorded for the current artifact -- nothing else, and never
+ * an environment value, a secret, or a path.
+ *
+ * It mutates nothing, creates no evidence, and is scoped to the authenticated
+ * node: a deployment owned by another node is simply not found.
+ */
+export async function readArtifactRestorePreflight(
+  context: AgentContext,
+  deploymentId: string,
+): Promise<
+  | {
+      ok: true;
+      workspaceId: string;
+      projectId: string;
+      deploymentId: string;
+      nodeId: string;
+      currentArtifactId: string;
+      checksum: string;
+      desiredState: string;
+    }
+  | { ok: false; status: number; error: string }
+> {
+  if (!/^dpl_[a-f0-9]{24}$/.test(deploymentId)) {
+    return { ok: false, status: 400, error: 'Restore preflight request is invalid.' };
+  }
+  const row = await queryOne<{
+    workspaceId: string;
+    projectId: string | null;
+    nodeId: string | null;
+    currentArtifactId: string | null;
+    desiredState: string | null;
+    checksum: string | null;
+    artifactNodeId: string | null;
+  }>(
+    `SELECT d.workspaceId AS workspaceId, d.projectId AS projectId, d.nodeId AS nodeId,
+            d.currentArtifactId AS currentArtifactId, d.desiredState AS desiredState,
+            a.checksum AS checksum, a.nodeId AS artifactNodeId
+       FROM deployment d
+       LEFT JOIN app_artifact a ON a.id = d.currentArtifactId AND a.workspaceId = d.workspaceId
+      WHERE d.workspaceId = ? AND d.id = ? AND d.nodeId = ? AND d.deletedAt IS NULL`,
+    context.node.workspaceId,
+    deploymentId,
+    context.node.id,
+  );
+  if (!row || !row.projectId || !row.nodeId) {
+    return { ok: false, status: 404, error: 'Deployment not found for this node.' };
+  }
+  if (!row.currentArtifactId || !row.checksum || row.artifactNodeId !== context.node.id) {
+    return { ok: false, status: 409, error: 'This deployment has no current artifact on this node.' };
+  }
+  return {
+    ok: true,
+    workspaceId: row.workspaceId,
+    projectId: row.projectId,
+    deploymentId,
+    nodeId: row.nodeId,
+    currentArtifactId: row.currentArtifactId,
+    checksum: row.checksum,
+    desiredState: row.desiredState ?? 'running',
+  };
+}
+
+/**
+ * Records that a node has put a lost artifact back, byte for byte.
+ *
+ * Restoring a backup is local: bytes reappear on a disk the control plane
+ * cannot see, and until it is told, D1 still says `missing`. Every recovery
+ * route refuses an artifact believed gone, so without this the operator would
+ * have to issue a Start -- which is not recovery, it is a person doing by hand
+ * what Phase 18 exists to do. This is the smallest statement that closes that
+ * gap: the node says "this exact artifact, this exact checksum, is here again".
+ *
+ * The trust boundary is the one already used for every other artifact
+ * observation a node reports -- a signed request from the node that owns the
+ * deployment. It is not proof in a cryptographic sense; the Agent verified the
+ * rebuilt manifest and re-hashed the payload before calling, and the control
+ * plane believes that report exactly as much as it believes a job result that
+ * says an artifact verified. Stated plainly rather than dressed up.
+ *
+ * Nothing here can move an artifact between nodes, change what is current,
+ * change desired state, or invent a row: identity is read from the database
+ * and every supplied value has to agree with it.
+ */
+export async function confirmArtifactRestore(
+  context: AgentContext,
+  deploymentId: string,
+  body: { artifactId?: unknown; checksum?: unknown },
+): Promise<
+  | { ok: true; artifactId: string; availability: 'present'; recoveryCleared: boolean }
+  | { ok: false; status: number; error: string }
+> {
+  const artifactId = typeof body.artifactId === 'string' ? body.artifactId : '';
+  const checksum = typeof body.checksum === 'string' ? body.checksum : '';
+  if (
+    !/^dpl_[a-f0-9]{24}$/.test(deploymentId) ||
+    !/^art_[a-f0-9]{24}$/.test(artifactId) ||
+    !/^sha256:[a-f0-9]{64}$/.test(checksum)
+  ) {
+    return { ok: false, status: 400, error: 'Restore confirmation is invalid.' };
+  }
+  const row = await queryOne<{
+    projectId: string | null;
+    nodeId: string | null;
+    currentArtifactId: string | null;
+    artifactNodeId: string | null;
+    artifactChecksum: string | null;
+    artifactState: string | null;
+    availabilityState: string | null;
+    recoveryStatus: string | null;
+    recoveryReasonCode: string | null;
+  }>(
+    `SELECT d.projectId AS projectId, d.nodeId AS nodeId, d.currentArtifactId AS currentArtifactId,
+            a.nodeId AS artifactNodeId, a.checksum AS artifactChecksum, a.state AS artifactState,
+            a.availabilityState AS availabilityState,
+            d.recoveryStatus AS recoveryStatus, d.recoveryReasonCode AS recoveryReasonCode
+       FROM deployment d
+       LEFT JOIN app_artifact a
+         ON a.id = ? AND a.workspaceId = d.workspaceId AND a.projectId = d.projectId
+        AND a.deploymentId = d.id AND a.deletedAt IS NULL
+      WHERE d.workspaceId = ? AND d.id = ? AND d.nodeId = ? AND d.deletedAt IS NULL`,
+    artifactId,
+    context.node.workspaceId,
+    deploymentId,
+    context.node.id,
+  );
+  // One refusal for "not yours" and "not there", so probing cannot tell a
+  // foreign deployment apart from an absent one.
+  if (!row || !row.projectId || row.nodeId !== context.node.id) {
+    return { ok: false, status: 404, error: 'Deployment not found for this node.' };
+  }
+  if (
+    !row.artifactChecksum || row.artifactNodeId !== context.node.id ||
+    row.artifactState !== 'verified' || row.currentArtifactId !== artifactId
+  ) {
+    return { ok: false, status: 409, error: 'That artifact is not the current verified artifact on this node.' };
+  }
+  if (!constantTimeEqual(checksum, row.artifactChecksum)) {
+    return { ok: false, status: 409, error: 'The restored checksum does not match the recorded artifact.' };
+  }
+
+  const now = Date.now();
+  // Only a condition this evidence actually refutes is cleared. A recovery
+  // blocked on a port already in use is not answered by bytes reappearing, and
+  // clearing it would be inventing a remediation that never happened.
+  const availabilityCondition = new Set(['artifact_missing', 'artifact_corrupted', 'artifact_unavailable']);
+  const blocked = row.recoveryStatus === 'blocked' || row.recoveryStatus === 'failed' ||
+    row.recoveryStatus === 'pending';
+  const clears = blocked && availabilityCondition.has(row.recoveryReasonCode ?? '');
+  await execute(
+    `UPDATE app_artifact
+        SET availabilityState = 'present', lastVerifiedOnNodeAt = ?
+      WHERE workspaceId = ? AND projectId = ? AND deploymentId = ? AND nodeId = ?
+        AND id = ? AND checksum = ? AND state = 'verified' AND deletedAt IS NULL`,
+    now, context.node.workspaceId, row.projectId, deploymentId, context.node.id,
+    artifactId, row.artifactChecksum,
+  );
+  if (clears) {
+    // Phase 18 refuses to retry a blocked recovery without remediation or a new
+    // intent revision, and it is right to: restarting an Agent must never
+    // become an automatic retry loop. A restore *is* the remediation, so the
+    // condition is retired here rather than by asking a person to press Start.
+    // The generation goes with it, or the same guard would still hold.
+    await execute(
+      `UPDATE deployment
+          SET recoveryStatus = NULL, recoveryReasonCode = NULL, recoveryGeneration = NULL,
+              updatedAt = ?
+        WHERE workspaceId = ? AND id = ? AND nodeId = ? AND deletedAt IS NULL
+          AND currentArtifactId = ?`,
+      now, context.node.workspaceId, deploymentId, context.node.id, artifactId,
+    );
+  }
+  const tenant = await queryOne<{ organizationId: string | null }>(
+    'SELECT organizationId FROM workspace WHERE id = ?', context.node.workspaceId,
+  );
+  const workspace = { organizationId: tenant?.organizationId ?? '' };
+  if (workspace.organizationId) {
+    await recordEvidence({
+      organizationId: workspace.organizationId,
+      workspaceId: context.node.workspaceId,
+      actorType: 'system',
+      actorId: 'system:artifact-restore',
+      action: 'deployment.artifact_restore',
+      resourceId: deploymentId,
+      outcome: 'success',
+      metadata: {
+        artifactId,
+        nodeId: context.node.id,
+        availability: 'present',
+        clearedReasonCode: clears ? row.recoveryReasonCode ?? '' : '',
+      },
+    });
+  }
+  return { ok: true, artifactId, availability: 'present', recoveryCleared: clears };
+}
+
+/**
+ * Agrees a private port a node can actually bind.
+ *
+ * The control plane assigns private ports from its own range, and until now it
+ * assumed a port no deployment owned was a port the node could use. That is not
+ * true on Windows: blocks are reserved for Hyper-V and WSL, and binding one
+ * fails with `EACCES` while nothing is listening on it. A node assigned 41000
+ * out of a reserved 40947-41146 range could not deploy anything, ever.
+ *
+ * So bindability is the node's to determine and assignment stays the control
+ * plane's. The node offers a short list of ports it has just bound and released;
+ * this picks the first that no other deployment on that node holds, and writes
+ * it. Nothing about which artifact runs, what state it is in, or who owns it
+ * moves.
+ */
+export async function negotiatePrivatePort(
+  context: AgentContext,
+  deploymentId: string,
+  body: { expectedCurrentPort?: unknown; candidatePorts?: unknown },
+): Promise<
+  | { ok: true; localPort: number; changed: boolean }
+  | { ok: false; status: number; error: string }
+> {
+  const candidates = parsePrivatePortCandidates(body.candidatePorts);
+  if (!/^dpl_[a-f0-9]{24}$/.test(deploymentId) || !candidates
+    || !privatePortInRange(body.expectedCurrentPort)) {
+    return { ok: false, status: 400, error: 'Private port negotiation is invalid.' };
+  }
+  const expected = body.expectedCurrentPort;
+  const row = await queryOne<{
+    projectId: string | null;
+    nodeId: string | null;
+    localPort: number | null;
+    state: string | null;
+    observedState: string | null;
+  }>(
+    `SELECT projectId, nodeId, localPort, state, observedState FROM deployment
+     WHERE workspaceId = ? AND id = ? AND nodeId = ? AND deletedAt IS NULL`,
+    context.node.workspaceId, deploymentId, context.node.id,
+  );
+  if (!row || !row.projectId || row.nodeId !== context.node.id) {
+    return { ok: false, status: 404, error: 'Deployment not found for this node.' };
+  }
+  // A port is negotiated on the way to running, not out from under something
+  // already serving on it. A healthy deployment keeps the port it has -- Phase
+  // 18 recovery and the artifact restore gate both depend on that staying put.
+  if (row.observedState === 'healthy') {
+    return { ok: false, status: 409, error: 'A healthy deployment keeps its private port.' };
+  }
+  if (row.localPort !== expected) {
+    // Someone else moved it. Refuse rather than overwrite a newer assignment.
+    return { ok: false, status: 409, error: 'The private port changed; refresh and retry.' };
+  }
+  if (candidates.includes(expected) ) {
+    // The node can bind what it already has; nothing to negotiate.
+    return { ok: true, localPort: expected, changed: false };
+  }
+
+  const taken = new Set((await query<{ localPort: number }>(
+    `SELECT localPort FROM deployment
+     WHERE nodeId = ? AND localPort IS NOT NULL AND deletedAt IS NULL
+       AND state <> 'blocked' AND id <> ?`,
+    context.node.id, deploymentId,
+  )).map((entry) => entry.localPort));
+
+  for (const candidate of candidates) {
+    if (taken.has(candidate)) continue;
+    // Conditional on the port we read, so two deployments negotiating at once
+    // cannot both take it: the loser's update matches nothing and it moves on.
+    const claimed = await execute(
+      `UPDATE deployment SET localPort = ?, localAddress = ?, updatedAt = ?
+        WHERE workspaceId = ? AND id = ? AND nodeId = ? AND localPort = ?
+          AND deletedAt IS NULL`,
+      candidate, `http://127.0.0.1:${candidate}`, Date.now(),
+      context.node.workspaceId, deploymentId, context.node.id, expected,
+    );
+    if ((claimed as { meta?: { changes?: number } }).meta?.changes === 1) {
+      return { ok: true, localPort: candidate, changed: true };
+    }
+    return { ok: false, status: 409, error: 'The private port changed; refresh and retry.' };
+  }
+  return { ok: false, status: 409, error: 'No private port on this node is available.' };
 }
 
 export async function readAgentJobStatus(

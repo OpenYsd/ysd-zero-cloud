@@ -586,10 +586,10 @@ void test('the audit table explains what a position is and what a gap means', ()
 void test('Phase 14 catalog grew by exactly the two implemented readiness actions', () => {
   // Pinned deliberately: 23 (Phase 13 + P0) + 2 (readiness) + 1 (the Phase 15
   // Shield sweep) + 2 (Phase 16 node onboarding) + 2 (Phase 17 release and
-  // rollback) + 1 (Phase 18 recovery) = 31. A silent removal or
-  // rename of any of them must fail this assertion by name, not just as a
-  // shrinking total.
-  assert.equal(EVIDENCE_ACTIONS.length, 31);
+  // rollback) + 1 (Phase 18 recovery) + 1 (Phase 21 artifact restore) = 32. A
+  // silent removal or rename of any of them must fail this assertion by name,
+  // not just as a shrinking total.
+  assert.equal(EVIDENCE_ACTIONS.length, 32);
 
   const readinessActions = EVIDENCE_ACTIONS.filter((entry) =>
     entry.action.startsWith('project.readiness.'),

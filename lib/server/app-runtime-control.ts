@@ -171,6 +171,13 @@ export async function recordAppRuntimeJobOutcome(input: {
          WHERE workspaceId = ? AND id = ? AND jobId = ?`,
       )
       .bind(outcomeState, outcomeError, input.now, input.now, input.job.workspaceId, payload.actionId, input.job.id),
+    // A recovery condition describes an application that could not be brought
+    // back. Once one is running again -- by recovery, or by an operator who
+    // fixed what was wrong and started it -- the condition is over, and a
+    // dashboard still reporting `artifact_missing` beside a healthy service is
+    // simply wrong. Clearing it cannot become a retry loop: reconciliation
+    // skips any deployment the Agent is already managing, so it only ever
+    // fires for an application that is demonstrably up.
     database
       .prepare(
         `UPDATE deployment
@@ -189,8 +196,10 @@ export async function recordAppRuntimeJobOutcome(input: {
                WHEN ? = 1 AND ? = 'healthy' THEN 'healthy'
                WHEN ? = 0 THEN 'blocked' ELSE observedState END,
              lastReconciledAt = CASE WHEN ? = 'recover' THEN ? ELSE lastReconciledAt END,
-             recoveryStatus = CASE WHEN ? = 'recover' THEN ? ELSE recoveryStatus END,
-             recoveryReasonCode = CASE WHEN ? = 'recover' THEN ? ELSE recoveryReasonCode END
+             recoveryStatus = CASE WHEN ? = 'recover' THEN ?
+               WHEN ? = 1 AND ? = 'healthy' THEN NULL ELSE recoveryStatus END,
+             recoveryReasonCode = CASE WHEN ? = 'recover' THEN ?
+               WHEN ? = 1 AND ? = 'healthy' THEN NULL ELSE recoveryReasonCode END
          WHERE workspaceId = ? AND id = ? AND jobId = ?`,
       )
       .bind(
@@ -230,10 +239,14 @@ export async function recordAppRuntimeJobOutcome(input: {
         input.now,
         payload.operation,
         effectiveSuccess ? 'succeeded' : reportedReason === 'artifact_missing' || reportedReason === 'artifact_corrupted' || reportedReason === 'port_in_use' || reportedReason === 'runtime_incompatible' || reportedReason === 'node_revoked' || reportedReason === 'disk_low' || reportedReason === 'recovery_busy' || reportedReason === 'stale_desired_revision' ? 'blocked' : 'failed',
+        effectiveSuccess ? 1 : 0,
+        deploymentState,
         payload.operation,
         recoveryIntent?.desiredState !== 'running' || recoveryIntent?.desiredRevision !== payload.expectedDesiredRevision
           ? 'stale_desired_revision'
           : reportedReason,
+        effectiveSuccess ? 1 : 0,
+        deploymentState,
         input.job.workspaceId,
         payload.deploymentId,
         input.job.id,

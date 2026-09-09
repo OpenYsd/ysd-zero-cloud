@@ -62,8 +62,14 @@ import {
 } from './managed-upgrade.ts';
 import { buildManagedLauncherSource } from './managed-launcher.ts';
 import {
+  generationCleared,
+  observeManagedNativeGeneration,
+  type ManagedNativeGeneration,
+} from './managed-generation.ts';
+import {
   acquireMaintenanceOwnership,
   agentOwnershipHeld,
+  launcherOwnershipHeld,
   requestManagedUpgradeShutdown,
 } from './instance-lock.ts';
 
@@ -842,6 +848,9 @@ async function installManagedAutostart(input: {
   await writeManagedStatus(layout.statusPath, initialStatus(manager, registrationFingerprint));
   if (manager === 'windows-task-scheduler') {
     const rendered = renderWindowsTask(managerConfig);
+    // `/Create /F` replaces a registration, and replacing one that is running
+    // ends its process tree. Repair before a trial, never during one.
+    await assertNoLiveTrial(layout.installPath, 'register');
     await registerWindows(rendered);
     const live = await windowsTaskXml(rendered.id);
     if (!live || fingerprintWindowsTaskXml(live, managerConfig) !== rendered.fingerprint) {
@@ -849,6 +858,12 @@ async function installManagedAutostart(input: {
     }
     const started = await runFile(systemExecutable('schtasks.exe'), ['/Run', '/TN', rendered.id]);
     if (started.code !== 0) throw new Error('Task Scheduler could not start the managed Agent.');
+    // Not "the command returned 0" -- that only says the request was accepted.
+    // A start is finished when the launcher is visible to everyone else, so
+    // the next operation cannot mistake it for an idle node.
+    if (!(await waitForLauncherVisible(layout.credentialPath, credentials.nodeId))) {
+      throw new Error('launcher_did_not_start');
+    }
   } else if (manager === 'systemd-user') {
     await registerSystemd(managerConfig, renderSystemdUserUnit(managerConfig));
   } else {
@@ -1049,7 +1064,43 @@ async function probeCandidate(
  * stop`, `launchctl kill` -- not a re-registration. The task, unit and plist
  * are byte-identical before and after.
  */
-async function stopManagedRegistration(install: ManagedInstall): Promise<void> {
+/**
+ * Refuses a manager operation that would terminate a live trial.
+ *
+ * On Windows both `schtasks /Create /F` and `schtasks /End` end the task's
+ * process tree with TerminateProcess -- no signal, no Node shutdown, no exit
+ * hook. Run against a published trial they kill the supervising launcher and
+ * the candidate together, leaving a spent attempt, a candidate that may
+ * already have proved itself, and nobody left to promote it. That is not a
+ * hypothetical: it is the failure this guard exists to make unrepeatable.
+ *
+ * Ordering alone fixed the one path that had it wrong. This makes the rule
+ * enforceable rather than remembered, because the next person to add a
+ * registration repair will not know it. A deliberate abort passes
+ * `abortingTransaction` -- it owns the transaction and means to end it.
+ */
+async function assertNoLiveTrial(
+  installPath: string,
+  operation: string,
+  abortingTransaction = false,
+): Promise<void> {
+  if (abortingTransaction) return;
+  const install = await previousInstall(installPath);
+  if (!install) return;
+  if (upgradeOf(install).state === 'trial') {
+    throw new Error(`${operation}_would_terminate_live_trial`);
+  }
+}
+
+async function stopManagedRegistration(
+  install: ManagedInstall,
+  abortingTransaction = false,
+): Promise<void> {
+  await assertNoLiveTrial(
+    path.join(path.dirname(install.launcherPath), 'install.json'),
+    'end_registration',
+    abortingTransaction,
+  );
   if (install.manager === 'windows-task-scheduler') {
     await runFile(systemExecutable('schtasks.exe'), ['/End', '/TN', install.registrationId]);
   } else if (install.manager === 'systemd-user') {
@@ -1062,8 +1113,110 @@ async function stopManagedRegistration(install: ManagedInstall): Promise<void> {
   }
 }
 
+
+/**
+ * How long a managed launcher is given to become visible after a start.
+ *
+ * This is not a settling delay -- nothing waits for it in the good case. It is
+ * the bound on a start that never arrives, so a broken registration fails
+ * loudly instead of hanging.
+ */
+const LAUNCHER_VISIBLE_LIMIT_MS = 30_000;
+
+/**
+ * Waits for a started launcher to actually take orchestration ownership.
+ *
+ * Between `CreateProcess` and the moment a launcher binds its ownership pipe
+ * it is invisible: it holds no lock, and Task Scheduler may already report the
+ * task `Ready`. A caller that returns from `/Run` during that window leaves
+ * behind a start it cannot see, and the next operation reasonably concludes
+ * nothing is running. That is precisely how a launcher came to claim a freshly
+ * published trial and then be killed by an `/End` that was already in flight.
+ *
+ * So a start is complete when the launcher is visible, never before.
+ */
+export async function waitForLauncherVisible(
+  credentialPath: string,
+  nodeId: string,
+  limitMs = LAUNCHER_VISIBLE_LIMIT_MS,
+): Promise<boolean> {
+  const deadline = Date.now() + limitMs;
+  while (Date.now() < deadline) {
+    // Either answer means the manager did its job. A launcher that starts,
+    // finds an Agent already holding this node and stands down is behaving
+    // correctly -- and it can do all of that between two polls, so requiring
+    // the launcher itself to be caught in the act would call a healthy node a
+    // failed start. What matters is that the identity is owned.
+    if (await launcherOwnershipHeld(credentialPath, nodeId)) return true;
+    if (await agentOwnershipHeld(credentialPath, nodeId)) return true;
+    await delay(200);
+  }
+  return false;
+}
+
+/**
+ * Waits for a managed generation to be gone, from ownership alone.
+ *
+ * `schtasks /End` returns before the termination lands, and Task Scheduler was
+ * observed reporting `Ready` while the launcher it started was still alive and
+ * about to become the supervisor. So its status is supplementary evidence at
+ * best; the authority is the ownership pipe.
+ *
+ * When the caller saw ownership held before stopping, a `held -> free`
+ * transition has to be observed. Reading `free` at the first poll proves
+ * nothing in that case -- it is the same reading a launcher still inside its
+ * startup window produces.
+ */
+/** The managed generation Task Scheduler is running for this node, right now. */
+export async function managedNativeGeneration(
+  install: Pick<ManagedInstall, 'manager' | 'registrationId' | 'launcherPath'>,
+): Promise<ManagedNativeGeneration> {
+  if (install.manager !== 'windows-task-scheduler') return { instances: [], launchers: [] };
+  return await observeManagedNativeGeneration({
+    registrationId: install.registrationId,
+    launcherPath: install.launcherPath,
+    powershell: systemExecutable('WindowsPowerShell\\v1.0\\powershell.exe'),
+    run: (file, arguments_, environment) => runFile(file, arguments_, {
+      timeoutMs: 30_000,
+      env: { ...process.env, ...environment },
+    }),
+  });
+}
+
+export async function waitForManagedGenerationGone(
+  credentialPath: string,
+  nodeId: string,
+  wasHeld: boolean,
+  limitMs = 90_000,
+  native?: {
+    before: ManagedNativeGeneration;
+    install: Pick<ManagedInstall, 'manager' | 'registrationId' | 'launcherPath'>;
+  },
+): Promise<boolean> {
+  const deadline = Date.now() + limitMs;
+  let observedHeld = !wasHeld;
+  while (Date.now() < deadline) {
+    const held = await launcherOwnershipHeld(credentialPath, nodeId);
+    if (held) observedHeld = true;
+    if (!held && observedHeld && !(await agentOwnershipHeld(credentialPath, nodeId))) {
+      // The ownership locks are satisfied. On Windows that is not yet enough:
+      // a launcher the manager has already created, but which has not reached
+      // the line that binds its pipe, satisfies them too. Whatever the manager
+      // was running before the stop has to be gone as well.
+      if (!native) return true;
+      const now = await managedNativeGeneration(native.install);
+      if (generationCleared(native.before, now)) return true;
+    }
+    await delay(200);
+  }
+  return false;
+}
+
 /** Starts the existing registration again. Same command line, same task. */
-async function startManagedRegistration(install: ManagedInstall): Promise<void> {
+async function startManagedRegistration(
+  install: ManagedInstall,
+  confirm?: { credentialPath: string; nodeId: string },
+): Promise<void> {
   if (install.manager === 'windows-task-scheduler') {
     const started = await runFile(systemExecutable('schtasks.exe'), ['/Run', '/TN', install.registrationId]);
     if (started.code !== 0) throw new Error('registration_invalid');
@@ -1075,6 +1228,11 @@ async function startManagedRegistration(install: ManagedInstall): Promise<void> 
     if (uid === undefined) throw new Error('manager_missing');
     const started = await runFile('launchctl', ['kickstart', `gui/${uid}/${install.registrationId}`]);
     if (started.code !== 0) throw new Error('registration_invalid');
+  }
+  // Returning here while the launcher is still invisible is what let a later
+  // operation believe nothing was running.
+  if (confirm && !(await waitForLauncherVisible(confirm.credentialPath, confirm.nodeId))) {
+    throw new Error('launcher_did_not_start');
   }
 }
 
@@ -1088,12 +1246,19 @@ async function waitForManagedIdle(
   const deadline = Date.now() + limitMs;
   while (Date.now() < deadline) {
     const held = await agentOwnershipHeld(credentialPath, nodeId);
+    // A launcher between children holds no Agent lock and its task instance
+    // already reads Ready, yet it is very much still supervising and about to
+    // start something. Waiting only on those two is what allowed a second
+    // launcher to be started underneath the first, with both then spending
+    // the same trial budget. A launcher that predates this lock holds nothing,
+    // so the v1 -> v2 bridge answers exactly as it did before.
+    const supervised = await launcherOwnershipHeld(credentialPath, nodeId);
     let managerIdle = true;
     if (install.manager === 'windows-task-scheduler') {
       const query = await runFile(systemExecutable('schtasks.exe'), ['/Query', '/TN', install.registrationId, '/FO', 'LIST']);
       managerIdle = query.code === 0 && /^Status:\s+Ready\s*$/mu.test(query.stdout);
     }
-    if (!held && managerIdle) return true;
+    if (!held && !supervised && managerIdle) return true;
     await delay(500);
   }
   return false;
@@ -1321,9 +1486,35 @@ export async function upgradeAutostart(input: {
       next = { ...next, launcherHash, updatedAt: Date.now() };
     }
 
-    next = beginTrial(next, candidate, transactionId, Date.now());
-    await atomicWrite(layout.installPath, `${JSON.stringify(next)}\n`);
-
+    // The transaction stays `staged` across everything below. A launcher only
+    // acts on `trial`, so while the plan says staged there is nothing for a
+    // doomed generation to pick up.
+    //
+    // This ordering is the fix for a real failure, and it is worth stating why
+    // it is not merely tidier. `schtasks /End` -- and `/Create /F`, which the
+    // registration writer uses -- terminate the task's process tree with
+    // TerminateProcess. No signal, no Node shutdown, no exit hook. Publishing
+    // the trial before that call meant an older launcher could read it, start
+    // the candidate, and then have both itself and that candidate killed
+    // outright, leaving a trial with a spent attempt, no supervisor, and
+    // nothing left alive to promote the candidate that had already proved
+    // itself. Every destructive manager operation happens here, first.
+    // Whether a launcher was supervising *before* the stop decides what
+    // counts as proof afterwards. If one was, only a `held -> free` transition
+    // shows the stop landed; `free` on its own is also what a launcher still
+    // inside its startup window looks like.
+    const supervisedBeforeStop = await launcherOwnershipHeld(
+      input.credentialPath,
+      credentials.nodeId,
+    );
+    // Captured before the stop, and only to answer one question afterwards:
+    // has what the manager was running actually gone? The frozen 0.6.0 repair
+    // that precedes this upgrade starts a launcher through Task Scheduler and
+    // returns immediately, so `supervisedBeforeStop` can be false while a
+    // launcher is very much on its way up. This is the evidence that exists
+    // during that window. Local and ephemeral -- never written to the install
+    // file, never sent anywhere.
+    const nativeBeforeStop = await managedNativeGeneration(next);
     const handoff = await requestManagedUpgradeShutdown(
       input.credentialPath,
       credentials.nodeId,
@@ -1335,10 +1526,13 @@ export async function upgradeAutostart(input: {
       // stop is what guarantees the old launcher exits too.
       await stopManagedRegistration(next);
     }
-    if (!(await waitForManagedIdle(input.credentialPath, credentials.nodeId, next))) {
+    if (!(await waitForManagedGenerationGone(
+      input.credentialPath, credentials.nodeId, supervisedBeforeStop, 90_000,
+      { before: nativeBeforeStop, install: next },
+    )) || !(await waitForManagedIdle(input.credentialPath, credentials.nodeId, next))) {
       // Something still owns the node. Starting the candidate now would mean
-      // two Agents, so the transaction steps back to staged and the Agent that
-      // is already running keeps the machine.
+      // two Agents, so the transaction stays staged and the Agent that is
+      // already running keeps the machine.
       await atomicWrite(
         layout.installPath,
         `${JSON.stringify(stageTransaction(next, candidate, transactionId, Date.now()))}\n`,
@@ -1347,7 +1541,21 @@ export async function upgradeAutostart(input: {
     }
     await appendManagedLog(layout.logDirectory, 'Current Agent stopped for upgrade\n');
 
-    await startManagedRegistration(next);
+    // Idle here is proven by the two ownership locks, not by the manager's own
+    // status: the investigation showed Task Scheduler reporting `Ready` while
+    // a launcher it had started was still alive and supervising.
+    //
+    // Only now does the trial become visible, and from this line until the
+    // transaction resolves nothing may re-register or end the native task.
+    // The single `startManagedRegistration` below is the only manager call
+    // left, and it starts a task rather than replacing or ending one.
+    next = beginTrial(next, candidate, transactionId, Date.now());
+    await atomicWrite(layout.installPath, `${JSON.stringify(next)}\n`);
+
+    await startManagedRegistration(next, {
+      credentialPath: input.credentialPath,
+      nodeId: credentials.nodeId,
+    });
     const settled = await awaitTransactionSettled(layout, transactionId, input.settleMs ?? 180_000);
     return describeTransaction(settled ?? next, transactionId, candidate.version, handoff);
   } finally {

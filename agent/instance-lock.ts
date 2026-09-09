@@ -50,10 +50,11 @@ const COMMAND_WINDOW_MS = 2_000;
 const REQUEST_TIMEOUT_MS = 5_000;
 const UPGRADE_COMMAND = /^upgrade ([a-f0-9]{32})$/u;
 
-type LockKind = 'agent' | 'maintenance';
+type LockKind = 'agent' | 'maintenance' | 'launcher';
 
 function busyReason(kind: LockKind): string {
-  return kind === 'agent' ? 'already_running' : 'maintenance_busy';
+  if (kind === 'agent') return 'already_running';
+  return kind === 'launcher' ? 'launcher_already_running' : 'maintenance_busy';
 }
 
 function windowsEndpoint(kind: LockKind, identity: string): string {
@@ -195,6 +196,35 @@ export async function acquireMaintenanceOwnership(
   nodeId: string,
 ): Promise<AgentOwnership> {
   return await acquire('maintenance', configPath, nodeId);
+}
+
+/**
+ * Orchestration ownership for one managed node.
+ *
+ * The Agent lock says who may *be* the Agent. This says who may *supervise*
+ * one: choose the release, spend a trial attempt, spawn the candidate, read
+ * its exit and decide to promote or roll back. Those are a single indivisible
+ * job, and two launchers doing half of it each is how a trial budget gets
+ * spent without a candidate ever being given a fair start.
+ *
+ * Held for the launcher's whole life, not just around the install file: a lock
+ * released before the spawn would still let a second launcher start a second
+ * candidate.
+ */
+export async function acquireLauncherOwnership(
+  configPath: string,
+  nodeId: string,
+): Promise<AgentOwnership> {
+  return await acquire('launcher', configPath, nodeId);
+}
+
+/** Whether some launcher currently supervises this node identity. */
+export async function launcherOwnershipHeld(configPath: string, nodeId: string): Promise<boolean> {
+  const identity = await deriveManagedIdentity(configPath, nodeId);
+  const endpoint = process.platform === 'win32'
+    ? windowsEndpoint('launcher', identity)
+    : path.join(path.resolve(path.dirname(configPath)), socketName('launcher', identity));
+  return await connect(endpoint);
 }
 
 /** Whether some Agent currently holds this node identity. */

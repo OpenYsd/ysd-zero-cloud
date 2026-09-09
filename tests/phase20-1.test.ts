@@ -120,8 +120,12 @@ void test('the generated launcher writes the legacy key set and nothing else', (
   assert.match(publish!, /status=legacyStatus\(\{\.\.\.status,\.\.\.patch\}\)/);
   // The one runtime observation that used to live in the status file is now an
   // annotation on the transaction, which is where the install file already
-  // keeps every other reason.
-  assert.match(launcher, /reason:'network_unavailable'/);
+  // keeps every other reason. It says what it actually knows: the readiness
+  // marker has not appeared. It used to say `network_unavailable`, which was a
+  // diagnosis it had no evidence for -- the control plane is often perfectly
+  // reachable while a candidate is simply still starting.
+  assert.match(launcher, /reason:'waiting_for_readiness'/);
+  assert.doesNotMatch(launcher, /reason:'network_unavailable'/);
   assert.match(launcher, /await atomic\(installPath,install\);await queueLog\(logDirectory,'candidate trial waiting/);
 });
 
@@ -132,6 +136,13 @@ void test('the transaction projection comes from the install file alone', () => 
   assert.equal(
     managed.projectUpgradeStatus({ ...idle, state: 'trial', candidate, reason: 'network_unavailable' }).state,
     'upgrade_waiting_for_network',
+  );
+  // A candidate that has not reported readiness yet is just a trial in
+  // progress. Reporting it as a network problem would send an operator
+  // looking at their firewall for something that is only still starting.
+  assert.equal(
+    managed.projectUpgradeStatus({ ...idle, state: 'trial', candidate, reason: 'waiting_for_readiness' }).state,
+    'upgrade_trial',
   );
   assert.equal(managed.projectUpgradeStatus({ ...idle, state: 'blocked', reason: 'authorization_rejected' }).state, 'upgrade_blocked');
   // Status reporting must not be able to change the transaction.
@@ -247,9 +258,9 @@ void test('Phase 20.1 is a compatibility hotfix and nothing more', async () => {
   const migrations = await readdir(path.join(repoRoot, 'db', 'migrations'));
   assert.equal(migrations.at(-1), '0020_runtime_recovery.sql');
   assert.equal(migrations.some((name) => name.startsWith('0021')), false);
-  assert.equal(CURRENT_AGENT_VERSION, '0.7.1');
+  assert.equal(CURRENT_AGENT_VERSION, '0.8.0');
   assert.equal(NODE_PROTOCOL_VERSION, 1);
-  assert.equal(JSON.parse(await readFile(path.join(repoRoot, 'package.json'), 'utf8')).version, '0.20.1');
+  assert.equal(JSON.parse(await readFile(path.join(repoRoot, 'package.json'), 'utf8')).version, '0.21.0');
   // The retained Phase 19 Agent is untouched: this fix lives entirely on the
   // newer side, which is the only side that can still be changed.
   const phase19 = phase19Source();

@@ -147,6 +147,32 @@ function AutostartSummary({ node }: { node: ComputeNode }) {
   );
 }
 
+/**
+ * What this node can do with artifact backups.
+ *
+ * Instructions, not actions. The backup lives on a filesystem this control
+ * plane cannot see and must never be able to write to, so there is no button
+ * here -- naming the scope honestly is the whole job.
+ */
+function ArtifactBackupSummary({ node }: { node: ComputeNode }) {
+  const backup = node.capabilities.artifactBackup;
+  if (!backup?.supported) {
+    return (
+      <div className="mt-2 border-t border-white/[0.05] pt-2 text-[9px] text-white/28">
+        <p>Artifact backup · Unsupported</p>
+        <p>Upgrade Agent to {CURRENT_AGENT_VERSION}</p>
+      </div>
+    );
+  }
+  return (
+    <div className="mt-2 border-t border-white/[0.05] pt-2 text-[9px] text-white/35">
+      <p className="text-[#c8ff69]">Artifact backup · Supported</p>
+      <p>Restores on this node only</p>
+      <p>Offline verification supported</p>
+    </div>
+  );
+}
+
 export function NodesView({ state, now }: { state: NodesState; now: number }) {
   const router = useRouter();
   const [name, setName] = useState('My compute node');
@@ -575,6 +601,7 @@ export function NodesView({ state, now }: { state: NodesState; now: number }) {
                       </p>
                     ) : null}
                     <AutostartSummary node={node} />
+                    <ArtifactBackupSummary node={node} />
                   </TableCell>
                   <TableCell className="px-4 py-3 text-white/38">
                     {node.lastHeartbeatAt

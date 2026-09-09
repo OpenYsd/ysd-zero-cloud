@@ -636,6 +636,64 @@ export function parseAppRuntimeSnapshots(value: unknown): AppRuntimeSnapshot[] |
   return snapshots;
 }
 
+/**
+ * How many locally bindable ports a node may offer at once.
+ *
+ * Bounded on purpose: the Agent may look at as many local ports as it needs to
+ * find these, but what crosses the wire stays small and reviewable.
+ */
+export const PRIVATE_PORT_CANDIDATE_LIMIT = 8;
+
+/** Reason codes for a private port that cannot be used. */
+export const PRIVATE_PORT_REASONS = [
+  'private_port_unavailable',
+  'no_available_private_port',
+] as const;
+export type PrivatePortReason = (typeof PRIVATE_PORT_REASONS)[number];
+
+export function privatePortInRange(value: unknown): value is number {
+  return Number.isSafeInteger(value)
+    && (value as number) >= APP_RUNTIME_LIMITS.portMinimum
+    && (value as number) <= APP_RUNTIME_LIMITS.portMaximum;
+}
+
+/**
+ * The order a node walks the private range looking for a usable port.
+ *
+ * Starts at the port the control plane picked and wraps once, so a node whose
+ * low ports are reserved by the operating system still prefers something close
+ * to the assignment rather than jumping to an arbitrary corner of the range.
+ */
+export function privatePortSearchOrder(preferred: number): number[] {
+  const span = APP_RUNTIME_LIMITS.portMaximum - APP_RUNTIME_LIMITS.portMinimum + 1;
+  const start = privatePortInRange(preferred) ? preferred : APP_RUNTIME_LIMITS.portMinimum;
+  const order: number[] = [];
+  for (let step = 0; step < span; step += 1) {
+    const offset = (start - APP_RUNTIME_LIMITS.portMinimum + step) % span;
+    order.push(APP_RUNTIME_LIMITS.portMinimum + offset);
+  }
+  return order;
+}
+
+/**
+ * Validates the candidate list a node offers.
+ *
+ * Every value has to be a real port inside the private range, the list has to
+ * be bounded, and it may not repeat -- a node that could propose the same port
+ * eight times would be proposing nothing useful, and a node that could propose
+ * an out-of-range one would be proposing something the runtime never binds.
+ */
+export function parsePrivatePortCandidates(value: unknown): number[] | null {
+  if (!Array.isArray(value) || value.length === 0) return null;
+  if (value.length > PRIVATE_PORT_CANDIDATE_LIMIT) return null;
+  const seen = new Set<number>();
+  for (const entry of value) {
+    if (!privatePortInRange(entry) || seen.has(entry)) return null;
+    seen.add(entry);
+  }
+  return [...seen];
+}
+
 export function appRuntimeLeaseDuration(operation: AppRuntimeOperation): number {
   return operation === 'deploy' || operation === 'redeploy' || operation === 'rollback'
     ? APP_RUNTIME_LIMITS.buildTimeoutMs + 2 * 60_000

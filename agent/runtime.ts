@@ -84,11 +84,13 @@ export async function collectCapabilities(
     gameServers,
     appRuntime,
     ...(autostart ? { autostart } : {}),
+    artifactBackup: { version: 1, supported: true, offlineVerify: true, sameNodeRestore: true },
     contracts: {
       ai: ai.runtimes.some((runtime) => runtime.available),
       gameServers: gameServers.minecraftJavaAvailable,
       appRuntime: appRuntime.available,
       ...(autostart ? { autostart: autostart.supported } : {}),
+      artifactBackup: true,
     },
   };
 }
@@ -113,6 +115,7 @@ export type AgentJobResult =
 
 export async function executeSignedJob(input: {
   token: string;
+  origin?: string;
   claim: SignedJobClaim;
   signature: string;
   capabilities: NodeCapabilities;
@@ -209,6 +212,7 @@ export async function executeSignedJob(input: {
         payload: input.claim.payload,
         workspaceId: input.claim.workspaceId,
         token: input.token,
+        origin: input.origin,
         capabilities: input.capabilities.appRuntime ?? {
           available: false,
           nodeVersion: process.versions.node,

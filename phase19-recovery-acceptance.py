@@ -274,8 +274,13 @@ try:
     }, {"Idempotency-Key": f"phase19-deploy-{RUN}"})
     deployment = (body or {}).get("deployment")
     check("private Zero Mode deployment queued", status == 202 and deployment, f"got {status}")
-    deployment_id, port = deployment["id"], deployment["localPort"]
+    deployment_id = deployment["id"]
     row = wait_deployment(operator, deployment_id, {"healthy", "failed", "crash_loop"})
+    # The creation response carries the port the allocator proposed. Where the
+    # operating system refuses it, Agent 0.8 negotiates a bindable one and the
+    # control plane records that instead, so the authoritative port is read back
+    # rather than assumed.
+    port = (row or {}).get("localPort", deployment["localPort"])
     check("initial deployment is healthy", (row or {}).get("state") == "healthy", str(row))
     check("marker is served before recovery", MARKER in body_at(port))
     _, before_detail = operator.request("GET", f"/api/deployments/{deployment_id}")
