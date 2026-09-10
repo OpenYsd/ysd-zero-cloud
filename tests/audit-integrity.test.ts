@@ -589,7 +589,7 @@ void test('Phase 14 catalog grew by exactly the two implemented readiness action
   // rollback) + 1 (Phase 18 recovery) + 1 (Phase 21 artifact restore) = 32. A
   // silent removal or rename of any of them must fail this assertion by name,
   // not just as a shrinking total.
-  assert.equal(EVIDENCE_ACTIONS.length, 32);
+  assert.equal(EVIDENCE_ACTIONS.length, 35);
 
   const readinessActions = EVIDENCE_ACTIONS.filter((entry) =>
     entry.action.startsWith('project.readiness.'),

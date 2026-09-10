@@ -58,7 +58,7 @@ export const NODE_PROTOCOL_VERSION = 1;
 // bytes are lost. Nothing about the protocol changes: backup and verify are
 // entirely local, and restore reads one bounded, node-authenticated preflight
 // before it writes anything.
-export const CURRENT_AGENT_VERSION = '0.8.0';
+export const CURRENT_AGENT_VERSION = '0.9.0';
 export const MINIMUM_AGENT_VERSION = '0.3.0';
 
 export const NODE_TIMING = {
@@ -119,6 +119,8 @@ export type ArtifactBackupCapability = {
   supported: boolean;
   offlineVerify: boolean;
   sameNodeRestore: boolean;
+  /** Phase 22: can accept a cross-node import after an ownership transfer. */
+  replacementImport?: boolean;
 };
 
 export type AutostartCapability = {
@@ -411,8 +413,11 @@ export function parseAutostartCapability(value: unknown): AutostartCapability | 
 
 export function parseArtifactBackupCapability(value: unknown): ArtifactBackupCapability | null {
   if (value === undefined || !isRecord(value)) return null;
-  const expected = ['offlineVerify', 'sameNodeRestore', 'supported', 'version'];
-  if (Object.keys(value).sort().join('\u0000') !== expected.sort().join('\u0000')) return null;
+  const base = ['offlineVerify', 'sameNodeRestore', 'supported', 'version'];
+  const keys = Object.keys(value).sort().join('\u0000');
+  if (keys !== base.sort().join('\u0000') &&
+      keys !== [...base, 'replacementImport'].sort().join('\u0000')) return null;
+  if (value.replacementImport !== undefined && typeof value.replacementImport !== 'boolean') return null;
   if (
     value.version !== 1 ||
     typeof value.supported !== 'boolean' ||
@@ -423,6 +428,7 @@ export function parseArtifactBackupCapability(value: unknown): ArtifactBackupCap
   // node claiming support must claim both.
   if (value.supported && !(value.offlineVerify && value.sameNodeRestore)) return null;
   if (!value.supported && (value.offlineVerify || value.sameNodeRestore)) return null;
+  if (value.replacementImport === true && !value.supported) return null;
   return value as ArtifactBackupCapability;
 }
 

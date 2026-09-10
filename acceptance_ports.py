@@ -114,6 +114,66 @@ def reserve_unbindable_ports(repo, node_id, upto_exclusive, now):
     return ports
 
 
+def reserve_specific_port(repo, node_id, port, now):
+    """Owns exactly one port on one node, so a real negotiation must move off it.
+
+    Same shape, tenant rule and timestamp discipline as the range reservation
+    above: `state='planned'` is inside the partial unique index on
+    (nodeId, localPort) and inside the allocator's and the negotiator's
+    "taken" predicates, which is precisely the occupancy Phase 22 needs to be
+    real. The pre-existing `createdAt` is not cosmetic -- a row claiming it was
+    created now reads to YSD Shield as a deployment burst, and Shield is right
+    to refuse it.
+
+    Returns True when this call created the holder.
+    """
+    created_at = now - 25 * 60 * 60 * 1000
+    plan = json.dumps({"harness": HARNESS_PORT_HOLDER})
+    database = sqlite3.connect(d1_database(repo), timeout=30)
+    try:
+        row = database.execute(
+            "SELECT workspaceId FROM compute_node WHERE id = ?", (node_id,),
+        ).fetchone()
+        if not row:
+            raise RuntimeError("the controlled node was not found in the acceptance database")
+        clash = database.execute(
+            "SELECT id FROM deployment WHERE nodeId = ? AND localPort = ? "
+            "AND deletedAt IS NULL AND state <> 'blocked'", (node_id, port),
+        ).fetchone()
+        if clash:
+            # Something already holds it. Occupancy is the goal, so this is a
+            # success, but it is not this call's holder to remove.
+            return False
+        database.execute(
+            """INSERT INTO deployment (
+                 id, workspaceId, projectId, nodeId, localPort, repository, target,
+                 framework, commitSha, state, plan, createdAt, branch, environment,
+                 exposure, observedBind, healthPath, estimatedMonthlyCost,
+                 zeroModeEnabled, restartCount, crashLoop
+               ) VALUES (?, ?, NULL, ?, ?, ?, 'user-node', 'Express', ?, 'planned', ?, ?,
+                         'main', 'Production', 'private', 'unknown', '/', 0, 1, 0, 0)""",
+            (holder_id(port), row[0], node_id, port,
+             HARNESS_PORT_HOLDER, "0" * 40, plan, created_at),
+        )
+        database.commit()
+        return True
+    finally:
+        database.close()
+
+
+def port_holder_row(repo, node_id, port):
+    """What the acceptance database says about occupancy of one port."""
+    database = sqlite3.connect(f"file:{d1_database(repo)}?mode=ro", uri=True)
+    try:
+        row = database.execute(
+            "SELECT id, state FROM deployment WHERE nodeId = ? AND localPort = ? "
+            "AND deletedAt IS NULL AND state <> 'blocked'", (node_id, port),
+        ).fetchone()
+        return {"id": row[0], "state": row[1]} if row else None
+    finally:
+        database.close()
+
+
 def release_reserved_ports(repo):
     """Removes every harness-owned port holder. Safe to call more than once."""
     try:

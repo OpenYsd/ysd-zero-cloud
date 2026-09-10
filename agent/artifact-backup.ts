@@ -38,6 +38,7 @@ import {
   canonicalBackupPath,
   evaluateArtifactCollision,
   evaluateBackupCompatibility,
+  evaluateImportIdentity,
   evaluateRestoreIdentity,
   findPathCollisions,
   payloadEntryName,
@@ -45,9 +46,11 @@ import {
   type BackupFileRecord,
   type BackupManifest,
   type BackupReasonCode,
+  type ImportIdentity,
   type RestoreIdentity,
 } from '../lib/artifact-backup.ts';
 import { APP_RUNTIME_LIMITS } from '../lib/app-runtime.ts';
+import { verifyArtifact } from './app-runtime.ts';
 import { CURRENT_AGENT_VERSION, signText, stableJson } from '../lib/nodes.ts';
 
 const BLOCK = 512;
@@ -745,6 +748,190 @@ export async function restoreArtifactBackup(input: {
     artifactId: manifest.artifactId,
     deploymentId: manifest.deploymentId,
     artifactChecksum: manifest.artifactChecksum,
+    fileCount: manifest.fileCount,
+    payloadBytes: manifest.artifactSizeBytes,
+  };
+}
+
+/**
+ * Installs a backup taken on a node that is gone, onto the node that replaced
+ * it, under the artifact id the control plane allocated for it.
+ *
+ * Everything that differs from `restoreArtifactBackup` is a consequence of one
+ * fact: these bytes are arriving somewhere they have never been. So the
+ * identity gate is the import gate, not the restore gate; the artifact id comes
+ * from the control plane rather than from the bundle; and the checksum the
+ * bundle claims must also equal the checksum the control plane recorded for the
+ * source artifact, which the bundle cannot influence.
+ *
+ * What is deliberately identical: staging outside `artifacts/`, the traversal
+ * and collision refusals, the streaming payload hash, the rebuilt-and-re-signed
+ * runtime manifest, and the atomic rename. Disaster recovery is not a reason to
+ * relax any of that.
+ */
+export async function importArtifactBackup(input: {
+  bundlePath: string;
+  deploymentDirectory: string;
+  authoritative: ImportIdentity;
+  authenticatedNodeId: string;
+  expectedDesiredRevision: number;
+  contract: BackupManifest['runtime']['contract'];
+  token: string;
+}): Promise<BackupRestoreResult> {
+  const { manifest } = await verifyArtifactBackup(input.bundlePath);
+
+  const identity = evaluateImportIdentity({
+    manifest,
+    authoritative: input.authoritative,
+    authenticatedNodeId: input.authenticatedNodeId,
+    expectedDesiredRevision: input.expectedDesiredRevision,
+  });
+  if (!identity.allowed) fail(identity.reason!);
+
+  // The bundle agreeing with itself is not enough. The control plane's record
+  // of the source artifact is the authority, and both have to say the same
+  // thing before a byte is written.
+  if (manifest.artifactChecksum !== input.authoritative.checksum) fail('payload_mismatch');
+
+  const compatibility = evaluateBackupCompatibility({
+    manifest,
+    platform: process.platform,
+    arch: process.arch,
+    nodeMajor: Number(process.versions.node.split('.')[0]),
+    supportedNodeMajors: APP_RUNTIME_LIMITS.supportedNodeMajors,
+  });
+  if (!compatibility.compatible) fail(compatibility.reason!);
+
+  // The new artifact id, not the one in the bundle. The source row keeps its
+  // identity on the machine that is gone.
+  const artifactId = input.authoritative.replacementArtifactId;
+  const deploymentRoot = path.resolve(input.deploymentDirectory);
+  const artifactsRoot = path.join(deploymentRoot, 'artifacts');
+  const finalPath = path.join(artifactsRoot, artifactId);
+  assertInside(deploymentRoot, finalPath);
+
+  const existing = await readExistingChecksum(finalPath);
+  const collision = evaluateArtifactCollision({
+    existingChecksum: existing,
+    bundleChecksum: input.authoritative.checksum,
+  });
+  if (collision.action === 'refuse') fail('artifact_conflict');
+  if (collision.action === 'already_restored') {
+    // Matching bytes are not the same as a usable artifact: the manifest has to
+    // verify under this node's token too. An install interrupted between the
+    // rename and its confirmation looks exactly like this, and it is the case
+    // this path exists to make safe -- so it is checked, not assumed.
+    try {
+      await verifyArtifact(finalPath, input.token, artifactId);
+    } catch {
+      fail('artifact_unverified');
+    }
+    return {
+      outcome: 'already_restored',
+      artifactId,
+      deploymentId: manifest.deploymentId,
+      artifactChecksum: input.authoritative.checksum,
+      fileCount: manifest.fileCount,
+      payloadBytes: manifest.artifactSizeBytes,
+    };
+  }
+
+  const free = await freeBytes(deploymentRoot).catch(() => Number.MAX_SAFE_INTEGER);
+  if (free < manifest.artifactSizeBytes + BACKUP_LIMITS.reserveBytes) fail('low_disk');
+
+  const stagingRoot = path.join(deploymentRoot, '.restore-tmp');
+  await mkdir(stagingRoot, { recursive: true, mode: 0o700 });
+  const lock = path.join(stagingRoot, `${artifactId}.lock`);
+  const lockHandle = await open(lock, 'wx').catch(() => fail('restore_busy'));
+  const staging = path.join(stagingRoot, `${artifactId}.incoming`);
+  try {
+    // An Agent that died mid-import left this behind. Clearing it is how a
+    // retry reuses the same reservation instead of asking for another one.
+    await rm(staging, { recursive: true, force: true });
+    await mkdir(staging, { recursive: true, mode: 0o700 });
+
+    let handle: Awaited<ReturnType<typeof open>> | null = null;
+    let openPath = '';
+    await verifyArtifactBackup(input.bundlePath, async (record, chunk) => {
+      const target = path.join(staging, ...record.path.split('/'));
+      assertInside(staging, target);
+      if (openPath !== record.path) {
+        if (handle) await handle.close();
+        await mkdir(path.dirname(target), { recursive: true });
+        handle = await open(target, 'wx', record.executable ? 0o700 : 0o600);
+        openPath = record.path;
+      }
+      await handle!.write(chunk);
+    });
+    if (handle) await (handle as Awaited<ReturnType<typeof open>>).close();
+    for (const record of manifest.files) {
+      const target = path.join(staging, ...record.path.split('/'));
+      if (!(await stat(target).then(() => true).catch(() => false))) {
+        await mkdir(path.dirname(target), { recursive: true });
+        await writeFile(target, Buffer.alloc(0), { flag: 'wx', mode: record.executable ? 0o700 : 0o600 });
+      }
+    }
+
+    const staged = await payloadChecksum(manifest.files, (record) =>
+      createReadStream(path.join(staging, ...record.path.split('/')), { highWaterMark: CHUNK }) as AsyncIterable<Buffer>);
+    // Measured here, compared against the control plane's value -- not the
+    // bundle's -- so a bundle that lies consistently still cannot install.
+    if (staged.checksum !== input.authoritative.checksum ||
+        staged.sizeBytes !== manifest.artifactSizeBytes) {
+      fail('payload_mismatch');
+    }
+
+    // Built fresh for the new id under this node's own token. The source
+    // node's signature is never copied: it is an HMAC over a credential this
+    // machine does not have and must never see.
+    const runtimeManifest = {
+      version: 1 as const,
+      deploymentId: input.authoritative.deploymentId,
+      projectId: input.authoritative.projectId,
+      artifactId,
+      commit: manifest.commit,
+      checksum: input.authoritative.checksum,
+      sizeBytes: manifest.artifactSizeBytes,
+      contract: input.contract,
+      createdAt: manifest.runtime.createdAt,
+      verifiedAt: Date.now(),
+    };
+    const signature = await signText(
+      input.token,
+      `ysd-app-artifact-v1\n${stableJson(runtimeManifest as unknown as Record<string, unknown>)}`,
+    );
+    await writeFile(
+      path.join(staging, RUNTIME_MANIFEST_NAME),
+      stableJson({ ...runtimeManifest, signature } as unknown as Record<string, unknown>),
+      { flag: 'wx', mode: 0o600 },
+    );
+
+    // The last gate before these bytes exist anywhere the App Runtime can see
+    // them. A directory that cannot satisfy the same check the runtime makes
+    // before activating an artifact must never become `artifacts/<id>` at all --
+    // not briefly, not to be cleaned up afterwards. Verifying after the rename
+    // would mean a failed import still published something.
+    try {
+      await verifyArtifact(staging, input.token, artifactId);
+    } catch {
+      fail('artifact_unverified');
+    }
+
+    await mkdir(artifactsRoot, { recursive: true, mode: 0o700 });
+    if (await stat(finalPath).then(() => true).catch(() => false)) fail('artifact_conflict');
+    await rename(staging, finalPath);
+    await syncDirectory(artifactsRoot);
+  } finally {
+    await rm(staging, { recursive: true, force: true }).catch(() => {});
+    await lockHandle.close().catch(() => {});
+    await rm(lock, { force: true }).catch(() => {});
+  }
+
+  return {
+    outcome: 'restored',
+    artifactId,
+    deploymentId: input.authoritative.deploymentId,
+    artifactChecksum: input.authoritative.checksum,
     fileCount: manifest.fileCount,
     payloadBytes: manifest.artifactSizeBytes,
   };

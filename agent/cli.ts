@@ -21,6 +21,7 @@ import {
 } from './game-runtime.ts';
 import {
   collectAppRuntimeSnapshots,
+  negotiatePrivatePort,
   shutdownManagedApps,
 } from './app-runtime.ts';
 import {
@@ -40,11 +41,12 @@ import { acquireAgentOwnership } from './instance-lock.ts';
 import { ControlPlaneError, jsonRequest, signedPost } from './signed-request.ts';
 import {
   createArtifactBackup,
+  importArtifactBackup,
   restoreArtifactBackup,
   verifyArtifactBackup,
   BackupError,
 } from './artifact-backup.ts';
-import { backupReasonMessage } from '../lib/artifact-backup.ts';
+import { backupReasonMessage, type BackupManifest } from '../lib/artifact-backup.ts';
 import {
   collectCapabilities,
   collectMetrics,
@@ -67,9 +69,9 @@ type AutostartAction =
  * has a release rollback and Phase 20 an Agent `restore-previous`; a bare
  * `restore` here would read like either of them.
  */
-type BackupAction = 'create' | 'verify' | 'restore';
+type BackupAction = 'create' | 'verify' | 'restore' | 'import';
 
-const BACKUP_ACTIONS: BackupAction[] = ['create', 'verify', 'restore'];
+const BACKUP_ACTIONS: BackupAction[] = ['create', 'verify', 'restore', 'import'];
 
 const AUTOSTART_ACTIONS: AutostartAction[] = [
   'enable', 'status', 'disable', 'repair', 'uninstall', 'upgrade', 'restore-previous',
@@ -134,6 +136,7 @@ const USAGE = [
   '  node ysd-node-agent-<version>.mjs artifact backup create --artifact <id> --output <dir>',
   '  node ysd-node-agent-<version>.mjs artifact backup verify <bundle>',
   '  node ysd-node-agent-<version>.mjs artifact backup restore <bundle> [--config <path>]',
+  '  node ysd-node-agent-<version>.mjs artifact backup import  <bundle> [--config <path>]',
   '',
   'Options:',
   '  --url <origin>     Control plane origin. HTTPS, or HTTP on localhost.',
@@ -781,6 +784,137 @@ async function runBackupRestore(arguments_: Arguments): Promise<Record<string, u
   return { ...restored, desiredState: authoritative.desiredState };
 }
 
+/**
+ * Brings a deployment back on the node that replaced the one it was lost with.
+ *
+ * Restore puts an artifact back where it already belonged. This is the other
+ * case, and it is deliberately a different command: the artifact is arriving
+ * somewhere new, under an id this node did not choose, because a person decided
+ * the old machine is never coming back. Every authority in that sentence sits
+ * with the control plane, so this command asks rather than asserts.
+ *
+ * It starts nothing. The last call clears the block that was holding Phase 18
+ * off, and reconciliation takes it from there.
+ */
+async function runBackupImport(arguments_: Arguments): Promise<Record<string, unknown>> {
+  const credentials = await loadCredentials(arguments_.configPath);
+  const bundlePath = path.resolve(arguments_.bundlePath!);
+  // Offline first, always. A bundle that is not internally consistent never
+  // reaches the control plane, let alone the disk.
+  const { manifest } = await verifyArtifactBackup(bundlePath);
+
+  let authoritative: {
+    workspaceId: string; projectId: string; deploymentId: string; nodeId: string;
+    sourceArtifactId: string; sourceNodeId: string; replacementArtifactId: string;
+    checksum: string; desiredRevision: number; desiredState: string;
+    localPort: number; contract: BackupManifest['runtime']['contract'];
+  };
+  try {
+    // The node sends nothing but its signature and the deployment in the path:
+    // no checksum, no artifact id, no version. All of those come back.
+    authoritative = await signedPost({
+      origin: credentials.origin,
+      token: credentials.token,
+      pathname: `/api/nodes/agent/deployments/${manifest.deploymentId}/import-preflight`,
+      body: {},
+    });
+  } catch {
+    throw new BackupError('preflight_unavailable');
+  }
+
+  const deploymentDirectory = path.join(
+    appRuntimeRoot(arguments_.configPath),
+    'workspaces', authoritative.workspaceId,
+    'projects', authoritative.projectId,
+    'deployments', authoritative.deploymentId,
+  );
+  const imported = await importArtifactBackup({
+    bundlePath,
+    deploymentDirectory,
+    authoritative: {
+      workspaceId: authoritative.workspaceId,
+      projectId: authoritative.projectId,
+      deploymentId: authoritative.deploymentId,
+      nodeId: authoritative.nodeId,
+      sourceArtifactId: authoritative.sourceArtifactId,
+      replacementArtifactId: authoritative.replacementArtifactId,
+      checksum: authoritative.checksum,
+      desiredRevision: authoritative.desiredRevision,
+      sourceNodeRevoked: true,
+      awaitingImport: true,
+    },
+    authenticatedNodeId: credentials.nodeId,
+    expectedDesiredRevision: authoritative.desiredRevision,
+    contract: authoritative.contract,
+    token: credentials.token,
+  });
+
+  // No verification step here on purpose. `importArtifactBackup` runs the App
+  // Runtime's own check against the staged tree *before* it publishes it, so by
+  // the time this returns the artifact has already proven itself and re-hashing
+  // it would only cost a second full read of the payload.
+
+  // The server is idempotent here, so a transport failure is worth repeating.
+  // A refusal is not: it means the control plane disagrees, and inventing a
+  // local remedy for that is exactly the wrong instinct.
+  let confirmed = false;
+  for (let attempt = 0; attempt < 3 && !confirmed; attempt += 1) {
+    try {
+      await signedPost({
+        origin: credentials.origin,
+        token: credentials.token,
+        pathname: `/api/nodes/agent/deployments/${authoritative.deploymentId}/import-complete`,
+        body: {
+          artifactId: imported.artifactId,
+          sourceArtifactId: authoritative.sourceArtifactId,
+          checksum: imported.artifactChecksum,
+          sizeBytes: imported.payloadBytes,
+          expectedDesiredRevision: authoritative.desiredRevision,
+        },
+      });
+      confirmed = true;
+    } catch (error) {
+      if (error instanceof ControlPlaneError) throw new BackupError('confirmation_unavailable');
+      if (attempt === 2) throw new BackupError('confirmation_unavailable');
+    }
+  }
+
+  // The existing negotiation, unchanged: the node offers ports it has actually
+  // bound and released, and the control plane decides. A port the replacement
+  // node cannot have is exactly the case this was written for.
+  const localPort = await negotiatePrivatePort({
+    origin: credentials.origin,
+    token: credentials.token,
+    deploymentId: authoritative.deploymentId,
+    currentPort: authoritative.localPort,
+  });
+
+  try {
+    await signedPost({
+      origin: credentials.origin,
+      token: credentials.token,
+      pathname: `/api/nodes/agent/deployments/${authoritative.deploymentId}/import-ready`,
+      body: {},
+    });
+  } catch {
+    throw new BackupError('confirmation_unavailable');
+  }
+
+  return {
+    outcome: imported.outcome,
+    artifactId: imported.artifactId,
+    deploymentId: authoritative.deploymentId,
+    artifactChecksum: imported.artifactChecksum,
+    fileCount: imported.fileCount,
+    payloadBytes: imported.payloadBytes,
+    localPort,
+    desiredState: authoritative.desiredState,
+    integrity: 'verified',
+    ownership: 'replacement node',
+    runtimeStart: 'delegated to reconciliation',
+  };
+}
+
 const flags = new Set(process.argv.slice(2));
 if (flags.has('--version') || flags.has('-v')) {
   // Deliberately just these two lines. Printing the platform, paths, or
@@ -841,6 +975,9 @@ try {
   } else if (arguments_.backupAction === 'restore') {
     if (!arguments_.bundlePath) throw new Error(USAGE);
     console.log(JSON.stringify(await runBackupRestore(arguments_)));
+  } else if (arguments_.backupAction === 'import') {
+    if (!arguments_.bundlePath) throw new Error(USAGE);
+    console.log(JSON.stringify(await runBackupImport(arguments_)));
   }
 } catch (error) {
   if (error instanceof BackupError) {

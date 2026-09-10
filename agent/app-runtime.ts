@@ -1001,7 +1001,7 @@ function resultFor(app: ManagedApp, extra: Record<string, unknown> = {}): AgentJ
  * runtime recovery and release evidence all pointing at a port nothing is
  * listening on.
  */
-async function negotiatePrivatePort(input: {
+export async function negotiatePrivatePort(input: {
   origin: string;
   token: string;
   deploymentId: string;

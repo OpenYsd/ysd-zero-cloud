@@ -5,6 +5,7 @@ import { GameServersView } from '@/components/game-servers-view';
 import { LogsView } from '@/components/logs-view';
 import { NetworkingView } from '@/components/networking-view';
 import { NodesView } from '@/components/nodes-view';
+import { ReplacementRecovery } from '@/components/replacement-recovery';
 import { ProjectsView } from '@/components/projects-view';
 import { StorageView } from '@/components/storage-view';
 import {
@@ -45,7 +46,7 @@ import { parseRepository, validGithubRef } from '@/lib/server/github';
 import { runtimeEnv } from '@/lib/server/env';
 import { listLogs } from '@/lib/server/logs';
 import { readNetworkState } from '@/lib/server/networking';
-import { readNodesState } from '@/lib/server/nodes';
+import { readNodesState, readReplacementRecoveryState } from '@/lib/server/nodes';
 import { listProjects } from '@/lib/server/projects';
 import { listSecrets } from '@/lib/server/secrets';
 import { requireSession, type WorkspaceSession } from '@/lib/server/session';
@@ -232,7 +233,7 @@ async function SectionBody({
 
     case 'nodes':
       return (
-        <NodesView state={await readNodesState(workspaceId, now)} now={now} />
+        <NodesSection workspaceId={workspaceId} now={now} />
       );
 
     case 'ai':
@@ -390,4 +391,39 @@ async function SectionBody({
     default:
       return <PreviewSection section={section} />;
   }
+}
+
+
+/**
+ * Compute Nodes, plus anything currently mid-recovery.
+ *
+ * The recovery cards sit above the node table because that is where the
+ * operator just was: they declared a node lost on this screen, and the next
+ * thing they need is the deployment that loss stranded. Eligibility is not
+ * decided here -- the component asks `lib/replacement-recovery.ts`, the same
+ * rules the tests exercise.
+ */
+async function NodesSection({
+  workspaceId,
+  now,
+}: {
+  workspaceId: string;
+  now: number;
+}) {
+  const [state, recovery] = await Promise.all([
+    readNodesState(workspaceId, now),
+    readReplacementRecoveryState(workspaceId, null),
+  ]);
+  return (
+    <div className="flex flex-col gap-4">
+      {recovery.deployments.map((deployment) => (
+        <ReplacementRecovery
+          key={deployment.id}
+          deployment={deployment}
+          candidates={recovery.candidates}
+        />
+      ))}
+      <NodesView state={state} now={now} lostNodeIds={recovery.lostNodeIds} />
+    </div>
+  );
 }

@@ -80,6 +80,8 @@ export const BACKUP_REASON_CODES = [
   'preflight_unavailable',
   'confirmation_unavailable',
   'source_changed',
+  'not_transferred',
+  'source_node_live',
 ] as const;
 export type BackupReasonCode = (typeof BACKUP_REASON_CODES)[number];
 
@@ -298,6 +300,71 @@ export function evaluateBackupCompatibility(input: {
   return { compatible: true, reason: null };
 }
 
+/**
+ * What the control plane says about a deployment that has been transferred to a
+ * replacement node and is waiting for its backup.
+ *
+ * `sourceArtifactId` is still `deployment.currentArtifactId` at this point: the
+ * transfer moved ownership, not bytes. `replacementArtifactId` is the row the
+ * control plane allocated for the imported copy, and `checksum` is read from
+ * the immutable source row -- never from the node.
+ */
+export type ImportIdentity = {
+  workspaceId: string;
+  projectId: string;
+  deploymentId: string;
+  nodeId: string;
+  sourceArtifactId: string;
+  replacementArtifactId: string;
+  checksum: string;
+  desiredRevision: number;
+  sourceNodeRevoked: boolean;
+  awaitingImport: boolean;
+};
+
+/**
+ * The import identity gate. Deliberately separate from `evaluateRestoreIdentity`.
+ *
+ * Ordinary restore is and stays same-node: a bundle may only rehydrate the
+ * artifact the authenticated node already owns. Import is the narrow disaster
+ * path, and it is narrow in a different way -- the bundle must match the
+ * *source* artifact of a deployment that has already been transferred to the
+ * authenticated node, whose old node is permanently revoked. Neither gate
+ * loosens the other; a bundle that fails restore does not become importable,
+ * and a bundle that fails import cannot be restored.
+ */
+export function evaluateImportIdentity(input: {
+  manifest: Pick<BackupManifest, 'workspaceId' | 'projectId' | 'deploymentId' | 'artifactId' | 'artifactChecksum'>;
+  authoritative: ImportIdentity;
+  authenticatedNodeId: string;
+  expectedDesiredRevision: number;
+}): { allowed: boolean; reason: BackupReasonCode | null } {
+  if (input.authoritative.nodeId !== input.authenticatedNodeId) {
+    return { allowed: false, reason: 'wrong_node' };
+  }
+  if (!input.authoritative.sourceNodeRevoked) {
+    return { allowed: false, reason: 'source_node_live' };
+  }
+  if (!input.authoritative.awaitingImport) {
+    return { allowed: false, reason: 'not_transferred' };
+  }
+  if (input.authoritative.desiredRevision !== input.expectedDesiredRevision) {
+    return { allowed: false, reason: 'source_changed' };
+  }
+  if (
+    input.manifest.workspaceId !== input.authoritative.workspaceId ||
+    input.manifest.projectId !== input.authoritative.projectId ||
+    input.manifest.deploymentId !== input.authoritative.deploymentId ||
+    // The bundle names the artifact it was taken from, which is the source row
+    // the transfer left in place -- never the replacement row.
+    input.manifest.artifactId !== input.authoritative.sourceArtifactId ||
+    input.manifest.artifactChecksum !== input.authoritative.checksum
+  ) {
+    return { allowed: false, reason: 'identity_mismatch' };
+  }
+  return { allowed: true, reason: null };
+}
+
 export type RestoreIdentity = {
   workspaceId: string;
   projectId: string;
@@ -364,6 +431,8 @@ export function backupFileName(artifactId: string, checksum: string): string {
 
 export function backupReasonMessage(code: BackupReasonCode): string {
   const messages: Record<BackupReasonCode, string> = {
+    not_transferred: 'This deployment has not been transferred to this Compute Node for recovery.',
+    source_node_live: 'The Compute Node this backup came from is not declared lost.',
     artifact_not_found: 'That artifact is not present on this Compute Node.',
     artifact_unverified: 'The artifact does not carry a valid runtime manifest for this node.',
     artifact_corrupted: 'The artifact failed its integrity check, so it was not backed up.',

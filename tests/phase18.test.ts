@@ -33,8 +33,8 @@ const legacyPayload: Omit<AppRuntimeJobPayload, 'expectedDesiredRevision' | 'pro
 };
 
 void test('Phase 18 recovery remains compatible after Phase 19 keeps Protocol 1', () => {
-  assert.equal(JSON.parse(source('package.json')).version, '0.21.0');
-  assert.equal(CURRENT_AGENT_VERSION, '0.8.0');
+  assert.equal(JSON.parse(source('package.json')).version, '0.22.0');
+  assert.equal(CURRENT_AGENT_VERSION, '0.9.0');
   assert.equal(NODE_PROTOCOL_VERSION, 1);
   assert.equal(recoveryAgentCompatible('0.4.2'), false);
   assert.equal(recoveryAgentCompatible('0.5.0'), true);

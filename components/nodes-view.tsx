@@ -14,6 +14,7 @@ import {
   Loader2,
   MemoryStick,
   Network,
+  AlertTriangle,
   Play,
   Plus,
   ShieldCheck,
@@ -173,7 +174,16 @@ function ArtifactBackupSummary({ node }: { node: ComputeNode }) {
   );
 }
 
-export function NodesView({ state, now }: { state: NodesState; now: number }) {
+export function NodesView({
+  state,
+  now,
+  lostNodeIds = [],
+}: {
+  state: NodesState;
+  now: number;
+  /** Nodes whose deployments still report `node_lost`. Never guessed. */
+  lostNodeIds?: readonly string[];
+}) {
   const router = useRouter();
   const [name, setName] = useState('My compute node');
   const [message, setMessage] = useState('YSD secure node check');
@@ -305,6 +315,45 @@ export function NodesView({ state, now }: { state: NodesState; now: number }) {
       router.refresh();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Revocation failed.');
+    } finally {
+      setPending(null);
+    }
+  }
+
+  const LOST_CONFIRMATION = 'DECLARE LOST';
+
+  async function declareLost(node: ComputeNode) {
+    const typed = window.prompt(
+      [
+        `Declare ${node.name} permanently lost?`,
+        '',
+        'This cannot be undone.',
+        '',
+        'The node credential is permanently revoked and this machine can never reconnect.',
+        'Its deployments are preserved, with their desired state intact, so they can be',
+        'transferred to a replacement Compute Node and recovered from an artifact backup.',
+        '',
+        'YSD cannot guarantee that a process on the lost machine has physically stopped.',
+        'It will receive no further instructions, but if that machine is ever powered on,',
+        'something may still be running on it.',
+        '',
+        'Use this only when the machine is genuinely lost or unrecoverable.',
+        '',
+        `Type ${LOST_CONFIRMATION} to confirm.`,
+      ].join('\n'),
+    );
+    if (typed?.trim() !== LOST_CONFIRMATION) return;
+    setPending(node.id);
+    setError(null);
+    try {
+      const response = await fetch(`/api/nodes/${node.id}/declare-lost`, { method: 'POST' });
+      const body = (await response.json()) as { error?: string };
+      if (!response.ok) {
+        throw new Error(body.error ?? 'The node could not be declared lost.');
+      }
+      router.refresh();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Declaring the node lost failed.');
     } finally {
       setPending(null);
     }
@@ -616,20 +665,39 @@ export function NodesView({ state, now }: { state: NodesState; now: number }) {
                   </TableCell>
                   <TableCell className="px-4 py-3 text-right">
                     {node.status !== 'revoked' ? (
-                      <Button
-                        variant="ghost"
-                        size="icon-xs"
-                        aria-label={`Revoke ${node.name}`}
-                        disabled={pending === node.id}
-                        onClick={() => void revoke(node)}
-                      >
-                        {pending === node.id ? (
-                          <Loader2 className="animate-spin" />
-                        ) : (
-                          <Unplug />
-                        )}
-                      </Button>
-                    ) : null}
+                      <div className="flex items-center justify-end gap-1">
+                        <Button
+                          variant="ghost"
+                          size="icon-xs"
+                          aria-label={`Revoke ${node.name}`}
+                          disabled={pending === node.id}
+                          onClick={() => void revoke(node)}
+                        >
+                          {pending === node.id ? (
+                            <Loader2 className="animate-spin" />
+                          ) : (
+                            <Unplug />
+                          )}
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="icon-xs"
+                          className="text-red-300/70 hover:text-red-200"
+                          aria-label={`Declare ${node.name} permanently lost`}
+                          title="Declare permanently lost"
+                          disabled={pending === node.id}
+                          onClick={() => void declareLost(node)}
+                        >
+                          <AlertTriangle />
+                        </Button>
+                      </div>
+                    ) : lostNodeIds.includes(node.id) ? (
+                      <span className="text-[10px] text-red-200/70">
+                        Lost, credential permanently revoked
+                      </span>
+                    ) : (
+                      <span className="text-[10px] text-white/38">Revoked</span>
+                    )}
                   </TableCell>
                 </TableRow>
               ))}

@@ -605,7 +605,7 @@ void test('the catalog grew by exactly the two onboarding actions', () => {
   // and rollback, +1 for Phase 21 artifact restore. The count is the guard
   // against a silent removal; the assertion below is what pins Phase 16's own
   // contribution.
-  assert.equal(EVIDENCE_ACTIONS.length, 32);
+  assert.equal(EVIDENCE_ACTIONS.length, 35);
   const added = EVIDENCE_ACTIONS
     .filter((entry) => entry.action.startsWith('node.pairing.') || entry.action === 'node.preflight.run')
     .map((entry) => entry.action)

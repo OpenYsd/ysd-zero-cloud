@@ -16,6 +16,7 @@ export const APP_RUNTIME_OPERATIONS = [
   'redeploy',
   'rollback',
   'recover',
+  'import',
   'delete',
   'status',
 ] as const;
@@ -537,8 +538,8 @@ export function validateAppRuntimeJobPayload(value: unknown):
   if (operation === 'rollback' && !targetArtifactId) {
     return { ok: false, error: 'Rollback requires a verified target artifact.' };
   }
-  if (operation !== 'rollback' && targetArtifactId !== null) {
-    return { ok: false, error: 'Only rollback can select a target artifact.' };
+  if (operation !== 'rollback' && operation !== 'import' && targetArtifactId !== null) {
+    return { ok: false, error: 'Only rollback and import can select a target artifact.' };
   }
   if (['start', 'restart'].includes(operation) && (!artifactId || !contract)) {
     return { ok: false, error: 'Start and restart require a verified artifact contract.' };
@@ -548,6 +549,21 @@ export function validateAppRuntimeJobPayload(value: unknown):
   }
   if (operation === 'rollback' && !contract) {
     return { ok: false, error: 'Rollback requires the signed deployment contract.' };
+  }
+  // Import names two artifacts and one exact intent: the replacement row the
+  // control plane allocated, the immutable source row the backup came from, and
+  // the revision the ownership transfer settled on. Missing any of the three
+  // would leave the node deciding something the control plane must decide.
+  if (operation === 'import') {
+    if (!artifactId || !targetArtifactId || !contract || expectedDesiredRevision === null) {
+      return {
+        ok: false,
+        error: 'Import requires the replacement artifact, the source artifact, the contract, and the desired revision.',
+      };
+    }
+    if (artifactId === targetArtifactId) {
+      return { ok: false, error: 'Import cannot name the same artifact as both source and replacement.' };
+    }
   }
   if (!['deploy', 'redeploy'].includes(operation) && source !== null) {
     return { ok: false, error: 'Only deploy operations can acquire source.' };
@@ -695,7 +711,10 @@ export function parsePrivatePortCandidates(value: unknown): number[] | null {
 }
 
 export function appRuntimeLeaseDuration(operation: AppRuntimeOperation): number {
-  return operation === 'deploy' || operation === 'redeploy' || operation === 'rollback'
+  // Import copies and verifies an artifact-sized payload without building, so
+  // it is bounded like rollback rather than like a quick control action.
+  return operation === 'deploy' || operation === 'redeploy' || operation === 'rollback' ||
+    operation === 'import'
     ? APP_RUNTIME_LIMITS.buildTimeoutMs + 2 * 60_000
     : APP_RUNTIME_LIMITS.actionTimeoutMs;
 }

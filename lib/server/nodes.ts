@@ -33,6 +33,7 @@ import {
   parseAppRuntimeSnapshots,
   validateAppRuntimeJobPayload,
   type AppRuntimeJobPayload,
+  type AppEnvironment,
   parsePrivatePortCandidates,
   privatePortInRange,
 } from '@/lib/app-runtime';
@@ -43,6 +44,7 @@ import {
 } from '@/lib/runtime-recovery';
 import {
   CURRENT_AGENT_VERSION,
+  sealNodeEnvironment,
   MINIMUM_AGENT_VERSION,
   NODE_PROTOCOL_VERSION,
   NODE_TIMING,
@@ -1275,6 +1277,38 @@ export async function recordHeartbeat(input: {
   return { ok: true, status: 'online', serverTime: now };
 }
 
+/**
+ * The environment a deployment is allowed to see, read from durable storage.
+ *
+ * It lives here rather than in `deployments.ts` because two callers now need
+ * it: the ordinary job builders, and the Phase 22 import reservation. Copying
+ * it would have been worse -- this decides which secrets a deployment may
+ * read, and two copies of that rule is one too many.
+ */
+export async function scopedEnvironment(input: {
+  workspaceId: string;
+  projectId: string;
+  deploymentId: string;
+  environment: AppEnvironment;
+  names: string[];
+}): Promise<Record<string, string>> {
+  if (input.names.length === 0) return {};
+  const rows = await query<{ name: string; scope: string; ciphertext: string }>(
+    `SELECT name, scope, ciphertext FROM secret
+     WHERE workspaceId = ? AND environment IN (?, 'All')`,
+    input.workspaceId,
+    input.environment,
+  );
+  const allowed = new Set(input.names);
+  const scopes = new Set(['Workspace', `Project:${input.projectId}`, `Deployment:${input.deploymentId}`]);
+  const values: Record<string, string> = {};
+  for (const row of rows) {
+    if (!allowed.has(row.name) || !scopes.has(row.scope)) continue;
+    values[row.name] = await decryptSecret(row.ciphertext, credentialKey());
+  }
+  return values;
+}
+
 async function requeueExpiredJobs(
   workspaceId: string,
   now: number,
@@ -1416,6 +1450,52 @@ export async function claimNextJob(
     const appPayload = job.type === APP_RUNTIME_JOB_TYPE
       ? validateAppRuntimeJobPayload(payload)
       : null;
+    if (appPayload?.ok && appPayload.payload.operation === 'import') {
+      // Import carries more authority than any other operation -- it installs
+      // bytes for a deployment whose previous node is gone -- so every fact it
+      // rests on is re-read here, at the moment the work is handed over, and
+      // not trusted from the payload that was written when it was queued.
+      const authorized = await queryOne<{ ok: number }>(
+        `SELECT 1 AS ok
+           FROM deployment d
+           JOIN app_artifact source ON source.id = d.currentArtifactId
+            AND source.workspaceId = d.workspaceId AND source.deletedAt IS NULL
+           JOIN compute_node lost ON lost.id = source.nodeId
+            AND lost.workspaceId = d.workspaceId
+           JOIN app_artifact replacement ON replacement.id = ?
+            AND replacement.workspaceId = d.workspaceId AND replacement.deploymentId = d.id
+            AND replacement.deletedAt IS NULL
+          WHERE d.workspaceId = ? AND d.id = ? AND d.nodeId = ? AND d.deletedAt IS NULL
+            AND d.desiredRevision = ? AND d.currentArtifactId = ?
+            AND source.nodeId <> d.nodeId
+            AND source.state = 'verified' AND source.checksum IS NOT NULL
+            AND lost.revokedAt IS NOT NULL
+            AND replacement.nodeId = ? AND replacement.state = 'building'`,
+        appPayload.payload.artifactId,
+        context.node.workspaceId,
+        appPayload.payload.deploymentId,
+        context.node.id,
+        appPayload.payload.expectedDesiredRevision,
+        appPayload.payload.targetArtifactId,
+        context.node.id,
+      );
+      if (!authorized) {
+        const database = await db();
+        await database.batch([
+          database.prepare(
+            `UPDATE node_job SET state = 'failed', lastError = 'stale_desired_revision',
+                    completedAt = ?, updatedAt = ?
+             WHERE workspaceId = ? AND id = ? AND state = 'queued'`,
+          ).bind(now, now, context.node.workspaceId, job.id),
+          database.prepare(
+            `UPDATE app_deployment_action SET state = 'failed', error = 'stale_desired_revision',
+                    completedAt = ?, updatedAt = ?
+             WHERE workspaceId = ? AND jobId = ? AND state = 'queued'`,
+          ).bind(now, now, context.node.workspaceId, job.id),
+        ]);
+        continue;
+      }
+    }
     if (appPayload?.ok && appPayload.payload.operation === 'recover') {
       const intent = await queryOne<{
         desiredState: string | null; desiredRevision: number | null;
@@ -1794,17 +1874,24 @@ export async function negotiatePrivatePort(
     // Someone else moved it. Refuse rather than overwrite a newer assignment.
     return { ok: false, status: 409, error: 'The private port changed; refresh and retry.' };
   }
-  if (candidates.includes(expected) ) {
-    // The node can bind what it already has; nothing to negotiate.
-    return { ok: true, localPort: expected, changed: false };
-  }
-
   const taken = new Set((await query<{ localPort: number }>(
     `SELECT localPort FROM deployment
      WHERE nodeId = ? AND localPort IS NOT NULL AND deletedAt IS NULL
        AND state <> 'blocked' AND id <> ?`,
     context.node.id, deploymentId,
   )).map((entry) => entry.localPort));
+
+  if (candidates.includes(expected) && !taken.has(expected)) {
+    // The node can bind what it already has and no sibling deployment on this
+    // node holds it; nothing to negotiate.
+    return { ok: true, localPort: expected, changed: false };
+  }
+  // A port this node can bind is not automatically a port this node is free to
+  // keep. A deployment that arrived by ownership transfer brings its old port
+  // as a preference, and a stopped sibling here may already own that number
+  // without listening on it -- so the node's probe would happily offer it.
+  // Retaining it would collide on `deployment_node_port_uidx` the moment this
+  // row stopped being blocked. Fall through to ordinary candidate selection.
 
   for (const candidate of candidates) {
     if (taken.has(candidate)) continue;
@@ -2966,5 +3053,1106 @@ export async function nodesForShield(
     staleLeases: staleLeases?.total ?? 0,
     anomalousEvents: anomalous?.total ?? 0,
     revokedActivity: revokedActivity?.total ?? 0,
+  };
+}
+
+
+// ---------------------------------------------------------------------------
+// Phase 22: declared-loss replacement-node recovery.
+//
+// A Compute Node can be destroyed, stolen, or simply never come back. Until
+// now that was terminal for everything on it: `revokeNode` kills the
+// credential and stops the deployments, and nothing can move them, because
+// `deployment.nodeId` is written once and every runtime query filters on it.
+//
+// These functions add the one path out, and they are deliberately three
+// separate authorized steps rather than one convenient button: declaring the
+// loss, moving ownership, and importing the bytes. Nothing here fetches source,
+// installs packages, builds, or starts a runtime.
+// ---------------------------------------------------------------------------
+
+/**
+ * Declares a Compute Node permanently lost.
+ *
+ * This is not `revokeNode` with a different name. Revoke is the answer to "I no
+ * longer trust this node", and it is right for revoke to stop the work: it sets
+ * every assigned deployment to desired `stopped`. Declared loss is the answer to
+ * "this machine is gone", where the operator still wants the applications
+ * running -- somewhere else. So the credential is killed exactly as revoke kills
+ * it, and the intent is left standing.
+ *
+ * Irreversible by construction: there is no un-lose, and the ciphertext that
+ * would be needed to accept the old credential again is blanked, not hidden.
+ */
+export async function declareNodeLost(input: {
+  workspaceId: string;
+  nodeId: string;
+  actor: string;
+}): Promise<
+  | { ok: true; declared: boolean; deployments: number }
+  | { ok: false; status: number; error: string }
+> {
+  const node = await queryOne<{ id: string; name: string; revokedAt: number | null }>(
+    'SELECT id, name, revokedAt FROM compute_node WHERE workspaceId = ? AND id = ?',
+    input.workspaceId,
+    input.nodeId,
+  );
+  if (!node) return { ok: false, status: 404, error: 'Compute Node not found.' };
+
+  const now = Date.now();
+  // The credential write is the idempotency latch for the whole operation. A
+  // second declaration matches no row, so revisions are not bumped again and a
+  // deployment already transferred away is never dragged back into a blocked
+  // state.
+  const claimed = await execute(
+    `UPDATE compute_node
+        SET revokedAt = ?, revokedBy = ?, tokenCiphertext = '',
+            assignmentsDisabledAt = COALESCE(assignmentsDisabledAt, ?),
+            assignmentsDisabledBy = COALESCE(assignmentsDisabledBy, ?),
+            updatedAt = ?
+      WHERE workspaceId = ? AND id = ? AND revokedAt IS NULL`,
+    now, input.actor, now, input.actor, now, input.workspaceId, input.nodeId,
+  );
+  if (!changed(claimed)) {
+    return { ok: true, declared: false, deployments: 0 };
+  }
+
+  const owned = await queryOne<{ total: number }>(
+    `SELECT COUNT(*) AS total FROM deployment
+      WHERE workspaceId = ? AND nodeId = ? AND deletedAt IS NULL
+        AND state NOT IN ('deleted')`,
+    input.workspaceId, input.nodeId,
+  );
+  const database = await db();
+  await database.batch([
+    // Identical to revoke: in-flight work is unassigned and either requeued or
+    // failed. A lost node must never be able to lease anything again.
+    database
+      .prepare(
+        `UPDATE node_job
+            SET state = CASE
+                 WHEN state = 'cancelling' THEN 'cancelled'
+                 WHEN type LIKE 'game-server.%' THEN 'failed'
+                 WHEN attempts < maxAttempts THEN 'queued'
+                 ELSE 'timed_out'
+                END,
+               assignedNodeId = NULL, leaseId = NULL, leaseExpiresAt = NULL,
+               claimSignature = NULL, lastError = 'Assigned node was declared lost.',
+               completedAt = CASE
+                 WHEN state = 'cancelling' OR type LIKE 'game-server.%'
+                   OR attempts >= maxAttempts THEN ?
+                 ELSE NULL
+                END,
+               updatedAt = ?
+          WHERE workspaceId = ?
+            AND (assignedNodeId = ?
+              OR (type LIKE 'game-server.%' AND targetNodeId = ?))
+            AND state IN ('queued','leased','cancelling')`,
+      )
+      .bind(now, now, input.workspaceId, input.nodeId, input.nodeId),
+    // The one clause that differs from revoke: `desiredState` is not written.
+    // The operator's intent survives the machine.
+    database
+      .prepare(
+        `UPDATE deployment
+            SET state = 'blocked', observedState = 'blocked',
+                recoveryStatus = 'blocked', recoveryReasonCode = 'node_lost',
+                recoveryGeneration = NULL, recoveryRevision = NULL,
+                desiredRevision = COALESCE(desiredRevision, 0) + 1,
+                lastError = 'This Compute Node was declared permanently lost. Transfer this deployment to a replacement node.',
+                updatedAt = ?
+          WHERE workspaceId = ? AND nodeId = ? AND deletedAt IS NULL
+            AND state NOT IN ('deleted')`,
+      )
+      .bind(now, input.workspaceId, input.nodeId),
+    database
+      .prepare(
+        `UPDATE app_deployment_action
+            SET state = 'failed', error = 'The assigned node was declared lost.',
+                completedAt = ?, updatedAt = ?
+          WHERE workspaceId = ? AND nodeId = ?
+            AND state IN ('queued','leased','cancelling')`,
+      )
+      .bind(now, now, input.workspaceId, input.nodeId),
+    database
+      .prepare(
+        `UPDATE game_server
+            SET status = 'node_revoked',
+                lastError = 'The assigned node was declared lost. The local process may still be running, but no further control-plane commands are accepted.',
+                updatedAt = ?
+          WHERE workspaceId = ? AND nodeId = ? AND deletedAt IS NULL`,
+      )
+      .bind(now, input.workspaceId, input.nodeId),
+    database
+      .prepare(
+        `UPDATE public_exposure
+            SET healthState = 'revoked',
+                status = CASE WHEN mode = 'private' THEN 'disabled' ELSE 'unavailable_zero_mode' END,
+                transport = 'none', transportState = 'revoked', tlsState = 'unavailable',
+                lastError = 'The target node was declared lost; routing is failed closed.',
+                updatedAt = ?
+          WHERE workspaceId = ? AND targetNodeId = ? AND deletedAt IS NULL`,
+      )
+      .bind(now, input.workspaceId, input.nodeId),
+  ]);
+
+  const tenant = await queryOne<{ organizationId: string | null }>(
+    'SELECT organizationId FROM workspace WHERE id = ?', input.workspaceId,
+  );
+  if (tenant?.organizationId) {
+    await recordEvidence({
+      organizationId: tenant.organizationId,
+      workspaceId: input.workspaceId,
+      actorType: 'user',
+      actorId: input.actor,
+      action: 'node.declare_lost',
+      resourceId: input.nodeId,
+      outcome: 'success',
+      metadata: { nodeId: input.nodeId, deployments: owned?.total ?? 0, reasonCode: 'node_lost' },
+    });
+  }
+  await writeLog({
+    workspaceId: input.workspaceId,
+    source: 'node',
+    level: 'WARN',
+    message: `Declared ${node.name} permanently lost`,
+    actor: input.actor,
+    resource: input.nodeId,
+  });
+  return { ok: true, declared: true, deployments: owned?.total ?? 0 };
+}
+
+/**
+ * Moves one deployment from a lost node to a replacement node.
+ *
+ * The decisive write is a single conditional statement, and the transfer is
+ * accepted only when that one statement reports exactly one changed row. That
+ * matters more than it looks: it means correctness does not rest on any claim
+ * about multi-statement atomicity. Two operators racing, a stale revision, a
+ * deployment that moved a moment ago -- each of them matches nothing and loses
+ * cleanly.
+ *
+ * What deliberately does not move: the source artifact row. It keeps its
+ * `nodeId`, its checksum and its state forever, because it is the immutable
+ * record that those bytes existed on the machine that is gone.
+ */
+export async function transferDeploymentOwnership(input: {
+  workspaceId: string;
+  deploymentId: string;
+  sourceNodeId: string;
+  replacementNodeId: string;
+  expectedDesiredRevision: number;
+  expectedArtifactId: string;
+  actor: string;
+}): Promise<
+  | { ok: true; desiredRevision: number; desiredState: string; artifactId: string }
+  | { ok: false; status: number; error: string }
+> {
+  if (
+    !/^dpl_[a-f0-9]{24}$/.test(input.deploymentId) ||
+    !/^node_[a-f0-9]{24}$/.test(input.sourceNodeId) ||
+    !/^node_[a-f0-9]{24}$/.test(input.replacementNodeId) ||
+    !/^art_[a-f0-9]{24}$/.test(input.expectedArtifactId) ||
+    !Number.isSafeInteger(input.expectedDesiredRevision) ||
+    input.expectedDesiredRevision < 1
+  ) {
+    return { ok: false, status: 400, error: 'Ownership transfer request is invalid.' };
+  }
+  if (input.sourceNodeId === input.replacementNodeId) {
+    return { ok: false, status: 400, error: 'A deployment cannot be transferred to the node it already has.' };
+  }
+
+  const guard = await queryOne<{
+    desiredState: string | null;
+    desiredRevision: number | null;
+    artifactState: string | null;
+    artifactChecksum: string | null;
+    artifactNodeId: string | null;
+    sourceRevokedAt: number | null;
+    replacementRevokedAt: number | null;
+    replacementDisabledAt: number | null;
+    replacementAgentVersion: string | null;
+    replacementCapabilities: string | null;
+  }>(
+    `SELECT d.desiredState AS desiredState, d.desiredRevision AS desiredRevision,
+            a.state AS artifactState, a.checksum AS artifactChecksum, a.nodeId AS artifactNodeId,
+            lost.revokedAt AS sourceRevokedAt,
+            fresh.revokedAt AS replacementRevokedAt,
+            fresh.assignmentsDisabledAt AS replacementDisabledAt,
+            fresh.agentVersion AS replacementAgentVersion,
+            fresh.capabilities AS replacementCapabilities
+       FROM deployment d
+       JOIN compute_node lost ON lost.id = d.nodeId AND lost.workspaceId = d.workspaceId
+       JOIN compute_node fresh ON fresh.id = ? AND fresh.workspaceId = d.workspaceId
+       LEFT JOIN app_artifact a ON a.id = d.currentArtifactId AND a.workspaceId = d.workspaceId
+        AND a.deletedAt IS NULL
+      WHERE d.workspaceId = ? AND d.id = ? AND d.nodeId = ? AND d.deletedAt IS NULL
+        AND d.currentArtifactId = ?`,
+    input.replacementNodeId,
+    input.workspaceId,
+    input.deploymentId,
+    input.sourceNodeId,
+    input.expectedArtifactId,
+  );
+  if (!guard) {
+    return { ok: false, status: 404, error: 'That deployment, source node, replacement node, or artifact does not match.' };
+  }
+  if (guard.sourceRevokedAt === null) {
+    return {
+      ok: false,
+      status: 409,
+      error: 'Declare the source Compute Node permanently lost before transferring its deployments.',
+    };
+  }
+  if (guard.replacementRevokedAt !== null || guard.replacementDisabledAt !== null) {
+    return { ok: false, status: 409, error: 'The replacement Compute Node is not accepting assignments.' };
+  }
+  if (
+    guard.artifactState !== 'verified' || !guard.artifactChecksum ||
+    guard.artifactNodeId !== input.sourceNodeId
+  ) {
+    return {
+      ok: false,
+      status: 409,
+      error: 'The current artifact is not a verified artifact of the source node.',
+    };
+  }
+  const capabilities = capabilitiesFromRow(guard.replacementCapabilities ?? '');
+  if (capabilities.artifactBackup?.replacementImport !== true) {
+    return {
+      ok: false,
+      status: 409,
+      error: 'Upgrade the replacement Compute Node to an Agent that supports replacement import.',
+    };
+  }
+
+  const now = Date.now();
+  const nextRevision = input.expectedDesiredRevision + 1;
+  // The whole transfer, in one statement. `localPort` is deliberately left
+  // alone: the row becomes `blocked`, which the partial unique index on
+  // (nodeId, localPort) excludes, so the old port travels as a preference and
+  // is settled by ordinary negotiation before this deployment is eligible to
+  // run again. `desiredState` and `currentArtifactId` are equally deliberately
+  // absent -- intent is preserved, and the source artifact stays current until
+  // real bytes exist here.
+  const moved = await execute(
+    `UPDATE deployment
+        SET nodeId = ?, desiredRevision = ?, state = 'blocked', observedState = 'blocked',
+            recoveryStatus = 'blocked', recoveryReasonCode = 'awaiting_import',
+            recoveryGeneration = NULL, recoveryRevision = NULL, jobId = NULL,
+            lastError = 'Waiting for an artifact backup import on the replacement Compute Node.',
+            updatedAt = ?
+      WHERE workspaceId = ? AND id = ? AND nodeId = ? AND desiredRevision = ?
+        AND currentArtifactId = ? AND deletedAt IS NULL`,
+    input.replacementNodeId, nextRevision, now,
+    input.workspaceId, input.deploymentId, input.sourceNodeId,
+    input.expectedDesiredRevision, input.expectedArtifactId,
+  );
+  if (!changed(moved)) {
+    return { ok: false, status: 409, error: 'This deployment changed while the transfer was being prepared.' };
+  }
+
+  const tenant = await queryOne<{ organizationId: string | null }>(
+    'SELECT organizationId FROM workspace WHERE id = ?', input.workspaceId,
+  );
+  if (tenant?.organizationId) {
+    await recordEvidence({
+      organizationId: tenant.organizationId,
+      workspaceId: input.workspaceId,
+      actorType: 'user',
+      actorId: input.actor,
+      action: 'deployment.ownership_transfer',
+      resourceId: input.deploymentId,
+      outcome: 'success',
+      metadata: {
+        sourceNodeId: input.sourceNodeId,
+        nodeId: input.replacementNodeId,
+        artifactId: input.expectedArtifactId,
+        desiredRevision: nextRevision,
+      },
+    });
+  }
+  return {
+    ok: true,
+    desiredRevision: nextRevision,
+    desiredState: guard.desiredState ?? 'running',
+    artifactId: input.expectedArtifactId,
+  };
+}
+
+/**
+ * Authorizes one replacement node to import one backup, and reserves the row
+ * the imported bytes will become.
+ *
+ * The node supplies which deployment it is asking about and nothing else that
+ * matters. It does not choose the artifact id -- the control plane allocates
+ * it. It does not choose the checksum -- that is read from the immutable source
+ * row, so a node cannot import bytes of its own choosing by naming their hash.
+ *
+ * Reservation is idempotent through the existing action/job idempotency key, so
+ * a node that retries after a crash gets the same provisional artifact back
+ * instead of leaving a trail of abandoned rows.
+ */
+export async function readArtifactImportPreflight(
+  context: AgentContext,
+  deploymentId: string,
+): Promise<
+  | {
+      ok: true;
+      workspaceId: string;
+      projectId: string;
+      deploymentId: string;
+      nodeId: string;
+      sourceArtifactId: string;
+      sourceNodeId: string;
+      replacementArtifactId: string;
+      checksum: string;
+      desiredRevision: number;
+      desiredState: string;
+      localPort: number;
+      contract: unknown;
+      created: boolean;
+    }
+  | { ok: false; status: number; error: string }
+> {
+  if (!/^dpl_[a-f0-9]{24}$/.test(deploymentId)) {
+    return { ok: false, status: 400, error: 'Import preflight request is invalid.' };
+  }
+  const row = await queryOne<{
+    projectId: string | null;
+    nodeId: string | null;
+    state: string | null;
+    desiredState: string | null;
+    desiredRevision: number | null;
+    recoveryReasonCode: string | null;
+    localPort: number | null;
+    healthPath: string | null;
+    environment: string | null;
+    sourceArtifactId: string | null;
+    sourceNodeId: string | null;
+    sourceState: string | null;
+    sourceChecksum: string | null;
+    sourceCommit: string | null;
+    sourceManifest: string | null;
+    sourceRevokedAt: number | null;
+  }>(
+    `SELECT d.projectId AS projectId, d.nodeId AS nodeId, d.state AS state,
+            d.desiredState AS desiredState, d.desiredRevision AS desiredRevision,
+            d.recoveryReasonCode AS recoveryReasonCode, d.localPort AS localPort,
+            d.healthPath AS healthPath, d.environment AS environment,
+            a.id AS sourceArtifactId, a.nodeId AS sourceNodeId, a.state AS sourceState,
+            a.checksum AS sourceChecksum, a.commitSha AS sourceCommit, a.manifest AS sourceManifest,
+            lost.revokedAt AS sourceRevokedAt
+       FROM deployment d
+       LEFT JOIN app_artifact a ON a.id = d.currentArtifactId AND a.workspaceId = d.workspaceId
+        AND a.deletedAt IS NULL
+       LEFT JOIN compute_node lost ON lost.id = a.nodeId AND lost.workspaceId = d.workspaceId
+      WHERE d.workspaceId = ? AND d.id = ? AND d.nodeId = ? AND d.deletedAt IS NULL`,
+    context.node.workspaceId, deploymentId, context.node.id,
+  );
+  // One refusal for "not yours" and "not there", matching the restore gate, so
+  // probing cannot tell a foreign deployment apart from an absent one.
+  if (!row || !row.projectId || row.nodeId !== context.node.id) {
+    return { ok: false, status: 404, error: 'Deployment not found for this node.' };
+  }
+  if (row.desiredRevision === null) {
+    return { ok: false, status: 409, error: 'This deployment is not awaiting a replacement import.' };
+  }
+  if (!row.sourceArtifactId || !row.sourceChecksum || row.sourceState !== 'verified' ||
+      !row.sourceNodeId) {
+    return { ok: false, status: 409, error: 'The source artifact is not a verified artifact.' };
+  }
+  if (row.sourceNodeId === context.node.id) {
+    return { ok: false, status: 409, error: 'This artifact already belongs to this node; use restore.' };
+  }
+  if (row.sourceRevokedAt === null) {
+    return { ok: false, status: 409, error: 'The source Compute Node is not revoked.' };
+  }
+
+  if (row.localPort === null) {
+    return { ok: false, status: 409, error: 'This deployment has no private port to import onto.' };
+  }
+
+  // Keyed on the transfer revision, so one authorized import reserves exactly
+  // one replacement artifact, one action and one job -- no matter how many
+  // times the node asks, and no matter how many ask at once.
+  const idempotencyKey = `import:${deploymentId}:${row.desiredRevision}`;
+  const projectId = row.projectId;
+  const sourceArtifactId = row.sourceArtifactId;
+  const sourceNodeId = row.sourceNodeId;
+  const sourceChecksum = row.sourceChecksum;
+  const sourceCommit = row.sourceCommit ?? '';
+  const desiredRevision = row.desiredRevision;
+  // Provenance rides in the manifest the artifact row already carries. Nothing
+  // in the runtime path reads it back, so it needs no column of its own -- it
+  // exists so a person can answer "where did these bytes come from" years later.
+  const provenanceManifest = (contract: unknown): string => stableJson({
+    contract: (safeJsonRecord(row.sourceManifest) as { contract?: unknown } | null)?.contract ?? contract,
+    source: {
+      kind: 'backup-import',
+      sourceArtifactId,
+      sourceNodeId,
+      checksum: sourceChecksum,
+      transferRevision: desiredRevision,
+    },
+  });
+  const settled = {
+    workspaceId: context.node.workspaceId,
+    projectId: row.projectId,
+    deploymentId,
+    nodeId: context.node.id,
+    sourceArtifactId: row.sourceArtifactId,
+    sourceNodeId: row.sourceNodeId,
+    checksum: row.sourceChecksum,
+    desiredRevision: row.desiredRevision,
+    desiredState: row.desiredState ?? 'running',
+  };
+
+  // The job is the authority on whether this import was already reserved, and
+  // it is reserved first, so it is the row that certainly exists if anything
+  // does. A crash between reserving the job and writing the two rows that
+  // describe it would otherwise leave this deployment permanently unable to
+  // recover: the key is taken, so no new job can be made, and the artifact the
+  // node is told to import has no row to become. So a retry repairs what is
+  // missing from the payload that is already there, rather than starting over.
+  const reserveArtifactId = createId('art');
+  const reserveActionId = createId('dact');
+
+  async function adoptExistingReservation(jobId: string, payload: string): Promise<
+    | { ok: true; artifactId: string; contract: unknown }
+    | { ok: false; status: number; error: string }
+  > {
+    let claim: AppRuntimeJobPayload | null = null;
+    try {
+      const parsed = validateAppRuntimeJobPayload(JSON.parse(payload));
+      if (parsed.ok) claim = parsed.payload;
+    } catch {
+      // A payload that no longer parses is never replayed as authorization.
+    }
+    // The reservation has to still describe the import this deployment is
+    // actually waiting for. Anything else is a conflict, not something to fix.
+    if (
+      !claim || claim.operation !== 'import' || !claim.artifactId ||
+      claim.deploymentId !== deploymentId || claim.projectId !== projectId ||
+      claim.targetArtifactId !== sourceArtifactId ||
+      claim.expectedDesiredRevision !== desiredRevision
+    ) {
+      return { ok: false, status: 409, error: 'A conflicting import is already reserved for this deployment.' };
+    }
+    const artifactId = claim.artifactId;
+    const artifact = await queryOne<{ nodeId: string; deploymentId: string; state: string }>(
+      `SELECT nodeId, deploymentId, state FROM app_artifact
+        WHERE workspaceId = ? AND id = ? AND deletedAt IS NULL`,
+      context.node.workspaceId, artifactId,
+    );
+    if (artifact && (artifact.nodeId !== context.node.id || artifact.deploymentId !== deploymentId)) {
+      return { ok: false, status: 409, error: 'The reserved artifact belongs to another node or deployment.' };
+    }
+    const action = await queryOne<{ id: string }>(
+      `SELECT id FROM app_deployment_action WHERE workspaceId = ? AND jobId = ?`,
+      context.node.workspaceId, jobId,
+    );
+    const now = Date.now();
+    const repairs = [];
+    const database = await db();
+    if (!artifact) {
+      const version = await queryOne<{ version: number }>(
+        `SELECT COALESCE(MAX(version), 0) + 1 AS version FROM app_artifact
+          WHERE workspaceId = ? AND projectId = ? AND nodeId = ?`,
+        context.node.workspaceId, projectId, context.node.id,
+      );
+      repairs.push(database.prepare(
+        `INSERT INTO app_artifact
+          (id, workspaceId, deploymentId, projectId, nodeId, commitSha, version,
+           state, manifest, checksum, sizeBytes, createdAt, verifiedAt, activatedAt, deletedAt,
+           availabilityState, lastVerifiedOnNodeAt)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'building', ?, NULL, 0, ?, NULL, NULL, NULL, 'unknown', NULL)`,
+      ).bind(artifactId, context.node.workspaceId, deploymentId, projectId, context.node.id,
+        sourceCommit, version?.version ?? 1, provenanceManifest(claim.contract), now));
+    }
+    if (!action) {
+      repairs.push(database.prepare(
+        `INSERT INTO app_deployment_action
+          (id, workspaceId, deploymentId, projectId, nodeId, jobId, kind, state,
+           idempotencyKey, requestedBy, error, createdAt, updatedAt, completedAt)
+         VALUES (?, ?, ?, ?, ?, ?, 'import', 'queued', ?, 'system:artifact-import', NULL, ?, ?, NULL)`,
+      ).bind(claim.actionId, context.node.workspaceId, deploymentId, projectId, context.node.id,
+        jobId, idempotencyKey, now, now));
+    }
+    repairs.push(database.prepare(
+      `UPDATE node_job
+          SET state = 'leased', assignedNodeId = ?, leaseExpiresAt = ?, updatedAt = ?
+        WHERE workspaceId = ? AND id = ? AND state = 'queued'`,
+    ).bind(context.node.id, now + appRuntimeLeaseDuration('import'), now,
+      context.node.workspaceId, jobId));
+    await database.batch(repairs);
+    return { ok: true, artifactId, contract: claim.contract };
+  }
+
+  const reserved = await queryOne<{ id: string; payload: string }>(
+    `SELECT id, payload FROM node_job
+      WHERE workspaceId = ? AND idempotencyKey = ? AND type = ?`,
+    context.node.workspaceId, `app:${idempotencyKey}`, APP_RUNTIME_JOB_TYPE,
+  );
+  if (reserved) {
+    const adopted = await adoptExistingReservation(reserved.id, reserved.payload);
+    if (!adopted.ok) return adopted;
+    return {
+      ok: true, ...settled, replacementArtifactId: adopted.artifactId,
+      localPort: row.localPort, contract: adopted.contract, created: false,
+    };
+  }
+
+  // The runtime shape comes from the last job that succeeded on the *lost*
+  // node, because that is the machine this deployment actually ran on. Nothing
+  // here invents a resource policy: if that history is gone, the import stops
+  // rather than guessing memory, disk, or an environment envelope.
+  const history = await query<{ payload: string }>(
+    `SELECT j.payload FROM node_job j
+       JOIN app_deployment_action a ON a.jobId = j.id AND a.workspaceId = j.workspaceId
+      WHERE a.workspaceId = ? AND a.deploymentId = ? AND a.nodeId = ?
+        AND j.type = ? AND j.state = 'succeeded'
+      ORDER BY j.completedAt DESC LIMIT 10`,
+    context.node.workspaceId, deploymentId, row.sourceNodeId, APP_RUNTIME_JOB_TYPE,
+  );
+  let prior: AppRuntimeJobPayload | null = null;
+  for (const item of history) {
+    try {
+      const candidate = validateAppRuntimeJobPayload(JSON.parse(item.payload));
+      if (candidate.ok && candidate.payload.contract &&
+          (candidate.payload.artifactId === row.sourceArtifactId ||
+           candidate.payload.targetArtifactId === row.sourceArtifactId)) {
+        prior = candidate.payload;
+        break;
+      }
+    } catch {
+      // Invalid historical payloads are never replayed.
+    }
+  }
+  if (!prior || !prior.contract) {
+    return {
+      ok: false,
+      status: 409,
+      error: 'The runtime contract for this artifact is no longer on record, so it cannot be imported.',
+    };
+  }
+
+  const now = Date.now();
+  const replacementArtifactId = reserveArtifactId;
+  const actionId = reserveActionId;
+  // Queue first. If another request won the race, `created` is false and no
+  // artifact row is written at all, so a lost race leaves nothing behind.
+  const queued = await enqueueJob({
+    workspaceId: context.node.workspaceId,
+    actor: 'system:artifact-import',
+    type: APP_RUNTIME_JOB_TYPE,
+    payload: {
+      operation: 'import', deploymentId, projectId: row.projectId, actionId,
+      artifactId: replacementArtifactId, targetArtifactId: row.sourceArtifactId,
+      source: null, contract: prior.contract,
+      environment: row.environment ?? prior.environment,
+      environmentCiphertext: await sealNodeEnvironment(context.token, await scopedEnvironment({
+        workspaceId: context.node.workspaceId,
+        projectId: row.projectId,
+        deploymentId,
+        environment: (row.environment ?? prior.environment) as AppEnvironment,
+        names: prior.contract.envNames,
+      })),
+      port: row.localPort, healthPath: row.healthPath ?? prior.healthPath,
+      memoryMb: prior.memoryMb, diskQuotaBytes: prior.diskQuotaBytes,
+      retainArtifacts: APP_RUNTIME_LIMITS.maximumArtifactsPerProject,
+      expectedDesiredRevision: row.desiredRevision,
+      protectedArtifactIds: [],
+    },
+    targetNodeId: context.node.id,
+    idempotencyKey: `app:${idempotencyKey}`,
+  });
+  if (!queued.ok) {
+    return { ok: false, status: queued.status, error: queued.error };
+  }
+  if (!queued.created) {
+    // Someone reserved it between the lookup above and here. Same repair path:
+    // adopt their artifact, never allocate a second one.
+    const raced = await queryOne<{ payload: string }>(
+      `SELECT payload FROM node_job WHERE workspaceId = ? AND id = ?`,
+      context.node.workspaceId, queued.job.id,
+    );
+    if (!raced) {
+      return { ok: false, status: 409, error: 'Another import for this deployment is already reserved.' };
+    }
+    const adopted = await adoptExistingReservation(queued.job.id, raced.payload);
+    if (!adopted.ok) return adopted;
+    return {
+      ok: true, ...settled, replacementArtifactId: adopted.artifactId,
+      localPort: row.localPort, contract: adopted.contract, created: false,
+    };
+  }
+
+  const next = await queryOne<{ version: number }>(
+    `SELECT COALESCE(MAX(version), 0) + 1 AS version FROM app_artifact
+      WHERE workspaceId = ? AND projectId = ? AND nodeId = ?`,
+    context.node.workspaceId, row.projectId, context.node.id,
+  );
+  const manifest = provenanceManifest(prior.contract);
+  const database = await db();
+  await database.batch([
+    database.prepare(
+      `INSERT INTO app_artifact
+        (id, workspaceId, deploymentId, projectId, nodeId, commitSha, version,
+         state, manifest, checksum, sizeBytes, createdAt, verifiedAt, activatedAt, deletedAt,
+         availabilityState, lastVerifiedOnNodeAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'building', ?, NULL, 0, ?, NULL, NULL, NULL, 'unknown', NULL)`,
+    ).bind(replacementArtifactId, context.node.workspaceId, deploymentId, row.projectId,
+      context.node.id, row.sourceCommit ?? '', next?.version ?? 1, manifest, now),
+    database.prepare(
+      `INSERT INTO app_deployment_action
+        (id, workspaceId, deploymentId, projectId, nodeId, jobId, kind, state,
+         idempotencyKey, requestedBy, error, createdAt, updatedAt, completedAt)
+       VALUES (?, ?, ?, ?, ?, ?, 'import', 'queued', ?, 'system:artifact-import', NULL, ?, ?, NULL)`,
+    ).bind(actionId, context.node.workspaceId, deploymentId, row.projectId, context.node.id,
+      queued.job.id, idempotencyKey, now, now),
+    // Held, not offered. No claim signature is written because this work is
+    // never handed to an Agent poller -- the operator's CLI is doing it.
+    database.prepare(
+      `UPDATE node_job
+          SET state = 'leased', assignedNodeId = ?, leaseExpiresAt = ?, updatedAt = ?
+        WHERE workspaceId = ? AND id = ? AND state = 'queued'`,
+    ).bind(context.node.id, now + appRuntimeLeaseDuration('import'), now,
+      context.node.workspaceId, queued.job.id),
+  ]);
+  return {
+    ok: true, ...settled, replacementArtifactId,
+    localPort: row.localPort, contract: prior.contract, created: true,
+  };
+}
+
+/**
+ * Records that a replacement node has the imported bytes.
+ *
+ * Every fact is re-read here rather than believed from the request: which node
+ * owns the deployment, which artifact is current, what the source checksum is,
+ * and what revision the transfer settled on. The node's report is checked
+ * against those, never the other way round.
+ *
+ * The deployment stays blocked afterwards. Bytes existing is not the same as a
+ * port being agreed, and Phase 18 must not be handed a deployment whose port
+ * could still move underneath it.
+ */
+export async function confirmArtifactImport(
+  context: AgentContext,
+  deploymentId: string,
+  body: {
+    artifactId?: unknown;
+    sourceArtifactId?: unknown;
+    checksum?: unknown;
+    sizeBytes?: unknown;
+    expectedDesiredRevision?: unknown;
+  },
+): Promise<
+  | { ok: true; artifactId: string; state: 'verified'; replayed: boolean }
+  | { ok: false; status: number; error: string }
+> {
+  const artifactId = typeof body.artifactId === 'string' ? body.artifactId : '';
+  const sourceArtifactId = typeof body.sourceArtifactId === 'string' ? body.sourceArtifactId : '';
+  const checksum = typeof body.checksum === 'string' ? body.checksum : '';
+  const sizeBytes = typeof body.sizeBytes === 'number' && Number.isSafeInteger(body.sizeBytes) &&
+    body.sizeBytes >= 0 ? body.sizeBytes : -1;
+  const expectedDesiredRevision = typeof body.expectedDesiredRevision === 'number' &&
+    Number.isSafeInteger(body.expectedDesiredRevision) && body.expectedDesiredRevision >= 1
+    ? body.expectedDesiredRevision : -1;
+  if (
+    !/^dpl_[a-f0-9]{24}$/.test(deploymentId) ||
+    !/^art_[a-f0-9]{24}$/.test(artifactId) ||
+    !/^art_[a-f0-9]{24}$/.test(sourceArtifactId) ||
+    !/^sha256:[a-f0-9]{64}$/.test(checksum) ||
+    sizeBytes < 0 || expectedDesiredRevision < 0 || artifactId === sourceArtifactId
+  ) {
+    return { ok: false, status: 400, error: 'Import confirmation is invalid.' };
+  }
+
+  const row = await queryOne<{
+    projectId: string | null;
+    nodeId: string | null;
+    currentArtifactId: string | null;
+    desiredRevision: number | null;
+    recoveryReasonCode: string | null;
+    replacementState: string | null;
+    replacementNodeId: string | null;
+    replacementChecksum: string | null;
+    replacementAvailability: string | null;
+    sourceState: string | null;
+    sourceChecksum: string | null;
+    sourceNodeId: string | null;
+    sourceRevokedAt: number | null;
+  }>(
+    `SELECT d.projectId AS projectId, d.nodeId AS nodeId,
+            d.currentArtifactId AS currentArtifactId, d.desiredRevision AS desiredRevision,
+            d.recoveryReasonCode AS recoveryReasonCode,
+            replacement.state AS replacementState, replacement.nodeId AS replacementNodeId,
+            replacement.checksum AS replacementChecksum,
+            replacement.availabilityState AS replacementAvailability,
+            source.state AS sourceState, source.checksum AS sourceChecksum,
+            source.nodeId AS sourceNodeId, lost.revokedAt AS sourceRevokedAt
+       FROM deployment d
+       LEFT JOIN app_artifact replacement ON replacement.id = ? AND replacement.workspaceId = d.workspaceId
+        AND replacement.deploymentId = d.id AND replacement.deletedAt IS NULL
+       LEFT JOIN app_artifact source ON source.id = ? AND source.workspaceId = d.workspaceId
+        AND source.deploymentId = d.id AND source.deletedAt IS NULL
+       LEFT JOIN compute_node lost ON lost.id = source.nodeId AND lost.workspaceId = d.workspaceId
+      WHERE d.workspaceId = ? AND d.id = ? AND d.nodeId = ? AND d.deletedAt IS NULL`,
+    artifactId, sourceArtifactId, context.node.workspaceId, deploymentId, context.node.id,
+  );
+  if (!row || !row.projectId || row.nodeId !== context.node.id) {
+    return { ok: false, status: 404, error: 'Deployment not found for this node.' };
+  }
+  if (row.desiredRevision !== expectedDesiredRevision) {
+    return { ok: false, status: 409, error: 'This deployment moved on; the import is stale.' };
+  }
+  if (!row.sourceChecksum || row.sourceState !== 'verified' || row.sourceRevokedAt === null ||
+      row.sourceNodeId === context.node.id) {
+    return { ok: false, status: 409, error: 'The source artifact is not an artifact of a lost node.' };
+  }
+  if (row.replacementNodeId !== context.node.id) {
+    return { ok: false, status: 409, error: 'That replacement artifact does not belong to this node.' };
+  }
+  // The authorized checksum is the source row's, never the request's.
+  if (!constantTimeEqual(checksum, row.sourceChecksum)) {
+    return { ok: false, status: 409, error: 'The imported checksum does not match the source artifact.' };
+  }
+
+
+  /**
+   * Moves the public exposure onto the node that now holds the bytes.
+   *
+   * Both target columns move in one statement because they are one fact: the
+   * 0011 trigger requires the exposure's node to be the deployment's node *and*
+   * the artifact to live on that node, so a half-move -- N2 with A1, or N1 with
+   * A2 -- is rejected, correctly. Doing it during the ownership transfer would
+   * have been exactly that half-move, which is why it happens here instead,
+   * after the artifact exists and while the deployment is still blocked.
+   *
+   * It does not re-open anything. `declareNodeLost` failed the exposure closed,
+   * and nothing durable records what mode it was serving before the machine was
+   * lost, so guessing would be inventing a routing decision the operator never
+   * made. The exposure stays disabled until a person looks at the recovered
+   * application and turns it back on.
+   *
+   * Safe to repeat: an exposure already pointing at this node and artifact
+   * matches nothing and is left alone.
+   */
+  async function retargetRecoveredExposure(): Promise<boolean> {
+    const stale = await query<{ id: string }>(
+      `SELECT id FROM public_exposure
+        WHERE workspaceId = ? AND deploymentId = ? AND deletedAt IS NULL
+          AND (targetNodeId IS NOT ? OR targetArtifactId IS NOT ?)`,
+      context.node.workspaceId, deploymentId, context.node.id, artifactId,
+    );
+    if (stale.length === 0) return false;
+    const moved = await execute(
+      `UPDATE public_exposure
+          SET targetNodeId = ?, targetArtifactId = ?, updatedAt = ?
+        WHERE workspaceId = ? AND deploymentId = ? AND deletedAt IS NULL
+          AND EXISTS (
+            SELECT 1 FROM deployment d
+             WHERE d.id = ? AND d.workspaceId = public_exposure.workspaceId
+               AND d.nodeId = ? AND d.currentArtifactId = ? AND d.desiredRevision = ?
+               AND d.deletedAt IS NULL)
+          AND EXISTS (
+            SELECT 1 FROM app_artifact a
+             WHERE a.id = ? AND a.workspaceId = public_exposure.workspaceId
+               AND a.deploymentId = public_exposure.deploymentId AND a.nodeId = ?
+               AND a.state = 'verified' AND a.availabilityState = 'present'
+               AND a.deletedAt IS NULL)`,
+      context.node.id, artifactId, Date.now(),
+      context.node.workspaceId, deploymentId,
+      deploymentId, context.node.id, artifactId, expectedDesiredRevision,
+      artifactId, context.node.id,
+    );
+    return changed(moved);
+  }
+
+  const now = Date.now();
+  // A replay arrives with everything already true. Recognising it is not a
+  // convenience: an agent that installed the bytes and then lost the response
+  // has to be able to say so again without being told it is wrong.
+  if (row.replacementState === 'verified' && row.currentArtifactId === artifactId) {
+    if (!row.replacementChecksum || !constantTimeEqual(row.replacementChecksum, row.sourceChecksum)) {
+      return { ok: false, status: 409, error: 'A different artifact is already recorded under that id.' };
+    }
+    if (row.replacementNodeId !== context.node.id) {
+      return { ok: false, status: 409, error: 'That replacement artifact does not belong to this node.' };
+    }
+    // The durable record of the import itself, which no later runtime attempt
+    // rewrites. Without it this path would let an artifact that never completed
+    // an import claim to be a replay of one.
+    const completed = await queryOne<{ ok: number }>(
+      `SELECT 1 AS ok FROM app_deployment_action a
+         JOIN node_job j ON j.id = a.jobId AND j.workspaceId = a.workspaceId
+        WHERE a.workspaceId = ? AND a.deploymentId = ? AND a.nodeId = ? AND a.kind = 'import'
+          AND a.state = 'succeeded' AND j.state = 'succeeded'`,
+      context.node.workspaceId, deploymentId, context.node.id,
+    );
+    if (!completed) {
+      return { ok: false, status: 409, error: 'No completed import is recorded for this deployment.' };
+    }
+    // Finish what a dead request may have left half done, then report the
+    // replay honestly. Availability is read, never written, here.
+    await retargetRecoveredExposure();
+    return { ok: true, artifactId, state: 'verified', replayed: true };
+  }
+  if (row.replacementState !== 'building') {
+    return { ok: false, status: 409, error: 'That replacement artifact is not awaiting import.' };
+  }
+  if (row.currentArtifactId !== sourceArtifactId) {
+    return { ok: false, status: 409, error: 'This deployment is not awaiting this import.' };
+  }
+
+  const verified = await execute(
+    `UPDATE app_artifact
+        SET state = 'verified', checksum = ?, sizeBytes = ?, verifiedAt = ?,
+            availabilityState = 'present', lastVerifiedOnNodeAt = ?
+      WHERE workspaceId = ? AND id = ? AND deploymentId = ? AND nodeId = ?
+        AND state = 'building' AND deletedAt IS NULL`,
+    row.sourceChecksum, sizeBytes, now, now,
+    context.node.workspaceId, artifactId, deploymentId, context.node.id,
+  );
+  if (!changed(verified)) {
+    return { ok: false, status: 409, error: 'That replacement artifact is not awaiting import.' };
+  }
+  // Only now does the deployment point at the imported copy -- and it stays
+  // blocked, because the port has not been agreed yet.
+  const flipped = await execute(
+    `UPDATE deployment
+        SET currentArtifactId = ?, updatedAt = ?
+      WHERE workspaceId = ? AND id = ? AND nodeId = ? AND deletedAt IS NULL
+        AND desiredRevision = ? AND currentArtifactId = ?`,
+    artifactId, now, context.node.workspaceId, deploymentId, context.node.id,
+    expectedDesiredRevision, sourceArtifactId,
+  );
+  if (!changed(flipped)) {
+    return { ok: false, status: 409, error: 'This deployment changed while the import was being recorded.' };
+  }
+
+  await retargetRecoveredExposure();
+
+  // Only now, with the bytes verified and current, does the reservation become
+  // a succeeded record. Marking it earlier would claim an import that had not
+  // happened; leaving it held would strand recovery, because Phase 18 rebuilds
+  // a deployment's runtime shape from the succeeded history on its own node.
+  const database = await db();
+  await database.batch([
+    database.prepare(
+      `UPDATE node_job
+          SET state = 'succeeded', leaseExpiresAt = NULL, completedAt = ?, updatedAt = ?
+        WHERE workspaceId = ? AND id = (
+          SELECT jobId FROM app_deployment_action
+           WHERE workspaceId = ? AND deploymentId = ? AND nodeId = ? AND kind = 'import'
+           ORDER BY createdAt DESC LIMIT 1)
+          AND state = 'leased'`,
+    ).bind(now, now, context.node.workspaceId, context.node.workspaceId, deploymentId,
+      context.node.id),
+    database.prepare(
+      `UPDATE app_deployment_action
+          SET state = 'succeeded', completedAt = ?, updatedAt = ?
+        WHERE workspaceId = ? AND deploymentId = ? AND nodeId = ? AND kind = 'import'
+          AND state = 'queued'`,
+    ).bind(now, now, context.node.workspaceId, deploymentId, context.node.id),
+  ]);
+
+  const tenant = await queryOne<{ organizationId: string | null }>(
+    'SELECT organizationId FROM workspace WHERE id = ?', context.node.workspaceId,
+  );
+  if (tenant?.organizationId) {
+    await recordEvidence({
+      organizationId: tenant.organizationId,
+      workspaceId: context.node.workspaceId,
+      actorType: 'system',
+      actorId: 'system:artifact-import',
+      action: 'deployment.artifact_import',
+      resourceId: deploymentId,
+      outcome: 'success',
+      metadata: {
+        artifactId,
+        sourceArtifactId,
+        sourceNodeId: row.sourceNodeId ?? '',
+        nodeId: context.node.id,
+        desiredRevision: expectedDesiredRevision,
+      },
+    });
+  }
+  return { ok: true, artifactId, state: 'verified', replayed: false };
+}
+
+/**
+ * Retires the `awaiting_import` block once, and only once, everything it stands
+ * for is actually true.
+ *
+ * This starts nothing. It removes the reason Phase 18 was refusing to look at
+ * this deployment, and leaves the rest to ordinary reconciliation -- which is
+ * the whole point: the operator never issues a Start.
+ */
+export async function clearReplacementImportBlock(
+  context: AgentContext,
+  deploymentId: string,
+): Promise<
+  | { ok: true; cleared: boolean; desiredState: string; localPort: number }
+  | { ok: false; status: number; error: string }
+> {
+  if (!/^dpl_[a-f0-9]{24}$/.test(deploymentId)) {
+    return { ok: false, status: 400, error: 'Import completion request is invalid.' };
+  }
+  const row = await queryOne<{
+    desiredState: string | null;
+    localPort: number | null;
+    recoveryStatus: string | null;
+    recoveryReasonCode: string | null;
+    artifactState: string | null;
+    artifactNodeId: string | null;
+    availabilityState: string | null;
+  }>(
+    `SELECT d.desiredState AS desiredState, d.localPort AS localPort,
+            d.recoveryStatus AS recoveryStatus, d.recoveryReasonCode AS recoveryReasonCode,
+            a.state AS artifactState, a.nodeId AS artifactNodeId,
+            a.availabilityState AS availabilityState
+       FROM deployment d
+       LEFT JOIN app_artifact a ON a.id = d.currentArtifactId AND a.workspaceId = d.workspaceId
+        AND a.deletedAt IS NULL
+      WHERE d.workspaceId = ? AND d.id = ? AND d.nodeId = ? AND d.deletedAt IS NULL`,
+    context.node.workspaceId, deploymentId, context.node.id,
+  );
+  if (!row) return { ok: false, status: 404, error: 'Deployment not found for this node.' };
+  if (row.recoveryStatus === null) {
+    return { ok: true, cleared: false, desiredState: row.desiredState ?? 'running', localPort: row.localPort ?? 0 };
+  }
+  if (row.artifactState !== 'verified' || row.artifactNodeId !== context.node.id ||
+      row.availabilityState !== 'present' || row.localPort === null) {
+    return { ok: false, status: 409, error: 'The imported artifact and private port are not settled yet.' };
+  }
+  const cleared = await execute(
+    `UPDATE deployment
+        SET state = 'stopped', observedState = 'stopped', recoveryStatus = NULL,
+            recoveryReasonCode = NULL, recoveryGeneration = NULL, lastError = NULL,
+            updatedAt = ?
+      WHERE workspaceId = ? AND id = ? AND nodeId = ? AND deletedAt IS NULL
+        AND recoveryStatus IS NOT NULL`,
+    Date.now(), context.node.workspaceId, deploymentId, context.node.id,
+  );
+  return {
+    ok: true,
+    cleared: changed(cleared),
+    desiredState: row.desiredState ?? 'running',
+    localPort: row.localPort,
+  };
+}
+
+
+/**
+ * Everything the replacement-recovery screen needs, read once.
+ *
+ * "Lost" is not a status a node carries -- `revokedAt` is set by ordinary
+ * revocation too, and conflating them would tell an operator their revoked node
+ * is unrecoverable when it is merely revoked. The narrowest truthful evidence
+ * already in the database is a deployment still reporting `node_lost`, so that
+ * is what this reads, and nothing else claims it.
+ */
+export async function readReplacementRecoveryState(
+  workspaceId: string,
+  allowedProjectIds: readonly string[] | null,
+): Promise<{
+  lostNodeIds: string[];
+  deployments: {
+    id: string;
+    name: string;
+    nodeId: string | null;
+    nodeName: string | null;
+    desiredState: 'running' | 'stopped';
+    recoveryReasonCode: string | null;
+    observedState: string | null;
+    health: string | null;
+    desiredRevision: number;
+    currentArtifactId: string | null;
+    artifactChecksum: string | null;
+    localPort: number | null;
+  }[];
+  candidates: {
+    id: string;
+    name: string;
+    agentVersion: string;
+    status: 'online' | 'stale' | 'offline' | 'revoked';
+    assignmentsDisabled: boolean;
+    replacementImport: boolean;
+  }[];
+}> {
+  const rows = await query<{
+    id: string;
+    repository: string;
+    nodeId: string | null;
+    nodeName: string | null;
+    desiredState: string | null;
+    recoveryReasonCode: string | null;
+    observedState: string | null;
+    state: string | null;
+    desiredRevision: number | null;
+    currentArtifactId: string | null;
+    artifactChecksum: string | null;
+    localPort: number | null;
+    projectId: string | null;
+  }>(
+    `SELECT d.id AS id, d.repository AS repository, d.nodeId AS nodeId, n.name AS nodeName,
+            d.desiredState AS desiredState, d.recoveryReasonCode AS recoveryReasonCode,
+            d.observedState AS observedState, d.state AS state,
+            d.desiredRevision AS desiredRevision, d.currentArtifactId AS currentArtifactId,
+            a.checksum AS artifactChecksum, d.localPort AS localPort, d.projectId AS projectId
+       FROM deployment d
+       LEFT JOIN compute_node n ON n.id = d.nodeId AND n.workspaceId = d.workspaceId
+       LEFT JOIN app_artifact a ON a.id = d.currentArtifactId AND a.workspaceId = d.workspaceId
+      WHERE d.workspaceId = ? AND d.deletedAt IS NULL
+        AND d.recoveryReasonCode IN ('node_lost','awaiting_import')
+      ORDER BY d.updatedAt DESC LIMIT 25`,
+    workspaceId,
+  );
+  const visible = rows.filter((row) =>
+    allowedProjectIds === null || (row.projectId !== null && allowedProjectIds.includes(row.projectId)));
+
+  const nodes = await query<{
+    id: string; name: string; agentVersion: string; capabilities: string;
+    revokedAt: number | null; lastHeartbeatAt: number | null; assignmentsDisabledAt: number | null;
+  }>(
+    `SELECT id, name, agentVersion, capabilities, revokedAt, lastHeartbeatAt, assignmentsDisabledAt
+       FROM compute_node WHERE workspaceId = ? ORDER BY createdAt DESC LIMIT 100`,
+    workspaceId,
+  );
+  const now = Date.now();
+  return {
+    // Only a deployment that still says `node_lost` proves a declared loss.
+    lostNodeIds: [...new Set(
+      visible.filter((row) => row.recoveryReasonCode === 'node_lost' && row.nodeId)
+        .map((row) => row.nodeId!),
+    )],
+    deployments: visible.map((row) => ({
+      id: row.id,
+      name: row.repository,
+      nodeId: row.nodeId,
+      nodeName: row.nodeName,
+      desiredState: row.desiredState === 'stopped' ? 'stopped' as const : 'running' as const,
+      recoveryReasonCode: row.recoveryReasonCode,
+      observedState: row.observedState,
+      health: row.state === 'healthy' ? 'healthy' : null,
+      desiredRevision: row.desiredRevision ?? 1,
+      currentArtifactId: row.currentArtifactId,
+      artifactChecksum: row.artifactChecksum,
+      localPort: row.localPort,
+    })),
+    candidates: nodes.map((node) => ({
+      id: node.id,
+      name: node.name,
+      agentVersion: node.agentVersion,
+      status: deriveNodeStatus({
+        revokedAt: node.revokedAt, lastHeartbeatAt: node.lastHeartbeatAt, now,
+      }),
+      assignmentsDisabled: node.assignmentsDisabledAt !== null,
+      replacementImport:
+        capabilitiesFromRow(node.capabilities).artifactBackup?.replacementImport === true,
+    })),
   };
 }

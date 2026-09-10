@@ -39,7 +39,7 @@ import { count, db, execute, query, queryOne } from './db';
 import { runtimeEnv } from './env';
 import { inspectRepositoryForDeploy } from './github';
 import { writeLog } from './logs';
-import { enqueueJob, type WorkflowJobContext } from './nodes';
+import { enqueueJob, scopedEnvironment, type WorkflowJobContext } from './nodes';
 import { recordAppRuntimeSecurityEvent } from './app-runtime-control';
 import { assertResourceCapacity } from './organization-limits';
 import {
@@ -201,30 +201,6 @@ async function deploymentNode(workspaceId: string, nodeId: string): Promise<
   } catch {
     return { ok: false, status: 503, error: 'The node credential could not be opened.' };
   }
-}
-
-async function scopedEnvironment(input: {
-  workspaceId: string;
-  projectId: string;
-  deploymentId: string;
-  environment: AppEnvironment;
-  names: string[];
-}): Promise<Record<string, string>> {
-  if (input.names.length === 0) return {};
-  const rows = await query<{ name: string; scope: string; ciphertext: string }>(
-    `SELECT name, scope, ciphertext FROM secret
-     WHERE workspaceId = ? AND environment IN (?, 'All')`,
-    input.workspaceId,
-    input.environment,
-  );
-  const allowed = new Set(input.names);
-  const scopes = new Set(['Workspace', `Project:${input.projectId}`, `Deployment:${input.deploymentId}`]);
-  const values: Record<string, string> = {};
-  for (const row of rows) {
-    if (!allowed.has(row.name) || !scopes.has(row.scope)) continue;
-    values[row.name] = await decryptSecret(row.ciphertext, credentialKey());
-  }
-  return values;
 }
 
 async function nextPort(nodeId: string): Promise<number | null> {

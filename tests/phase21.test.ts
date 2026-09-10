@@ -645,9 +645,9 @@ void test('Phase 21 adds no migration and claims no authenticity it cannot prove
   const migrations = await readdir(path.join(repoRoot, 'db', 'migrations'));
   assert.equal(migrations.at(-1), '0020_runtime_recovery.sql');
   assert.equal(migrations.some((name) => name.startsWith('0021')), false);
-  assert.equal(CURRENT_AGENT_VERSION, '0.8.0');
+  assert.equal(CURRENT_AGENT_VERSION, '0.9.0');
   assert.equal(NODE_PROTOCOL_VERSION, 1);
-  assert.equal(JSON.parse(await readFile(path.join(repoRoot, 'package.json'), 'utf8')).version, '0.21.0');
+  assert.equal(JSON.parse(await readFile(path.join(repoRoot, 'package.json'), 'utf8')).version, '0.22.0');
 
   // Offline verification proves integrity, not provenance. Anything stronger
   // would be a claim about who wrote the bytes, which nothing here can support.

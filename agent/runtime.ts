@@ -84,7 +84,10 @@ export async function collectCapabilities(
     gameServers,
     appRuntime,
     ...(autostart ? { autostart } : {}),
-    artifactBackup: { version: 1, supported: true, offlineVerify: true, sameNodeRestore: true },
+    artifactBackup: {
+      version: 1, supported: true, offlineVerify: true, sameNodeRestore: true,
+      replacementImport: true,
+    },
     contracts: {
       ai: ai.runtimes.some((runtime) => runtime.available),
       gameServers: gameServers.minecraftJavaAvailable,
