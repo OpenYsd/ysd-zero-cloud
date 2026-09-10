@@ -1,7 +1,7 @@
 # YSD Zero Cloud
 
 YSD Zero Cloud is a zero-cost-first cloud operating system. The source tree and Production
-baseline are `0.21.0`, with Compute Node Agent `0.8.0` and Protocol `1`. Production includes
+baseline are `0.22.0`, with Compute Node Agent `0.9.0` and Protocol `1`. Production includes
 authentication, persistence, security scanning, the cost guard, private-object storage policy,
 network inventory, an outbound-only user-owned compute control plane, a private Node.js App
 Runtime, local AI scheduling, private Minecraft Java server orchestration, organization
@@ -348,9 +348,46 @@ auto-start truthfully, but `0.6.0`'s own `autostart status`, `disable` and `unin
 a Phase 20 install. Use the `0.7.1` or newer bundle for managed operations after a restore, or
 upgrade back first. This is not full `0.6.0` CLI compatibility and is not claimed as such.
 
-`0.21.0`, Phase 21: **Portable Artifact Backup & Offline Verification**, is the current source
-and Production release, with Agent `0.8.0`. No migration: the latest is still
-`0020_runtime_recovery.sql`, because everything this phase records already had a column.
+`0.22.0`, Phase 22: **Replacement-Node Disaster Recovery**, is the current source and Production
+release, with Agent `0.9.0`. No migration: the latest is still `0020_runtime_recovery.sql`,
+because everything this phase records already had a column.
+
+A Compute Node can be destroyed, stolen, or simply never come back. Until Phase 22 that was
+terminal for everything on it: the credential could be revoked, but nothing could move the
+deployments, because `deployment.nodeId` is written once and every runtime query filters on it.
+
+An operator can now declare a node permanently lost, transfer one of its deployments to a
+replacement node, and bring the application back from a Phase 21 backup. The bytes are the same
+bytes -- no GitHub fetch, no package install, no build, and no Start command. Phase 18
+reconciliation starts it, which is the point: a person pressing Start is not recovery.
+
+**Declared loss is its own act, not a variation of revoke.** Revoke answers "I no longer trust
+this node" and is right to stop the work. Declared loss answers "this machine is gone", where the
+operator still wants the applications running -- somewhere else. So the credential dies exactly as
+revoke kills it, and the desired state is left standing. It is irreversible by construction: the
+ciphertext needed to accept that credential again is blanked, not hidden.
+
+**Ownership moves in one conditional statement**, accepted only when it changes exactly one row,
+so correctness never rests on a claim about multi-statement atomicity and an operator acting on a
+stale screen loses cleanly rather than moving the wrong deployment. The imported artifact is a new
+row; the source row keeps its node, checksum and state forever, because it is the immutable record
+that those bytes existed on the machine that is gone.
+
+**Two secrets are node-scoped and never travel.** The runtime manifest is rebuilt and re-signed
+with the replacement node's own token, as Phase 21 established. The environment envelope is
+resealed for that node from durable storage rather than copied -- Production proved that is not
+optional, because an envelope sealed to the lost node's token is one the replacement cannot open.
+
+**Public exposure follows the deployment and stays shut.** Nothing durable records which mode it
+was serving before the loss, so it is not guessed. Review the recovered application and re-enable
+exposure when you are ready.
+
+**What this does not claim** is that a process on the lost machine has stopped. The old credential
+is refused and the node receives no further instructions, but YSD cannot reach into a machine it no
+longer controls, and the product says so rather than implying otherwise.
+
+Agent `0.9.0` adds `artifact backup import`, deliberately distinct from same-node restore, which is
+unchanged.
 
 A deployed application already exists on its node as an immutable, checksummed artifact. Phase 21
 lets an operator copy one out to a file they hold, verify that file later with nothing running, and
@@ -447,12 +484,20 @@ the private range for Hyper-V and WSL and refuses `41000` outright, so the node 
 the control plane recorded it, and the runtime used it.
 
 **One honest note on dependencies.** `npm audit` reports four high findings, all reaching
-`sharp` (libheif) through `miniflare` and `wrangler` -- the local development toolchain. Phase 21
+`sharp` (libheif) through `miniflare` and `wrangler` -- the local development toolchain. Phase 22
 added no dependency, and none of that code is in the deployed Worker. It is not "audit clean", and
 the shipped Worker is not known to be vulnerable from those findings; they are recorded here rather
 than silenced with a forced, breaking toolchain upgrade inside a release.
 
-**Live:** <https://ysd-zero-cloud.ysd-zero-cloud.workers.dev> — running `0.21.0`, agent `0.8.0`,
+Production acceptance drove the whole path on two controlled Compute Nodes against the live
+control plane: a healthy deployment on the source node, a real `.ysdbak` taken and verified
+offline, the source node declared permanently lost, its credential refused live, ownership
+transferred, and the artifact imported on the replacement node under a new id with the same
+checksum. The exposure moved with it and stayed disabled. Recovery then brought the application
+back to Healthy on its own -- no Start, no GitHub, no npm, no build -- and a deployment set to
+stopped stayed stopped, with its port closed.
+
+**Live:** <https://ysd-zero-cloud.ysd-zero-cloud.workers.dev> — running `0.22.0`, agent `0.9.0`,
 Protocol `1`.
 
 This is a standalone project intended only for `OpenYsd/ysd-zero-cloud`. It has no dependency on,
